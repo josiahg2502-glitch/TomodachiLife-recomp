@@ -36,7 +36,8 @@
 typedef struct { char name[0x301]; int is_file; int64_t size; } HostEntry;
 typedef struct { uint32_t magic; int count, pos; HostEntry *entries; } HostDir;
 
-int fs_dir_roots(const char *guest, char roots[2][MAX_PATH], uint32_t *result);   /* nnfs.c: mount table + save data journal view */
+#define FS_ROOTS_MAX 34                                   /* nnfs.c: the mods, a working folder, the committed one */
+int fs_dir_roots(const char *guest, char roots[FS_ROOTS_MAX][MAX_PATH], uint32_t *result);   /* nnfs.c: mount table + mods + save data journal view */
 int fs_dir_hidden(const char *guest_dir, const char *name);
 uint32_t fs_delete_directory(const char *guest);
 /* nnfs.c: directories of guest file systems (nn::fs::fsa::Register, ARCropolis's "mods:" / "arc:"); their handles are
@@ -65,7 +66,7 @@ static int dir_host_path(const char *guest, char *out) {  /* superseded by fs_di
 static void fs_OpenDirectory(Ctx *c) {                    /* (DirectoryHandle *out, const char *path, int mode) -> Result */
     uint64_t out = A0;
     int mode = (int)A2;
-    char roots[2][MAX_PATH], pattern[MAX_PATH + 4];
+    char roots[FS_ROOTS_MAX][MAX_PATH], pattern[MAX_PATH + 4];
     uint32_t result = 0;
     if (out) wr64(out, 0);
     {   int handled = 0;
@@ -110,7 +111,7 @@ static void fs_OpenDirectory(Ctx *c) {                    /* (DirectoryHandle *o
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
-    if (nroots == 2) {                                       /* drop the entries the open mode does not ask for */
+    if (nroots >= 2) {                                       /* drop the entries the open mode does not ask for */
         int n = 0;
         for (int k = 0; k < d->count; k++) if (d->entries[k].is_file ? (mode & 2) : (mode & 1)) d->entries[n++] = d->entries[k];
         d->count = n;

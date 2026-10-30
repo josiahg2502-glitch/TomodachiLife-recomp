@@ -92,12 +92,69 @@ static void fs_lock(void) {
 }
 static void fs_unlock(void) { LeaveCriticalSection(&g_fs_lock); }
 
+/* MODS. Every folder in %TOMO_MODS% or ..\mods is one mod, in the layout made for emulators and Atmosphere (LayeredFS):
+ * its first "romfs" folder within 4 levels (mod\romfs, mod\atmosphere\contents\<title id>\romfs, ...) lies over the
+ * game's romfs; a file of a mod replaces the game's file of the same path. Mods are applied in name order: when two
+ * have the same file, the first by name wins. exefs patches cannot apply: the game's code is translated ahead of time. */
+#define MODS_MAX 32
+#define FS_ROOTS_MAX (MODS_MAX + 2)                  /* the mods, a working folder, the committed one; nnfsdir.c has the same */
+static char g_mods[MODS_MAX][MAX_PATH];
+static int g_mod_n;
+static int find_romfs(const char *dir, int depth, char *out) {
+    char pat[MAX_PATH + 4];
+    WIN32_FIND_DATAA fd;
+    snprintf(pat, sizeof pat, "%s\\*", dir);
+    HANDLE h = FindFirstFileA(pat, &fd);
+    int found = 0;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        snprintf(out, MAX_PATH, "%s\\%s", dir, fd.cFileName);
+        if (!_stricmp(fd.cFileName, "romfs")) found = 1;
+        else if (!_stricmp(fd.cFileName, "exefs")) printf("mods: %s: exefs patches are not supported (the game's code is translated ahead of time)\n", out);
+    } while (!found && FindNextFileA(h, &fd));
+    FindClose(h);
+    if (found || depth <= 1) return found;
+    if ((h = FindFirstFileA(pat, &fd)) == INVALID_HANDLE_VALUE) return 0;
+    do {
+        char sub[MAX_PATH];
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        snprintf(sub, sizeof sub, "%s\\%s", dir, fd.cFileName);
+        found = find_romfs(sub, depth - 1, out);
+    } while (!found && FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+static int name_cmp(const void *a, const void *b) { return _stricmp((const char *)a, (const char *)b); }
+static void mods_find(void) {
+    const char *env = getenv("TOMO_MODS");
+    char root[MAX_PATH], pat[MAX_PATH + 4], names[MODS_MAX][MAX_PATH];
+    int n = 0;
+    WIN32_FIND_DATAA fd;
+    snprintf(root, sizeof root, "%s", env && env[0] ? env : "..\\mods");
+    if (!env || !env[0]) CreateDirectoryA(root, NULL);      /* so a player finds where mods go */
+    snprintf(pat, sizeof pat, "%s\\*", root);
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.' && n < MODS_MAX) snprintf(names[n++], MAX_PATH, "%s", fd.cFileName);
+    while (FindNextFileA(h, &fd));
+    FindClose(h);
+    qsort(names, (size_t)n, MAX_PATH, name_cmp);
+    for (int i = 0; i < n; i++) {
+        char dir[MAX_PATH];
+        snprintf(dir, sizeof dir, "%s\\%s", root, names[i]);
+        if (find_romfs(dir, 4, g_mods[g_mod_n])) printf("mods: %s: %s\n", names[i], g_mods[g_mod_n++]);
+        else printf("mods: %s: no romfs folder in it, not used\n", names[i]);
+    }
+}
+
 static void fs_roots(void) {
     if (g_rom_root[0]) return;
     const char *env = getenv("SSBU_ROMFS"), *user = getenv("SSBU_USERDATA");
     strncpy(g_rom_root, env && env[0] ? env : "..\\romfs", MAX_PATH - 1);
     strncpy(g_user_root, user && user[0] ? user : "..\\userdata", MAX_PATH - 1);
     CreateDirectoryA(g_user_root, NULL);
+    mods_find();
 }
 const char *fs_user_root(void) { fs_roots(); return g_user_root; }
 
@@ -178,6 +235,8 @@ static int view_path(Mount *m, const char *rel, char *out) {
         join(out, m->work, rel);
         if (exists(out)) return 1;
     }
+    if (m->kind == MK_ROM)
+        for (int i = 0; i < g_mod_n; i++) { join(out, g_mods[i], rel); if (exists(out)) return 1; }
     join(out, m->root, rel);
     return exists(out);
 }
@@ -189,8 +248,8 @@ static int view_parent_is_dir(Mount *m, const char *rel) {
     *s = 0;
     return view_path(m, parent, host) && is_dir(host);
 }
-/* Used by nnfsdir.c: the host folders to list for a guest directory (working folder first), 0 = no such directory. */
-int fs_dir_roots(const char *guest, char roots[2][MAX_PATH], uint32_t *result) {
+/* Used by nnfsdir.c: the host folders to list for a guest directory (working folder or mods first), 0 = no such directory. */
+int fs_dir_roots(const char *guest, char roots[FS_ROOTS_MAX][MAX_PATH], uint32_t *result) {
     Mount *m; char rel[MAX_PATH], host[MAX_PATH];
     int n = 0;
     fs_lock();
@@ -199,6 +258,8 @@ int fs_dir_roots(const char *guest, char roots[2][MAX_PATH], uint32_t *result) {
         if (!view_path(m, rel, host) || !is_dir(host)) *result = RESULT_PATH_NOT_FOUND;
         else {
             if (m->work[0]) { join(roots[n], m->work, rel); if (is_dir(roots[n])) n++; }
+            if (m->kind == MK_ROM)
+                for (int i = 0; i < g_mod_n; i++) { join(roots[n], g_mods[i], rel); if (is_dir(roots[n])) n++; }
             if (!m->work[0] || !tomb_hides(m, rel)) { join(roots[n], m->root, rel); if (is_dir(roots[n])) n++; }
         }
     }
@@ -214,7 +275,7 @@ int fs_dir_hidden(const char *guest_dir, const char *name) {      /* 1 = this en
     return hidden;
 }
 uint32_t fs_delete_directory(const char *guest) {
-    Mount *m; char rel[MAX_PATH], host[MAX_PATH], roots[2][MAX_PATH];
+    Mount *m; char rel[MAX_PATH], host[MAX_PATH], roots[FS_ROOTS_MAX][MAX_PATH];
     uint32_t r;
     fs_lock();
     r = split_path(guest, &m, rel);
@@ -807,7 +868,7 @@ static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const
     if (InterlockedIncrement(&g_open_log) <= 200 || r)     /* D2: every failed open is logged, not only the first 200 */
         trace_printf("     fs open \"%s\" mode %d -> %s\n", STR(1), (int)A2, r == RESULT_NOT_MOUNTED ? "NOT MOUNTED" : r ? "NOT FOUND" : "ok");
     {   static int on = -1; if (on < 0) on = getenv("SSBU_FSLOG") != NULL;       /* D2 debug: every open on stdout */
-        if (on) printf("fslog: open \"%s\" mode %d -> %s\n", STR(1), (int)A2, r ? "NOT FOUND" : "ok"); }
+        if (on) printf("fslog: open \"%s\" mode %d -> %s %s\n", STR(1), (int)A2, r ? "NOT FOUND" : "ok", r ? "" : path); }
     if (r) { wr64(A0, 0); RET(r); return; }
     open_remember(h, (int)(A2 & 7), m);
     wr64(A0, (uint64_t)h);
