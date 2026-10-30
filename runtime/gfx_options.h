@@ -25,7 +25,9 @@ int gfx_frame_rate(void);                 /* frame_rate = 30 | 60 (display.c: th
 int gfx_present_api(void);               /* present_api = auto 0 | dxgi 1 | opengl 2 (nvn_gl_dxgi.c: how the picture reaches the screen) */
 float gfx_widescreen(void);
 int gfx_ff_speed(void);                   /* fast_forward = 2 | 3 | 4: the speed while the fast-forward key is held */
-void gfx_ff_set(int n);                   /* changed while running (PC Settings) */               /* widescreen = off 0 | auto -1 | an aspect ratio (nvn_gl.c wide_k, display.c) */
+void gfx_ff_set(int n);                   /* changed while running (PC Settings) */
+int gfx_mouse(void);                      /* mouse = off 0 | on 1 (nnhid.c: the mouse steers the hand) */
+void gfx_mouse_set(int on);               /* changed while running (PC Settings) */               /* widescreen = off 0 | auto -1 | an aspect ratio (nvn_gl.c wide_k, display.c) */
 int gfx_stats_overlay(void);              /* stats_overlay = off 0 | on 1 (menu.cpp, F2) */
 int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game settings menu, F1) */
 int gfx_volume(void);                     /* volume = auto -1 | 0..100 (the copies a person plays; nnaudio.c) */

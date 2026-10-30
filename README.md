@@ -79,7 +79,8 @@ The game is played as on a docked Switch.
 | Right stick (camera) | right stick | F / T / H / G |
 | D-pad | D-pad | J / I / L / K |
 
-**Mouse:** the hand follows the mouse. Left click = A, right click = B; the wheel acts as ZL / ZR (in menus it moves the selection).
+**Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B; the
+wheel acts as ZL / ZR (in menus it moves the selection).
 Keys and buttons can be changed in `build\config\controllers.ini`.
 
 ## Mods
@@ -106,6 +107,8 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 - Windows only for now.
 
 When something goes wrong, the logs are in `build\logs` (install) and `build\work\play_*.log` (each game session).
+**Flicker:** press **F12** while it happens. The game saves the next 8 pictures in `build\work\flicker` and describes the
+frames after them in the session log (the game pauses a few seconds for that); send both.
 
 ## Building by hand
 

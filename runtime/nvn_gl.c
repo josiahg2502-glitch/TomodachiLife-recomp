@@ -4188,7 +4188,12 @@ static Range g_draw_ibuf;                     /* the index buffer of the draw be
  * dimming behind "Add a Mii" turned the island black within a few frames. The console does not show that. So: a
  * screen-sized target that gets 3D draws (with a depth target) is copied at its first draw without one in that frame (the
  * picture before the 2D on top); in a later frame with no 3D draws, the copy goes back into it before its first draw.
- * TOMO_FREEZE_RESTORE=0 turns this off. */
+ * TOMO_FREEZE_RESTORE=0 turns this off.
+ * 2026-10-30: the restore came at a frame's first 2D draw, before it was known whether 3D followed. A target whose frames
+ * draw 2D before their 3D (the sky first) got the older picture under that 2D every frame, and the background and the
+ * shadows flickered (the user's recording of a Mii by the sea: the sky in two colours, every third frame). Now a frame
+ * right after a 3D frame that began with 2D is not restored; once a whole frame has passed without 3D, it is. */
+static LONG64 g_frz_rest, g_frz_wrong, g_frz_skip;            /* restores, restores followed by 3D in the same frame, restores left out */
 static void frozen_scene(int has_depth) {
     static int on = -1;
     if (on < 0) on = !getenv("TOMO_FREEZE_RESTORE") || atoi(getenv("TOMO_FREEZE_RESTORE"));
@@ -4196,8 +4201,13 @@ static void frozen_scene(int has_depth) {
     if (!on || !t || t->dead || !t->o.gl || t->b.target != 1 || t->b.samples > 1 || t->b.width < 1280 || t->b.height < 720 || g_rt0_level > 0) return;
     for (int i = 1; i < 8; i++) if (S.color[i]) return;
     long long frame = (long long)g_st.frames + 1;
-    if (has_depth) { t->frz_depth = frame; return; }
+    if (has_depth) {
+        if (t->frz_depth != frame && t->frz_2d == frame) t->frz_lead2d = frame;      /* this frame's 3D comes after 2D draws */
+        if (t->frz_depth != frame && t->frz_rf == frame) g_frz_wrong++;
+        t->frz_depth = frame; return;
+    }
     if (!t->frz_depth) return;
+    if (t->frz_depth != frame) t->frz_2d = frame;
     Fmt f;
     if (!gl_has(glCopyImageSubData, "glCopyImageSubData") || !fmt_get(t->b.format, &f) || f.kind != 0) return;
     if (t->frz_depth == frame) {                       /* the 3D of this frame is done: keep it */
@@ -4212,9 +4222,14 @@ static void frozen_scene(int has_depth) {
         t->frz_snapf = frame;
         return;
     }
+    if (t->frz_snap && t->frz_snapf == t->frz_depth && t->frz_restf != frame && t->frz_lead2d == t->frz_depth && t->frz_depth == frame - 1) {
+        if (t->frz_restf != -frame) { g_frz_skip++; t->frz_restf = -frame; }      /* (counted once a frame) */
+        return;
+    }
     if (t->frz_snap && t->frz_snapf == t->frz_depth && t->frz_restf != frame) {   /* no 3D this frame (so far): the last 3D picture back */
+        g_frz_rest++;
         glCopyImageSubData(t->frz_snap, GL_TEXTURE_2D, 0, 0, 0, 0, t->o.gl, GL_TEXTURE_2D, 0, 0, 0, 0, tw(t), th(t), 1);
-        t->frz_restf = frame;
+        t->frz_restf = frame; t->frz_rf = frame;
         if (drawlog_now()) printf("frozen scene: gl %u (%dx%d) gets the 3D picture of frame %lld back%c", t->o.gl, t->b.width, t->b.height, t->frz_depth, 10);
         static int said; if (!said++) printf("nvn_gl: frozen scene: the target %dx%d (gl %u) gets its last 3D picture back each frame (TOMO_FREEZE_RESTORE=0: off)\n", t->b.width, t->b.height, t->o.gl);
     }
@@ -6566,6 +6581,11 @@ static void gl_swap_now(void) {
 }
 static void job_gl_swap_flush(void *arg) { (void)arg; if (g_gl_swap_pending) gl_swap_now(); }
 #endif
+/* F12 (display.c): a flicker sample. The next 8 presented pictures go to flicker/f<frame>.bmp beside the exe, then the draw
+ * log of the two frames after them (every draw: targets, programs, textures; the frozen-scene restores) to the session log,
+ * so a flicker seen on a player's PC can be looked at frame by frame. TOMO_FLICKER_SAMPLE_AT=<frame>: the same in a test. */
+static volatile LONG g_flk_req;
+void nvn_front_flicker_sample(void) { InterlockedExchange(&g_flk_req, 1); }
 static void job_present(void *arg) {
     if (g_rbp_n) rb_land(0);
     g_dec_spent = 0;
@@ -6645,6 +6665,19 @@ static void job_present(void *arg) {
         { int step = nvn_front_take_step_shot(); if (step) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sstep_%03d.bmp", dir ? dir : "", dir ? "/" : "", step - 1); save_bmp(path, t); } }
         nvn_front_draw_tag_clear();
         if (j->shot_fight) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sfight_%05d.bmp", dir ? dir : "", dir ? "/" : "", j->shot_fight); save_bmp(path, t); printf("shot: fight frame %d saved at presented frame %lld (OpenGL)\n", j->shot_fight, (long long)frame); }
+        {   static int left; static long long at = -2;
+            if (at == -2) at = getenv("TOMO_FLICKER_SAMPLE_AT") ? atoll(getenv("TOMO_FLICKER_SAMPLE_AT")) : -1;      /* TEST: as if F12 were pressed there */
+            if (frame == at) InterlockedExchange(&g_flk_req, 1);
+            if (InterlockedExchange(&g_flk_req, 0) && !left) {
+                left = 8;
+                CreateDirectoryA("flicker", NULL);
+                printf("flicker sample: pictures of frames %lld..%lld in the folder flicker, then the draw log of frames %lld and %lld below (the game pauses a few seconds)%c", frame, frame + 7, frame + 9, frame + 10, 10);
+            }
+            if (left > 0) {
+                char path[64]; snprintf(path, sizeof path, "flicker/f%lld.bmp", frame); save_bmp(path, t);
+                if (!--left) { g_dl_force[0] = frame + 1; g_dl_force[1] = frame + 2; }      /* (drawlog_now: the draws of the frames after these) */
+            }
+        }
         if (frame == shot || (every > 0 && frame >= shot_from && frame <= shot_to && frame % every == 0)) {
             char path[300];
             const char *dir = getenv("SSBU_SHOT_DIR");                /* default: the current directory */
@@ -8208,6 +8241,7 @@ static void present_fence(long long frame) {
     if (g_pfence[k]) glDeleteSync(g_pfence[k]);
     g_pfence[k] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0);
     g_pf_frame[k] = frame;
+    if (frame % 600 == 0 && (g_frz_rest || g_frz_skip)) printf("nvn_gl: frozen scene so far: %lld restores, %lld of them followed by 3D in the same frame (wrong), %lld left out (frames that start with 2D)%c", (long long)g_frz_rest, (long long)g_frz_wrong, (long long)g_frz_skip, 10);
     if (frame % 600 == 0) { static LONG64 cb0; printf("nvn_gl: one frame in flight: %lld early waits, %lld of them landed read-backs first; %.2f MB a frame read back from GPU-written buffers%c", (long long)g_early_n, (long long)g_full_n, (double)(g_st.compute_bytes - cb0) / 600.0 / 1048576.0, 10); cb0 = g_st.compute_bytes; }
 }
 static void job_sync_wait(void *arg) {

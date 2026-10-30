@@ -637,7 +637,11 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly) {
     float x = 0, y = 0;
     int b = 0, wheel = 0, in = mouse_test(&x, &y, &b, &wheel);
     int free_hand = GetTickCount() - (DWORD)g_pointer_tick < 250;
-    if (in < 0) { in = !scripted_run() && !input_held() && display_mouse(&x, &y, &b); wheel = scripted_run() ? 0 : display_mouse_wheel(); }
+    if (in < 0) {                                  /* graphics.ini mouse = on only (off by default: user, 2026-10-30) */
+        int gfx_mouse(void); int on = gfx_mouse();
+        in = on && !scripted_run() && !input_held() && display_mouse(&x, &y, &b); wheel = scripted_run() ? 0 : display_mouse_wheel();
+        if (!on) { wheel = 0; if (g_mouse_on) InterlockedExchange(&g_mouse_on, 0); }
+    }
     if ((long long)*lx * *lx + (long long)*ly * *ly > (long long)(STICK_MAX / 4) * (STICK_MAX / 4)) InterlockedExchange(&g_mouse_on, 0);      /* a stick takes over */
     if (in) {
         int moved = px > -1e8f && (fabsf(x - px) >= 1.0f || fabsf(y - py) >= 1.0f);      /* (the first look only notes where it is) */

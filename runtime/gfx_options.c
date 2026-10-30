@@ -36,6 +36,9 @@ int gfx_frame_rate(void) {
 static int g_gfx_ff = 2;
 int gfx_ff_speed(void) { gfx_options(); return g_gfx_ff; }
 void gfx_ff_set(int n) { gfx_options(); g_gfx_ff = n < 2 ? 2 : n > 4 ? 4 : n; }
+static int g_gfx_mouse;                             /* mouse = off 0 | on 1: the mouse steers the game's hand (nnhid.c mouse_poll); user 2026-10-30: off by default */
+int gfx_mouse(void) { gfx_options(); return g_gfx_mouse; }
+void gfx_mouse_set(int on) { gfx_options(); g_gfx_mouse = on != 0; }
 static float g_gfx_wide = -1.0f;                           /* widescreen = off 0 | auto -1 | an aspect ratio (21:9 -> 2.333) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
@@ -158,6 +161,10 @@ static const char *const k_default_ini =
 ";   The picture shows every 2nd (3rd, 4th) frame, the sound every 2nd (3rd, 4th) slice.\r\n"
 "fast_forward = 2\r\n"
 "\r\n"
+"; mouse = off | on\r\n"
+";   on: the mouse moves the game's hand (left click = A, right click = B, the wheel = ZL / ZR). PC Settings can change it.\r\n"
+"mouse = off\r\n"
+"\r\n"
 "; widescreen = auto | off | 21:9 | 32:9 | <width:height>\r\n"
 ";   Wider than 16:9 (OpenGL): the 3D picture shows more at the sides, menus and text stay 16:9 in the middle.\r\n"
 ";   auto: the monitor's shape (borderless, fullscreen) or width:height (windowed). off: 16:9. TOMO_WIDESCREEN wins.\r\n"
@@ -258,6 +265,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "frame_rate")) g_gfx_fps = atoi(val) >= 60 ? 60 : 30;
         else if (!_stricmp(key, "present_api")) g_gfx_present_api = !_stricmp(val, "dxgi") ? 1 : !_stricmp(val, "opengl") ? 2 : 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
+        else if (!_stricmp(key, "mouse")) g_gfx_mouse = !_stricmp(val, "on") || !strcmp(val, "1");
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : strchr(val, ':') && atof(strchr(val, ':') + 1) > 0 ? (float)(atof(val) / atof(strchr(val, ':') + 1)) : (float)atof(val);
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */

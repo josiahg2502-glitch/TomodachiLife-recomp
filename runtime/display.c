@@ -475,6 +475,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
+    if (m == WM_KEYDOWN && w == VK_F12 && !(l & (1 << 30))) { void nvn_front_flicker_sample(void); nvn_front_flicker_sample(); return 0; }      /* a flicker sample (nvn_gl.c) */
     {   int menu_is_open(void);
         if (m == WM_KEYDOWN && w == VK_TAB && !(l & (1 << 30)) && !menu_is_open()) { display_ff_key(1); return 0; }      /* fast-forward while held */
         if (m == WM_KEYUP && w == VK_TAB) { display_ff_key(0); return 0; }
