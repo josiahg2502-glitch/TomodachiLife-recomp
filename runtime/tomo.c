@@ -414,8 +414,11 @@ static void audio_work_size(Ctx *c) { RET(0x100000); }
  * The client [sdk 0x22116c..0x221238] checks every section size and that the total equals the capacity.
  * A SILENT renderer: no mixing; a playing voice consumes its wave buffers at its sample rate (240 samples a frame at
  * 48 kHz) so the game's streaming and sound-state logic run as on the console. */
-typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, seen; float frac; int32_t af; int16_t yn1, yn2, abuf[14]; } SilentVoice;
+typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, seen; float frac; int32_t af; int16_t yn1, yn2, abuf[14];
+                 int bq_on[2]; double bq[2][6][4]; int heard; } SilentVoice;      /* the voice's two biquad filters: on last update, state per channel */
 static SilentVoice g_sv[1024];
+static int g_bq_off = -1;                                /* TOMO_AUDIO_BQ=0: the voices' biquad filters are not applied (A/B) */
+static unsigned long long g_bq_voices;                   /* voice updates with a filter on (TOMO_AUDIOLOG) */
 /* ---- the mixer: what the console's DSP does, cut down. Each playing voice is read from its wave buffers (PCM16, or
  * Nintendo's DSP-ADPCM: 8-byte frames of 14 samples, coefficients at the voice's source data, history from the wave
  * buffer's context or carried over), resampled to 48 kHz by its rate and pitch (linear interpolation), scaled by its volume and by the left /
@@ -748,6 +751,59 @@ static void fx_biquad(AFx *x, uint64_t pp, float *const *io, int nch) {
         }
     }
 }
+/* Aux (2): the game's own CPU effect on a mix. Each channel's 240 samples (32-bit, the DSP's mix scale) go into the send
+ * ring and the mix plays what the game wrote into the return ring (ReadAuxSendBuffer / WriteAuxReturnBuffer, the SDK's
+ * own lifted code, on the other side). Rings: info block at the parameter's address, the DSP's {read, write offset} at
+ * +0x40, the samples at +0x80; channel i at offset i x 240, both offsets advance after the last channel (reference: yuzu
+ * audio_core command/effect/aux_.cpp, CommandGenerator::GenerateAuxCommand). Passed through before: the game's
+ * NintendoWare busses on eight mixes reached the speakers unprocessed. Disabled: both offsets reset, input to output. */
+static void fx_aux(uint64_t ep, uint64_t pp, int mix) {
+    static int off = -1;
+    if (off < 0) off = getenv("TOMO_AUDIO_AUX") && getenv("TOMO_AUDIO_AUX")[0] == '0';      /* TEST ONLY: pass through, as before */
+    int n = (int)rd32(pp + 0x30);
+    uint32_t cmax = rd32(pp + 0x38);
+    uint64_t si = rd64(pp + 0x40), ri = rd64(pp + 0x50);
+    if (off || n < 1 || n > 24 || !si || !ri || cmax < 240) return;
+    uint64_t sinfo = si + 0x40, sbuf = si + 0x80, rinfo = ri + 0x40, rbuf = ri + 0x80;
+    if (!rd8(ep + 2)) {
+        for (uint64_t inf = sinfo, k = 0; k < 2; k++, inf = rinfo) { wr32(inf, 0); wr32(inf + 4, 0); wr32(inf + 0xc, 0); }
+        for (int c = 0; c < n; c++) {
+            int bi = (int8_t)rd8(pp + (uint64_t)c), bo = (int8_t)rd8(pp + 0x18 + (uint64_t)c);
+            if (bi >= 0 && bi < g_amix[mix].buffers && bo >= 0 && bo < g_amix[mix].buffers && bi != bo) memcpy(g_abuf[mix][bo], g_abuf[mix][bi], sizeof g_abuf[mix][bo]);
+        }
+        return;
+    }
+    static int log = -1; static double ein[32], eout[32]; static unsigned long long calls[32];
+    if (log < 0) log = getenv("TOMO_AUDIOLOG") != NULL;
+    unsigned slot = (unsigned)((ep >> 6) & 31);
+    uint32_t wo = 0;
+    for (int c = 0; c < n; c++, wo += 240) {
+        int bi = (int8_t)rd8(pp + (uint64_t)c), bo = (int8_t)rd8(pp + 0x18 + (uint64_t)c);
+        uint32_t upd = c == n - 1 ? wo + 240 : 0;
+        if (bi < 0 || bi >= g_amix[mix].buffers || bo < 0 || bo >= g_amix[mix].buffers) continue;
+        if (log) for (int k = 0; k < 240; k++) ein[slot] += (double)g_abuf[mix][bi][k] * g_abuf[mix][bi][k];
+        uint32_t t = rd32(sinfo + 4) + wo;
+        if (t <= cmax)
+            for (int k = 0; k < 240; k++, t++) {
+                if (t >= cmax) t = 0;
+                float s = g_abuf[mix][bi][k];
+                wr32(sbuf + (uint64_t)t * 4, (uint32_t)(int32_t)(s > 2.1e9f ? 2.1e9f : s < -2.1e9f ? -2.1e9f : s));
+            }
+        if (upd) wr32(sinfo + 4, (rd32(sinfo + 4) + upd) % cmax);
+        uint32_t r = rd32(rinfo) + wo;
+        if (r <= cmax)
+            for (int k = 0; k < 240; k++, r++) { if (r >= cmax) r = 0; g_abuf[mix][bo][k] = (float)(int32_t)rd32(rbuf + (uint64_t)r * 4); }
+        else memset(g_abuf[mix][bo], 0, sizeof g_abuf[mix][bo]);
+        if (upd) wr32(rinfo, (rd32(rinfo) + upd) % cmax);
+        if (log) for (int k = 0; k < 240; k++) eout[slot] += (double)g_abuf[mix][bo][k] * g_abuf[mix][bo][k];
+    }
+    if (log && ++calls[slot] % 2000 == 0) {      /* TOMO_AUDIOLOG: send / return loudness (RMS, 16-bit scale) and the four ring offsets */
+        double nsmp = 2000.0 * 240 * n;
+        printf("audio: aux on mix %d (%d ch, ring %u): send rms %.1f return rms %.1f | send: cpu read %u dsp write %u | return: cpu write %u dsp read %u\n", mix, n, cmax,
+               sqrt(ein[slot] / nsmp), sqrt(eout[slot] / nsmp), rd32(si), rd32(sinfo + 4), rd32(ri + 4), rd32(rinfo));
+        ein[slot] = eout[slot] = 0;
+    }
+}
 static void afx_run_mix(int mix) {                       /* the effects of one mix, in process order, on its buffers */
     static int off = -1;
     if (off < 0) off = getenv("TOMO_AUDIO_FX") && getenv("TOMO_AUDIO_FX")[0] == '0';
@@ -759,7 +815,8 @@ static void afx_run_mix(int mix) {                       /* the effects of one m
             if (!type || (int)rd32(ep + 4) != mix || rd32(ep + 0x18) != order) continue;
             AFx *x = &g_afx[e];
             if (x->type != type || rd8(ep + 1)) { x->type = type; x->ready = 0; memset(x->bq, 0, sizeof x->bq); }
-            if (!rd8(ep + 2) || type == 2 || type >= 7) continue;   /* disabled, or passed through */
+            if (type == 2) { fx_aux(ep, pp, mix); continue; }
+            if (!rd8(ep + 2) || type >= 7) continue;   /* disabled, or passed through */
             int nch = type == 6 ? (int8_t)rd8(pp + (rd32(pp + 0xc) == 0 && rdf(pp + 0x10) != 0.0f ? 0x24 : 0x16)) : (int)rd16(pp + 0xe);
             if (nch != 1 && nch != 2 && nch != 4 && nch != 6) continue;
             float *io[6];
@@ -859,6 +916,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
     uint64_t ires = ip + rd32(in + 8);                   /* voice channel resources: {id, 24 mix volumes, in use} 0x70 each */
     uint32_t nres = rd32(in + 0x10) / 0x70;
     int mixing = audio_out_open();
+    if (g_bq_off < 0) g_bq_off = getenv("TOMO_AUDIO_BQ") && getenv("TOMO_AUDIO_BQ")[0] == '0';
     memset(g_mix, 0, sizeof g_mix);
     uint64_t ie = iv + rd32(in + 0xc);
     amix_parse(in, ie + rd32(in + 0x14), ie + rd32(in + 0x14) + rd32(in + 0x24));
@@ -890,6 +948,22 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
             if (!(step > 0.0f && step < 16.0f)) step = (float)(rate ? rate : 48000) / 48000.0f;
             if (cc < 1 || cc > 6) cc = 1;
             uint64_t coef = rd64(v + (rev >= 15 ? 0x60 : 0x48));
+            /* The voice's two biquad filters at +0x24 (the DSP runs them on the resampled samples): revision 15 has float
+             * coefficients, 0x18 bytes each {enable, 3 pad, b0 b1 b2, a1 a2}, older ones Q14 shorts, 0xc bytes each. The a
+             * terms are added, as in the reference (yuzu audio_core command/effect/biquad_filter.cpp). NintendoWare's 3D
+             * sound muffles far sounds and the music inside buildings with them; without them both came through clear. */
+            double bqb[2][3], bqa[2][2]; int bqn = 0, bqi[2];
+            for (int j = 0; j < 2; j++) {
+                uint64_t f = v + 0x24 + (uint64_t)j * (rev >= 15 ? 0x18 : 0xc);
+                int on = rd8(f) != 0;
+                if (on && !s->bq_on[j]) memset(s->bq[j], 0, sizeof s->bq[j]);      /* newly enabled: from silence */
+                s->bq_on[j] = on;
+                if (!on || g_bq_off) continue;
+                for (int k = 0; k < 3; k++) bqb[j][k] = rev >= 15 ? rdf(f + 4 + (uint64_t)k * 4) : (int16_t)rd16(f + 2 + (uint64_t)k * 2) / 16384.0;
+                for (int k = 0; k < 2; k++) bqa[j][k] = rev >= 15 ? rdf(f + 0x10 + (uint64_t)k * 4) : (int16_t)rd16(f + 8 + (uint64_t)k * 2) / 16384.0;
+                bqi[bqn++] = j;
+            }
+            if (bqn && vol > 0.0f) g_bq_voices++;
             float *tb[6][48]; float tg[6][48]; int tn[6] = {0};   /* with the mix graph: the buffers each channel adds into, and the gains */
             if (graph) {
                 uint64_t ids = v + (rev >= 15 ? 0x158 : 0x140);
@@ -932,6 +1006,16 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 }
             }
             int routed = graph && (tn[0] || (cc > 1 && tn[1]));   /* no destination known for this voice: the direct stereo path */
+            {   static int vlog = -1; static unsigned long long vu;      /* TOMO_AUDIOLOG=2: every playing voice's total gain, every 400 updates (2 s); =3: also each voice's first audible update */
+                if (vlog < 0) vlog = getenv("TOMO_AUDIOLOG") ? atoi(getenv("TOMO_AUDIOLOG")) : 0;
+                if (vlog >= 2 && i == 0) vu++;
+                int first = vlog >= 3 && vol > 0.0f && !s->heard; if (vol > 0.0f) s->heard = 1;
+                if (vlog >= 2 && (vu % 400 == 0 || first) && vol > 0.0f) {
+                    float sum = 0; for (uint32_t ch = 0; ch < cc && ch < 6; ch++) { if (routed) for (int t = 0; t < tn[ch]; t++) sum += tg[ch][t]; else sum += gl[ch] + gr[ch]; }
+                    printf("audio-voice%s: update %llu voice %u fmt %u rate %u ch %u vol %.3f gain %.3f %s mix %d splitter %d filters %d data %llx\n", first ? " START" : "", vu, id, fmt, rate, cc, vol, sum,
+                           routed ? "routed" : "direct", (int)rd32(v + (rev >= 15 ? 0x70 : 0x58)), (int)rd32(v + (rev >= 15 ? 0x74 : 0x5c)), bqn, (unsigned long long)rd64(wb));
+                }
+            }
             if (vol > 0.0f && play == 0) { if (routed) g_routed++; else g_direct++; }
             int mix = mixing && (fmt == 2 || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f);
             if (mixing && fmt == 6 && coef <= 0x10000) {       /* an ADPCM voice without coefficients where they were looked for: the layout */
@@ -973,6 +1057,13 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             nxt = (idx + 1) % 14 ? s->abuf[(idx + 1) % 14] : (int32_t)(idx + 1) < end ? adpcm_peek(s, data, f + 1, coef) : smp;
                         }
                         float val = (float)smp + (float)(nxt - smp) * s->frac;
+                        for (int q = 0; q < bqn && ch < 6; q++) {
+                            int j = bqi[q]; double *st = s->bq[j][ch];
+                            double y = val * bqb[j][0] + st[0] * bqb[j][1] + st[1] * bqb[j][2] + st[2] * bqa[j][0] + st[3] * bqa[j][1];
+                            if (!(y > -1e7 && y < 1e7)) { y = 0; memset(st, 0, 4 * sizeof *st); }
+                            st[1] = st[0]; st[0] = val; st[3] = st[2]; st[2] = y;
+                            val = (float)y;
+                        }
                         if (routed) { if (ch < 6) for (int t = 0; t < tn[ch]; t++) tb[ch][t][o] += val * tg[ch][t]; }
                         else { g_mix[o][0] += val * gl[ch]; g_mix[o][1] += val * gr[ch]; }
                     }
@@ -998,7 +1089,23 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
         if (log && n++ % 1000 == 0) {
             unsigned used = 0, playing = 0;
             for (uint32_t i = 0; i < nvoice; i++) { uint64_t v = iv + i * vsz; used += rd8(v + 9) != 0; playing += rd8(v + 9) && rd8(v + 0xa) == 0; }
-            printf("audio: update %llu: revision %u, %u voices (%u in use, %u playing), %u pools, %u effects, %u sinks\n", n, rev, nvoice, used, playing, npool, neffect, nsink);
+            printf("audio: update %llu: revision %u, %u voices (%u in use, %u playing), %u pools, %u effects, %u sinks; %llu voice updates filtered%s\n", n, rev, nvoice, used, playing, npool,
+                   neffect, nsink, g_bq_voices, g_bq_off ? " (filters off: TOMO_AUDIO_BQ=0)" : "");
+            {                                             /* every effect: type, mix, enabled, process order */
+                printf("audio:   effects:");
+                for (uint32_t e = 0; e < neffect && e < AFX_MAX; e++) {
+                    uint64_t ep = ie + e * 0xc0;
+                    if (rd8(ep)) printf(" %u:t%d/m%d/%s/o%u", e, rd8(ep), (int)rd32(ep + 4), rd8(ep + 2) ? "on" : "off", rd32(ep + 0x18));
+                }
+                printf("\n");
+            }
+            for (uint32_t i = 0; i < nvoice; i++) {      /* the first playing voice with a filter on: its coefficients */
+                uint64_t v = iv + i * vsz, f = v + 0x24;
+                if (!rd8(v + 9) || rd8(v + 0xa) || !rd8(f)) continue;
+                if (rev >= 15) printf("audio:   voice %u filter 0: b %.4f %.4f %.4f a %.4f %.4f, volume %.3f\n", rd32(v), rdf(f + 4), rdf(f + 8), rdf(f + 12), rdf(f + 16), rdf(f + 20), rdf(v + 0x20));
+                else printf("audio:   voice %u filter 0 (Q14): b %d %d %d a %d %d, volume %.3f\n", rd32(v), (int16_t)rd16(f + 2), (int16_t)rd16(f + 4), (int16_t)rd16(f + 6), (int16_t)rd16(f + 8), (int16_t)rd16(f + 10), rdf(v + 0x20));
+                break;
+            }
             {   /* the mix graph: splitters (header 'SNDH'), then the mixes (an 0x20 'dirty' header first when the count is not size / 0x930) */
                 uint64_t isp = ie + rd32(in + 0x14), imx = isp + rd32(in + 0x24);
                 uint32_t msz = rd32(in + 0x18), mcount = msz / 0x930;
