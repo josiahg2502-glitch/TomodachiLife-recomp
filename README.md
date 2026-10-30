@@ -72,7 +72,7 @@ The game is played as on a docked Switch.
 
 | Switch | Controller | Keyboard |
 |---|---|---|
-| A / B / X / Y | the buttons with those letters (`layout` in controllers.ini: by position instead) | Z / X / C / V |
+| A / B / X / Y | the buttons with those letters; PlayStation: cross, circle, square, triangle (the game then shows those symbols) | Z / X / C / V |
 | L / R, ZL / ZR | shoulders, triggers | Q / E, A / S |
 | + / - | Start / Back | Enter / Backspace |
 | Left stick | left stick | arrow keys |
@@ -81,7 +81,8 @@ The game is played as on a docked Switch.
 
 **Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B; the
 wheel acts as ZL / ZR (in menus it moves the selection).
-Keys and buttons can be changed in `build\config\controllers.ini`.
+Keys and buttons can be changed in the game: PC Settings, **Controls** (pick the controller with left / right, choose a button,
+press the new one; it holds for every controller of that kind), or in `build\config\controllers.ini`.
 
 ## Mods
 

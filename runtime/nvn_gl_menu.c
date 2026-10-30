@@ -98,7 +98,7 @@ static void mg_font(void) {                       /* the atlas: made once, again
     g_mg.font_w = w; g_mg.font_h = h;
 }
 
-static void mg_shot(int W, int H) {               /* SSBU_MENU_TEST: the window's picture with the menu, as a BMP */
+static void mg_shot(int W, int H, int top_first) {      /* SSBU_MENU_TEST: the window's picture with the menu, as a BMP */
     char path[MAX_PATH];
     if (!menu_shot_wanted(path, sizeof path)) return;
     unsigned char *px = malloc((size_t)W * H * 3);
@@ -111,9 +111,10 @@ static void mg_shot(int W, int H) {               /* SSBU_MENU_TEST: the window'
         memcpy(hd + 18, &W, 4); memcpy(hd + 22, &H, 4); hd[26] = 1; hd[28] = 24;
         fwrite(hd, 1, 54, f);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadBuffer(GL_BACK);
-        glReadPixels(0, 0, W, H, 0x80E0 /* BGR */, GL_UNSIGNED_BYTE, px);      /* bottom-up rows, as a BMP stores them */
-        for (int y = 0; y < H; y++) { fwrite(px + (size_t)y * W * 3, 1, (size_t)W * 3, f); fwrite("\0\0\0", 1, (size_t)(row - W * 3), f); }
+        if (top_first) { glBindFramebuffer(GL_READ_FRAMEBUFFER_, g_mg.dxfbo); glReadBuffer(GL_COLOR_ATTACHMENT0_); }      /* the DXGI picture (nvn_gl_dxgi.c) */
+        else glReadBuffer(GL_BACK);
+        glReadPixels(0, 0, W, H, 0x80E0 /* BGR */, GL_UNSIGNED_BYTE, px);      /* the window: bottom-up rows, as a BMP stores them */
+        for (int k = 0; k < H; k++) { int y = top_first ? H - 1 - k : k; fwrite(px + (size_t)y * W * 3, 1, (size_t)W * 3, f); fwrite("\0\0\0", 1, (size_t)(row - W * 3), f); }
         fclose(f);
     }
     free(px);
@@ -158,7 +159,7 @@ static void menu_gl_draw(int W, int H) {
         glScissor((GLint)x0, (GLint)(top_first ? y0 : (float)H - y1), (GLsizei)(x1 - x0), (GLsizei)(y1 - y0));
         g_mg.draw(GL_TRIANGLES, (GLsizei)c->count, GL_UNSIGNED_SHORT, (const void *)(uintptr_t)(c->idx_off * 2u), (GLint)c->vtx_off);
     }
-    mg_shot(W, H);
+    mg_shot(W, H, top_first);
     void *menu = glFenceSync(0x9117, 0);
     glFlush();
     wglMakeCurrent(g_dc, main_rc);

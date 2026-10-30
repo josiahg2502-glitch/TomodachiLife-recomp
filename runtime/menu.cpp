@@ -1623,7 +1623,7 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_MOUSE, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
@@ -1634,8 +1634,12 @@ static const char *const k_wide_name[] = {"Fit the screen", "Off (16:9)", "21:9"
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Mouse controls", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Quit to desktop"};
 static int g_t_ff;
+static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
+static void tc_open(void);
+static void tc_act(int a);
+static const char *tc_device_name(void);
 static const uint32_t NAVY = 0x022240;
 
 static int classic(void) {
@@ -1673,6 +1677,7 @@ static void t_value(int r, char *v, int n) {
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
     case T_MOUSE: snprintf(v, (size_t)n, "%s", gfx_mouse() ? "On" : "Off"); break;
+    case T_CTRL: snprintf(v, (size_t)n, "%s", tc_device_name()); break;
     default: v[0] = 0;
     }
 }
@@ -1692,6 +1697,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
     case T_FF: g_t_ff = 2 + (g_t_ff - 2 + dir + 3) % 3; snprintf(v, sizeof v, "%d", g_t_ff); ini("fast_forward", v); gfx_ff_set(g_t_ff); break;
     case T_MOUSE: gfx_mouse_set(!gfx_mouse()); ini("mouse", gfx_mouse() ? "on" : "off"); break;
+    case T_CTRL: tc_open(); return;
     }
     char now[64]; t_value(r, now, sizeof now);
     printf("menu: %s = %s%s\n", k_tlabel[r], now, t_changed(r) ? " (at the next start)" : ""); fflush(stdout);
@@ -1703,10 +1709,11 @@ static void t_act(int a) {
         else g_t_dlg = 0;
         return;
     }
+    if (g_t_page == 1) { tc_act(a); return; }
     switch (a) {
     case A_UP: g_t_sel = (g_t_sel + T_N - 1) % T_N; break;
     case A_DOWN: g_t_sel = (g_t_sel + 1) % T_N; break;
-    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
+    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
     case A_OK: if (g_t_sel == T_QUIT) { g_t_dlg = 1; g_t_dlg_sel = 1; }
         else if (g_t_sel == T_VOLUME && (S.volume < 0 || S.volume >= 100)) { S.volume = 0; t_change(T_VOLUME, 0); }
         else t_change(g_t_sel, 1);
@@ -1723,6 +1730,7 @@ static int t_key_act(int vk) {                 /* a key press -> an action, -1 =
 }
 static void t_pad(uint64_t b, uint64_t down) {  /* the pads: A / B, and the d-pad with the game's repeat when held */
     static ULONGLONG t0, next;
+    if (capturing()) { t0 = 0; return; }         /* the Controls page waits for the button to bind (capture_tick) */
     static const int dirs[4][2] = {{B_UP, A_UP}, {B_DOWN, A_DOWN}, {B_LEFT, A_LEFT}, {B_RIGHT, A_RIGHT}};
     ULONGLONG now = GetTickCount64();
     if (down & BIT(B_A)) t_act(A_OK);
@@ -1732,6 +1740,97 @@ static void t_pad(uint64_t b, uint64_t down) {  /* the pads: A / B, and the d-pa
         else if ((b & BIT(dirs[i][0])) && now >= next && t0) { t_act(dirs[i][1]); next = now + 110; }
     }
     if (!(b & (BIT(B_UP) | BIT(B_DOWN) | BIT(B_LEFT) | BIT(B_RIGHT)))) t0 = 0;
+}
+
+/* ------------------------------------------------------------------ the Controls page of PC Settings (2026-10-30, user: solid
+ * remapping in the new menu). Rows: the controller (left / right: every connected pad, then the keyboard), the Switch
+ * buttons with what drives each now (in the pad's own names), and "Back to the default". A on a button waits for the
+ * new one (6 s; Home or Esc cancels), the same capture as the old Controls page (capture_tick); a pad's binding goes to
+ * its [type ...] profile in controllers.ini, so it holds for every controller of that kind. */
+static const int k_tc_target[] = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 4, 5, 13, 15, 12, 14};      /* A B X Y L R ZL ZR + - LS RS, d-pad up down left right */
+static const char *const k_tc_label[] = {"A", "B", "X", "Y", "L", "R", "ZL", "ZR", "+ (Plus)", "- (Minus)", "Left stick click", "Right stick click",
+    "D-pad up", "D-pad down", "D-pad left", "D-pad right"};
+enum { TC_DEV = 0, TC_FIRST = 1, TC_RESET = 1 + (int)(sizeof k_tc_target / sizeof k_tc_target[0]), TC_N };
+static int g_tc_sel, g_tc_top, g_tc_dev = -2;     /* g_tc_dev: -2 player 1's pad (or the keyboard), -1 the keyboard, else a pad's index */
+static NnPadDev g_tc_devs[16];
+static int g_tc_ndev;
+static ULONGLONG g_tc_devs_at;
+static const NnPadDev *tc_pad(void) {          /* the pad shown, NULL = the keyboard */
+    if (GetTickCount64() - g_tc_devs_at > 500) { g_tc_devs_at = GetTickCount64(); g_tc_ndev = nnpad_list(g_tc_devs, 16); }
+    if (g_tc_dev == -2) { for (int i = 0; i < g_tc_ndev; i++) if (g_tc_devs[i].player == 0) return &g_tc_devs[i]; return g_tc_ndev ? &g_tc_devs[0] : NULL; }
+    for (int i = 0; i < g_tc_ndev; i++) if (g_tc_devs[i].index == g_tc_dev) return &g_tc_devs[i];
+    return NULL;
+}
+static const char *tc_device_name(void) {
+    static char n[96];
+    const NnPadDev *d = tc_pad();
+    if (!d) return "Keyboard";
+    snprintf(n, sizeof n, "%s", d->name);
+    if (strlen(n) > 30) strcpy(n + 27, "...");
+    return n;
+}
+static void tc_open(void) { g_t_page = 1; g_tc_sel = TC_DEV; g_tc_top = 0; g_tc_dev = -2; g_tc_devs_at = 0; }
+static const char *tc_word(int type, const char *src) {      /* a source as the pad prints it */
+    static const char *const raw[] = {"south", "east", "west", "north", "leftshoulder", "rightshoulder", "lefttrigger", "righttrigger", "start", "back", "leftstick", "rightstick", "guide", "dpup", "dpdown", "dpleft", "dpright", "touchpad"};
+    static const char *const xbox[] = {"A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Menu", "View", "LS", "RS", "Xbox", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Touchpad"};
+    static const char *const ps[] = {"Cross", "Circle", "Square", "Triangle", "L1", "R1", "L2", "R2", "Options", "Create", "L3", "R3", "PS", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Touchpad"};
+    static const char *const sw[] = {"B", "A", "Y", "X", "L", "R", "ZL", "ZR", "+", "-", "Left stick", "Right stick", "HOME", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Touchpad"};
+    const char *const *w = type == 0 ? xbox : type == 1 ? ps : type == 2 ? sw : NULL;
+    for (int i = 0; w && i < N(raw); i++) if (!strncmp(src, raw[i], strlen(raw[i])) && (src[strlen(raw[i])] == 0 || src[strlen(raw[i])] == '+')) return w[i];
+    return src;
+}
+static void tc_value(int row, char *v, int n) {
+    const NnPadDev *d = tc_pad();
+    v[0] = 0;
+    if (row == TC_DEV) { snprintf(v, (size_t)n, "%s", tc_device_name()); return; }
+    if (row == TC_RESET) return;
+    int target = k_tc_target[row - TC_FIRST];
+    if ((d && g_pcap == target) || (!d && g_capture == target)) {
+        int left = (int)((CAPTURE_MS - (GetTickCount64() - g_cap_t0)) / 1000) + 1;
+        snprintf(v, (size_t)n, d ? "Press a button... %d" : "Press a key... %d", left);
+        return;
+    }
+    char t[96];
+    if (!d) { nnpad_vk_name(nnpad_kb_vk(target), t, sizeof t); snprintf(v, (size_t)n, "%s", t[0] ? t : "none"); return; }
+    nnpad_target_text(d->index, target, t, sizeof t);
+    int o = 0;                                  /* "south, button7" -> "A, button7" */
+    for (char *tok = strtok(t, ","); tok && o < n - 1; tok = strtok(NULL, ",")) {
+        while (*tok == ' ') tok++;
+        o += snprintf(v + o, (size_t)(n - o), "%s%s", o ? ", " : "", tc_word(d->type, tok));
+    }
+    if (!o) snprintf(v, (size_t)n, "none");
+}
+static void tc_act(int a) {
+    const NnPadDev *d = tc_pad();
+    if (capturing()) { if (a == A_BACK) capture_cancel("Back"); return; }
+    switch (a) {
+    case A_UP: g_tc_sel = (g_tc_sel + TC_N - 1) % TC_N; break;
+    case A_DOWN: g_tc_sel = (g_tc_sel + 1) % TC_N; break;
+    case A_LEFT: case A_RIGHT:
+        if (g_tc_sel == TC_DEV) {                 /* the next device: every pad, then the keyboard */
+            int cur = -1;
+            for (int i = 0; i < g_tc_ndev; i++) if (d && g_tc_devs[i].index == d->index) cur = i;
+            int k = d ? cur : g_tc_ndev, total = g_tc_ndev + 1;
+            k = (k + (a == A_LEFT ? -1 : 1) + total) % total;
+            g_tc_dev = k == g_tc_ndev ? -1 : g_tc_devs[k].index;
+        }
+        break;
+    case A_OK:
+        if (g_tc_sel == TC_RESET) {
+            if (d) { nnpad_profile_reset(d->index, 0); nnpad_profile_reset(d->index, 1); }
+            else for (int i = 0; i < 24; i++) nnpad_kb_bind(i, nnpad_kb_default(i));
+            printf("menu: Controls: %s back to the default\n", d ? d->name : "the keyboard"); fflush(stdout);
+        } else if (g_tc_sel >= TC_FIRST) {
+            int target = k_tc_target[g_tc_sel - TC_FIRST];
+            g_cap_t0 = GetTickCount64();
+            if (d) { g_ctl_dev = d->index; g_ctl_scope = 1; g_pcap = target; nnpad_capture_begin(d->index); }
+            else g_capture = target;
+        } else tc_act(A_RIGHT);
+        break;
+    case A_BACK: g_t_page = 0; break;
+    }
+    if (g_tc_sel < g_tc_top) g_tc_top = g_tc_sel;
+    if (g_tc_sel >= g_tc_top + 10) g_tc_top = g_tc_sel - 9;
 }
 
 static ImU32 t_col(uint32_t rgb, float a) { return IM_COL32(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, (int)(a * 255.0f + 0.5f)); }
@@ -1763,7 +1862,16 @@ static void t_card(ImDrawList *dl, ImVec2 a, ImVec2 b, float u, int chosen, floa
     dl->PopClipRect();
     dl->AddRect(a, b, t_col(0xFED219, in), r, 0, 3.0f * u);
 }
+extern "C" int nnpad_glyph_style(void);         /* nnpad_sdl.c: 1 = PlayStation symbols (as nnfontll.c draws them in the game) */
 static void t_glyph(ImDrawList *dl, ImVec2 p, float sz, int which, ImU32 c) {      /* a button of the game's key font (0 A, 1 B) */
+    if (nnpad_glyph_style() == 1) {             /* PlayStation: cross (A), circle (B) in the icon's disc */
+        ImVec2 m(p.x + sz * 0.5f, p.y + sz * 0.55f);
+        float r = sz * 0.42f;
+        dl->AddCircleFilled(m, r, c);
+        if (which == 0) { float a = r * 0.42f; dl->AddLine(ImVec2(m.x - a, m.y - a), ImVec2(m.x + a, m.y + a), IM_COL32_WHITE, r * 0.2f); dl->AddLine(ImVec2(m.x - a, m.y + a), ImVec2(m.x + a, m.y - a), IM_COL32_WHITE, r * 0.2f); }
+        else dl->AddCircle(m, r * 0.41f, IM_COL32_WHITE, 32, r * 0.18f);
+        return;
+    }
     if (g_have_keys) {
         unsigned cp = 0xE0E0u + (unsigned)which;
         char s[4] = {(char)(0xE0 | cp >> 12), (char)(0x80 | (cp >> 6 & 63)), (char)(0x80 | (cp & 63)), 0};
@@ -1796,12 +1904,38 @@ static void draw_tomo(void) {
 
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), t_col(0xFFC100, in));
     t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFD05A, in));
-    t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), "PC Settings");
+    t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), g_t_page == 1 ? "Controls" : "PC Settings");
 
-    const float rw = 1180.0f * u, rh = 66.0f * u, gap = 10.0f * u, rx = bx + (bw - rw) * 0.5f, ry0 = by + 160.0f * u + rise;
+    const int nrows = g_t_page == 1 ? 10 : T_N;
+    const float pitch = (nrows * 76.0f > 840.0f ? 840.0f / (float)nrows : 76.0f) * u;      /* 11 rows of 76, more rows closer */
+    const float rw = 1180.0f * u, gap = 10.0f * u, rh = pitch - gap, rx = bx + (bw - rw) * 0.5f, ry0 = by + 160.0f * u + rise;
     int pending = 0;
-    for (int r = 0; r < T_N; r++) {
-        ImVec2 a(rx, ry0 + (float)r * (rh + gap)), b(rx + rw, ry0 + (float)r * (rh + gap) + rh);
+    if (g_t_page == 1) {                       /* the Controls page */
+        for (int r = 0; r < nrows && g_tc_top + r < TC_N; r++) {
+            const int row = g_tc_top + r;
+            ImVec2 a(rx, ry0 + (float)r * pitch), b(rx + rw, ry0 + (float)r * pitch + rh);
+            const bool over = m.x >= a.x && m.x < b.x && m.y >= a.y && m.y < b.y;
+            if (over && moved && !capturing()) g_tc_sel = row;
+            const int chosen = row == g_tc_sel;
+            t_card(dl, a, b, u, chosen, in, t);
+            const float cy = (a.y + b.y) * 0.5f;
+            t_text(dl, g_ft_row, 36.0f * u, a.x + 44.0f * u, cy, 0.0f, t_col(NAVY, in), row == TC_DEV ? "Controller" : row == TC_RESET ? "Back to the default" : k_tc_label[row - TC_FIRST]);
+            char v[96];
+            tc_value(row, v, sizeof v);
+            const float vx = b.x - 90.0f * u, vw = g_ft_row->CalcTextSizeA(36.0f * u, FLT_MAX, 0.0f, v).x;
+            t_text(dl, g_ft_row, 36.0f * u, vx, cy, 1.0f, t_col(NAVY, in), v);
+            if (chosen && row == TC_DEV) {
+                const float s2 = 13.0f * u, lx = vx - vw - 34.0f * u, rx2 = vx + 34.0f * u;
+                dl->AddTriangleFilled(ImVec2(lx - s2, cy), ImVec2(lx + s2 * 0.8f, cy - s2), ImVec2(lx + s2 * 0.8f, cy + s2), t_col(NAVY, in));
+                dl->AddTriangleFilled(ImVec2(rx2 + s2, cy), ImVec2(rx2 - s2 * 0.8f, cy - s2), ImVec2(rx2 - s2 * 0.8f, cy + s2), t_col(NAVY, in));
+            }
+            if (over && click && !capturing()) { g_tc_sel = row; tc_act(row == TC_DEV ? (m.x < vx - vw - 10.0f * u ? A_LEFT : A_RIGHT) : A_OK); }
+        }
+        if (g_tc_top > 0) dl->AddTriangleFilled(ImVec2(bx + bw * 0.5f, ry0 - 26.0f * u), ImVec2(bx + bw * 0.5f - 16.0f * u, ry0 - 10.0f * u), ImVec2(bx + bw * 0.5f + 16.0f * u, ry0 - 10.0f * u), t_col(NAVY, in));
+        if (g_tc_top + nrows < TC_N) { const float yb = ry0 + nrows * pitch; dl->AddTriangleFilled(ImVec2(bx + bw * 0.5f, yb + 10.0f * u), ImVec2(bx + bw * 0.5f - 16.0f * u, yb - 6.0f * u), ImVec2(bx + bw * 0.5f + 16.0f * u, yb - 6.0f * u), t_col(NAVY, in)); }
+    }
+    for (int r = 0; r < T_N && g_t_page == 0; r++) {
+        ImVec2 a(rx, ry0 + (float)r * pitch), b(rx + rw, ry0 + (float)r * pitch + rh);
         const bool over = !g_t_dlg && m.x >= a.x && m.x < b.x && m.y >= a.y && m.y < b.y;
         if (over && moved) g_t_sel = r;
         const int chosen = r == g_t_sel && !g_t_dlg;
@@ -1825,7 +1959,9 @@ static void draw_tomo(void) {
     t_glyph(dl, ImVec2(bx + 40.0f * u, fy - 26.0f * u), 52.0f * u, 1, t_col(NAVY, in));
     t_text(dl, g_ft_small, 30.0f * u, bx + 100.0f * u, fy, 0.0f, t_col(NAVY, in), "Back");
     t_glyph(dl, ImVec2(bx + bw - 250.0f * u, fy - 26.0f * u), 52.0f * u, 0, t_col(NAVY, in));
-    t_text(dl, g_ft_small, 30.0f * u, bx + bw - 190.0f * u, fy, 0.0f, t_col(NAVY, in), "Change");
+    t_text(dl, g_ft_small, 30.0f * u, bx + bw - 190.0f * u, fy, 0.0f, t_col(NAVY, in), g_t_page == 1 && g_tc_sel >= TC_FIRST && g_tc_sel < TC_RESET ? "Rebind" : "Change");
+    if (g_t_page == 1 && capturing()) t_text(dl, g_ft_small, 28.0f * u, bx + bw * 0.5f, fy, 0.5f, t_col(NAVY, 0.8f * in), "Press the new button, or HOME / Esc to cancel.");
+    else if (g_t_page == 1) t_text(dl, g_ft_small, 28.0f * u, bx + bw * 0.5f, fy, 0.5f, t_col(NAVY, 0.8f * in), "Saved for every controller of this kind.");
     if (pending) t_text(dl, g_ft_small, 28.0f * u, bx + bw * 0.5f, fy, 0.5f, t_col(NAVY, 0.8f * in), "* Takes effect the next time you start the game.");
 
     if (g_t_dlg) {                             /* the game's dialog: a white box, two choices */
@@ -1872,7 +2008,7 @@ static void draw_hint(float a) {
 static void set_open(int on) {
     if (on == (g_open != 0)) return;
     if (on) {
-        g_t_sel = 0; g_t_dlg = 0; g_t_opened = 1;
+        g_t_sel = 0; g_t_dlg = 0; g_t_opened = 1; g_t_page = 0;
         InterlockedExchange(&g_open, 1);
         InterlockedExchange(&g_guard, 1);
         g_section_req = g_section;
@@ -2010,8 +2146,9 @@ static void tomo_test_tick(void) {
     if (at < 0 || g_frame < at || step < 0) return;
     long long t = g_frame - at;
     switch (step) {
-    case 0: set_open(1); step = 1; step_at = t; break;
-    case 1: if (t - step_at >= 20) { test_shot("tomo_page"); step = 2; } break;
+    case 0: set_open(1); if (getenv("TOMO_MENU_PAGE") && !strcmp(getenv("TOMO_MENU_PAGE"), "controls")) tc_open(); step = 1; step_at = t; break;      /* TOMO_MENU_PAGE=controls: that page */
+    case 1: if (t - step_at >= 20) { test_shot("tomo_page"); step = g_t_page == 1 ? 10 : 2; } break;      /* (the Controls page: its picture only) */
+    case 10: if (!g_shot_req) { set_open(0); step = -1; } break;
     case 3: t_act(A_DOWN); t_act(A_DOWN); t_act(A_RIGHT); step = 4; step_at = t; break;
     case 4: if (t - step_at >= 10) { test_shot("tomo_changed"); step = 5; } break;
     case 6: t_act(A_UP); t_act(A_UP); t_act(A_UP); t_act(A_OK); step = 7; step_at = t; break;      /* Resolution -> up past the top -> Quit */

@@ -137,7 +137,8 @@ static const char *const g_default_ini =
 "\r\n"
 "[general]\r\n"
 "; Face buttons. positional = the button in Nintendo's A position (right) acts as A: right = A, bottom = B, top = X, left = Y.\r\n"
-";   labels = the printed letter decides (an Xbox pad's A is Pro A). auto = labels for GameCube controllers, positional otherwise.\r\n"
+";   labels = the printed letter decides (an Xbox pad's A is Pro A; PlayStation: cross = A, circle = B, square = X, triangle = Y).\r\n"
+";   auto = labels for every controller.\r\n"
 "layout = auto\r\n"
 "; Radial dead zone and outer zone of the sticks (fractions of full travel): inside the dead zone nothing, beyond the outer\r\n"
 "; zone full deflection; the stick is rescaled in between and its length is limited to 1 (circular gate).\r\n"
@@ -377,7 +378,7 @@ static float eff_f(const Dev *d, size_t off, float def) {
 static int eff_layout(const Dev *d) {
     const DevCfg *c = dev_cfg(d), *t = type_cfg(d);
     int l = c && c->layout >= 0 ? c->layout : t->layout >= 0 ? t->layout : g_cfg.def.layout;
-    if (l == 2) l = d->gtype == SDL_GAMEPAD_TYPE_GAMECUBE;
+    if (l == 2) l = 1;                     /* auto = the printed labels for every pad (user, 2026-10-30: each kind of pad mapped its own way) */
     return l;
 }
 static int eff_rumble(const Dev *d) { const DevCfg *c = dev_cfg(d), *t = type_cfg(d); return c && c->rumble >= 0 ? c->rumble : t->rumble >= 0 ? t->rumble : g_cfg.def.rumble; }
@@ -561,7 +562,10 @@ static int def_map(const Dev *d, int labels, int b, Src *o) {          /* the bu
             int target = d->gca ? i : pos[i];                           /* the adapter's pads: south A, east B, west X, north Y (nnpad_gca.c), whatever SDL labels say */
             if (labels && !d->gca) {
                 SDL_GamepadButtonLabel l = SDL_GetGamepadButtonLabel(d->gp, (SDL_GamepadButton)face[i]);
-                target = l == SDL_GAMEPAD_BUTTON_LABEL_A ? 0 : l == SDL_GAMEPAD_BUTTON_LABEL_B ? 1 : l == SDL_GAMEPAD_BUTTON_LABEL_X ? 2 : l == SDL_GAMEPAD_BUTTON_LABEL_Y ? 3 : pos[i];
+                /* letters: that letter (an Xbox pad's A is A, a Pro Controller's A is A); PlayStation: cross A, circle B, square X,
+                 * triangle Y (bottom confirms, right goes back, as on Xbox); no label: the Xbox places (south A, east B, west X, north Y) */
+                target = l == SDL_GAMEPAD_BUTTON_LABEL_A || l == SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 0 : l == SDL_GAMEPAD_BUTTON_LABEL_B || l == SDL_GAMEPAD_BUTTON_LABEL_CIRCLE ? 1
+                       : l == SDL_GAMEPAD_BUTTON_LABEL_X || l == SDL_GAMEPAD_BUTTON_LABEL_SQUARE ? 2 : l == SDL_GAMEPAD_BUTTON_LABEL_Y || l == SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE ? 3 : i;
             }
             if (target == b) o[n++] = mk(SK_BTN, face[i], 0);
         }
@@ -1090,6 +1094,21 @@ int nnpad_selftest(const NnHidHooks *h) {
         check(!nnpad_is_gc(2) && h->style(2) == 0, "GameCube adapter: unplugged port: player 3 is gone");
     }
 
+    /* ---- buttons, auto layout (2026-10-30: the printed labels; this pad has none: the Xbox places, south A) */
+    {
+        Sleep(1100); write_text(path, "[general]\r\nlayout = auto\r\n"); Sleep(1100); nnpad_poll(1);
+        static const struct { int sdl, pro; } f[] = {{SDL_GAMEPAD_BUTTON_SOUTH, 0}, {SDL_GAMEPAD_BUTTON_EAST, 1}, {SDL_GAMEPAD_BUTTON_WEST, 2}, {SDL_GAMEPAD_BUTTON_NORTH, 3}};
+        int ok = 1;
+        for (size_t i = 0; i < sizeof f / sizeof f[0]; i++) {
+            vj_clear(js[0], SDL_GAMEPAD_BUTTON_COUNT, 6);
+            SDL_SetJoystickVirtualButton(js[0], f[i].sdl, true);
+            settle();
+            h->state(0, &btn, st, &attr);
+            if (btn != 1ull << f[i].pro) { ok = 0; printf("    auto layout: button %d got %llx expected bit %d\n", f[i].sdl, (unsigned long long)btn, f[i].pro); }
+        }
+        check(ok, "auto layout: a pad without labels maps south A, east B, west X, north Y");
+        Sleep(1100); write_text(path, "[general]\r\nlayout = positional\r\n"); Sleep(1100); nnpad_poll(1);
+    }
     /* ---- buttons, positional layout */
     {
         static const struct { int sdl, pro; const char *n; } m[] = {
@@ -1259,7 +1278,7 @@ int nnpad_selftest(const NnHidHooks *h) {
             snprintf(text, sizeof text, "[keyboard]\r\nplayer = none\r\n[players]\r\nplayer1 = %s\r\nplayer2 = none\r\n", g3);
             Sleep(1100); write_text(path, text); Sleep(1100); nnpad_poll(1);
             vj_clear(js[3], SDL_GAMEPAD_BUTTON_COUNT, 6);
-            SDL_SetJoystickVirtualButton(js[3], SDL_GAMEPAD_BUTTON_EAST, true); settle(); h->state(0, &btn, st, &attr);
+            SDL_SetJoystickVirtualButton(js[3], SDL_GAMEPAD_BUTTON_SOUTH, true); settle(); h->state(0, &btn, st, &attr);      /* (layout auto: south is A on a pad without labels) */
             check((btn & 1) == 1 && h->style(1) == 0, "[players]: player1 = <GUID of pad 4> puts that pad on player 1; player2 = none leaves slot 2 empty");
             SDL_SetJoystickVirtualButton(js[3], SDL_GAMEPAD_BUTTON_EAST, false);
         }
@@ -1311,10 +1330,10 @@ int nnpad_selftest(const NnHidHooks *h) {
             int rx_dz = st[2];
             check(rx_dz == 0, "controls: dead zone 0.5 in the profile: a stick at 0.4 gives nothing");
             nnpad_profile_reset(ix, 0); nnpad_profile_reset(ix, 1);
-            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_EAST, true); settle(); h->state(0, &btn, st, &attr);
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_SOUTH, true); settle(); h->state(0, &btn, st, &attr);
             from = nnpad_target_text(ix, 0, t, sizeof t);
             { char *f = read_file(path, NULL); char hd[48]; snprintf(hd, sizeof hd, "[type %s]", g_type_key[ty]); ok = f && !strstr(f, hd); free(f); }
-            check((btn & 1) && from == 0 && ok, "controls: reset of both levels: the built-in default again (east = A), the [type] section removed");
+            check((btn & 1) && from == 0 && ok, "controls: reset of both levels: the built-in default again (south = A), the [type] section removed");
             vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); settle();
         }
     }
@@ -1435,6 +1454,20 @@ const char *nnpad_config_path(void) { nnpad_kb_vk(0); return g_cfg.path; }
  * profile, which wins over the built-in default. All of it is written to controllers.ini at once and used at once (the
  * memory copy is changed together with the file; the 1 s reload then finds nothing new). */
 static const char *const g_type_label[NTYPE] = {"Xbox", "PlayStation", "Switch", "GameCube", "other pad", "joystick (no SDL mapping)"};
+/* nnfontll.c / menu.cpp: the button icons to show. 1 = PlayStation (cross, circle, square, triangle) when player 1 is a
+ * PlayStation pad, else 0 = the letters (Nintendo; an Xbox pad maps by its letters, so they match too). */
+static Dev *dev_at(int index);
+int nnpad_glyph_style(void) {
+    int style = 0;
+    static int force = -2;                         /* TOMO_GLYPHS=ps | letters (TEST) */
+    if (force == -2) { const char *e = getenv("TOMO_GLYPHS"); force = e ? !_stricmp(e, "ps") : -1; }
+    if (force >= 0) return force;
+    if (!g_sdl_ok) return 0;
+    lock();
+    for (int i = 0; i < MAXDEV; i++) { const Dev *d = dev_at(i); if (d && d->slot == 0) { style = dev_type(d) == 1; break; } }
+    unlock();
+    return style;
+}
 const char *nnpad_type_label(int t) { return t >= 0 && t < NTYPE ? g_type_label[t] : "?"; }
 const char *nnpad_type_key(int t) { return t >= 0 && t < NTYPE ? g_type_key[t] : "?"; }
 const char *nnpad_target_name(int t) { return t >= 0 && t < 24 ? g_kbn[t] : ""; }

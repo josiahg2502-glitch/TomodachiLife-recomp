@@ -740,6 +740,49 @@ static void home_path(Path *path) {               /* path: the A icon's outline,
     path_close(path);
 }
 
+/* The A B X Y icons (U+E0E0..E0E3, and the U+E0A0..E0A3 set) for a PlayStation pad (2026-10-30, user: the controller's own
+ * symbols in the game): the icon's circle, its size and place, with cross (A), circle (B), square (X) or triangle (Y) cut
+ * out, the buttons that act as A B X Y on such a pad (nnpad_sdl.c def_map). Drawn when player 1 is a PlayStation pad when
+ * the game asks for the glyph; the game keeps glyphs it drew before. */
+int nnpad_glyph_style(void);                      /* nnpad_sdl.c: 1 = PlayStation symbols */
+static int ps_button(const FontData *f, uint32_t code) {
+    /* the system's icon font, or the game's own (NinDev-TCExt: "Press A" on the title, the hints) */
+    return (f->shared || strstr(f->name, "TCExt")) && ((code >= 0xe0e0u && code <= 0xe0e3u) || (code >= 0xe0a0u && code <= 0xe0a3u)) && nnpad_glyph_style() == 1;
+}
+static void ps_path(Path *path, int which) {     /* path: the letter icon's outline, replaced (which: 0 A, 1 B, 2 X, 3 Y) */
+    if (!path->n) return;
+    double x0 = path->p[0].x, x1 = x0, y0 = path->p[0].y, y1 = y0;
+    for (int i = 1; i < path->n; i++) {
+        if (path->p[i].x < x0) x0 = path->p[i].x;
+        if (path->p[i].x > x1) x1 = path->p[i].x;
+        if (path->p[i].y < y0) y0 = path->p[i].y;
+        if (path->p[i].y > y1) y1 = path->p[i].y;
+    }
+    double cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, r = (x1 - x0 < y1 - y0 ? x1 - x0 : y1 - y0) / 2;
+    path->n = path->contours = 0;
+    for (int k = 0; k < 64; k++) path_point(path, cx + r * cos(k * 6.283185307179586 / 64), cy + r * sin(k * 6.283185307179586 / 64));      /* the disc (counter-clockwise) */
+    path_close(path);
+    if (which == 0) {                              /* cross: a plus turned 45 degrees, cut out (clockwise) */
+        static const double plus[12][2] = {{.46, -.1}, {.1, -.1}, {.1, -.46}, {-.1, -.46}, {-.1, -.1}, {-.46, -.1}, {-.46, .1}, {-.1, .1}, {-.1, .46}, {.1, .46}, {.1, .1}, {.46, .1}};
+        for (int k = 0; k < 12; k++) path_point(path, cx + r * (plus[k][0] - plus[k][1]) * 0.7071067811865476, cy + r * (plus[k][0] + plus[k][1]) * 0.7071067811865476);
+        path_close(path);
+    } else if (which == 1) {                       /* circle: a ring, cut out then filled again inside */
+        for (int k = 0; k < 64; k++) path_point(path, cx + r * .5 * cos(-k * 6.283185307179586 / 64), cy + r * .5 * sin(-k * 6.283185307179586 / 64));
+        path_close(path);
+        for (int k = 0; k < 64; k++) path_point(path, cx + r * .32 * cos(k * 6.283185307179586 / 64), cy + r * .32 * sin(k * 6.283185307179586 / 64));
+        path_close(path);
+    } else {                                       /* square / triangle: the outline, cut out then filled again inside */
+        static const double sq[4][2] = {{-.4, .4}, {.4, .4}, {.4, -.4}, {-.4, -.4}}, tri[3][2] = {{0, .5}, {.48, -.33}, {-.48, -.33}};
+        const double (*pt)[2] = which == 2 ? sq : tri;
+        int n = which == 2 ? 4 : 3;
+        double in = which == 2 ? .62 : .5;          /* the inner size: the stroke about as wide as the ring's */
+        for (int k = 0; k < n; k++) path_point(path, cx + r * pt[k][0], cy + r * pt[k][1]);      /* clockwise: cut out */
+        path_close(path);
+        for (int k = n - 1; k >= 0; k--) path_point(path, cx + r * pt[k][0] * in, cy + r * (pt[k][1] * in + (which == 3 ? -.04 : 0)));      /* counter-clockwise: filled */
+        path_close(path);
+    }
+}
+
 /* Builds a glyph map (malloc) for a character; never NULL unless memory runs out. */
 static uint8_t *make_glyphmap(Engine *e, uint32_t code, unsigned type) {
     FontData *f = current(e);
@@ -760,6 +803,7 @@ static uint8_t *make_glyphmap(Engine *e, uint32_t code, unsigned type) {
         dx = advance_fixed(e, f, glyph);
         glyph_path(f, glyph, e->scale, &path);
         if (home) home_path(&path);
+        else if (ps_button(f, code)) ps_path(&path, (int)(code & 3));
         rasterise(&path, &g);
         free(path.p);
         free(path.end);
