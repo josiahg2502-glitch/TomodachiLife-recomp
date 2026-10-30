@@ -9,13 +9,15 @@
  *   SETTINGS   the options of build\config\graphics.ini that the port reads, written when changed (comments and other
  *              keys are kept);
  *   SAVE DATA  backups of build\userdata into build\saves, restore (the current save is backed up first), importing a
- *              save from a folder (a console dump: Map.sav, Mii.sav, Player.sav), folders;
+ *              save from a folder (a console dump: Map.sav, Mii.sav, Player.sav), importing a Mii from a .ltd file
+ *              (ShareMii / TomodachiShare: mii_ltd.h) over a resident, folders;
  *   CONTROLS   the controller SDL sees and the keyboard's keys; build\config\controllers.ini;
  *   MORE       logs, graphics.ini, the shader cache, the port's folder.
  * Pictures beside the exe, made from the player's own game files (scripts\launcher_art.py): title-logo.png, the game's
  * logo; launcher-background.jpg, the island. Without them: a plain gradient and the name in text.
  * --shot <file.bmp> [main|settings|saves|controls|more]: draws that screen off screen into a picture and exits.
  * --import <folder>: SAVE DATA > IMPORT A SAVE with that folder (no dialog), the result printed; for tests.
+ * --import-mii <file.ltd> <slot>: IMPORT A MII over the resident in that slot (0..69), no dialog; for tests.
  * Built by scripts\build_launcher.sh (clang, SDL3 of ..\ssbu-recomp\deps, third_party\stb). */
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -30,6 +32,7 @@
 #define STBI_ONLY_JPEG
 #include "stb_image.h"
 #include "paint.h"      // before the stb_truetype implementation below
+#include "mii_ltd.h"
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
@@ -208,7 +211,7 @@ const char* const k_keys[][2] = {                         // nnpad_sdl.c g_kb_de
     {"D-pad", "I J K L"}, {"L / R", "Q / E"}, {"ZL / ZR", "A / S"}, {"+ / -", "Enter / Backspace"}, {"Fullscreen", "F11"}, {"Settings", "F1"}};
 
 /* ------------------------------------------------------------------ the launcher */
-enum class Screen { kMain, kSettings, kSaves, kControls, kMore };
+enum class Screen { kMain, kSettings, kSaves, kControls, kMore, kMii };
 struct Item {
     std::string label, value;
     bool chevrons = false;     // a setting: left / right change the value
@@ -227,6 +230,12 @@ public:
     }
     bool running() const { return !quit_; }
     std::string import_now(const char* dir) { import_save(fs::u8path(dir)); return note_; }      // --import (main)
+    std::string import_mii_now(const char* file, int slot) {      // --import-mii (main)
+        load_ltd(fs::u8path(file));
+        if (screen_ != Screen::kMii) return note_;
+        for (const auto& r : mii_slots_) if (r.first == slot) { import_mii(r.first, r.second); return note_; }
+        return "There is no Mii in slot " + std::to_string(slot) + ".";
+    }
     bool game_running() const { return game_.hProcess != nullptr; }
     void open_screen(const std::string& s) {
         if (s == "settings") go(Screen::kSettings);
@@ -315,6 +324,7 @@ public:
             std::swap(done, dialog_done_);
         }
         if (done && !chosen.empty() && dialog_for_ == kForImport) import_save(fs::u8path(chosen));
+        else if (done && !chosen.empty() && dialog_for_ == kForMii) load_ltd(fs::u8path(chosen));
         else if (done && !chosen.empty()) {
             game_dir_ = chosen;
             lini_.set("game", chosen);
@@ -328,7 +338,13 @@ public:
         int w = 0, h = 0;
         if (target) { float fw, fh; SDL_GetTextureSize(target, &fw, &fh); w = int(fw); h = int(fh); }
         else SDL_GetCurrentRenderOutputSize(r_, &w, &h);
-        layout_ = Layout(float(w), float(h), list_.size(), screen_ == Screen::kMain);
+        {   // a long list (IMPORT A MII: up to 70 residents) scrolls: 14 items around the selection
+            const int n = int(list_.size()), vis = std::min(n, kVisible);
+            if (selected_ < first_) first_ = selected_;
+            if (selected_ >= first_ + vis) first_ = selected_ - vis + 1;
+            first_ = std::max(0, std::min(first_, n - vis));
+        }
+        layout_ = Layout(float(w), float(h), std::min<size_t>(list_.size(), kVisible), screen_ == Screen::kMain);
         const float W = layout_.w, H = layout_.h;
         SDL_SetRenderDrawBlendMode(r_, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(r_, 10, 14, 24, 255);
@@ -343,15 +359,15 @@ public:
         }
         // the menu: the selected item between chevrons
         const float alpha = fade_, slide = (1 - fade_) * H * 0.03f, px = H * layout_.px;
-        const float sel_y = layout_.item_y(selection_y_) - px * 0.36f;
+        const float sel_y = layout_.item_y(selection_y_ - float(first_)) - px * 0.36f;
         const float pulse = 0.85f + 0.15f * std::sin(time_ * 4.0f);
         const Color chev{1, 1, 1, alpha * pulse};
         paint_.chevron(layout_.left_chevron - slide, sel_y, H * 0.034f, -1, H * 0.0042f, chev);
         paint_.chevron(layout_.right_chevron + slide, sel_y, H * 0.034f, 1, H * 0.0042f, chev);
-        for (size_t i = 0; i < list_.size(); ++i) {
+        for (size_t i = size_t(first_); i < list_.size() && int(i) < first_ + kVisible; ++i) {
             const bool on = int(i) == selected_;
             const Color c{1, 1, 1, alpha * (on ? 1.0f : 0.72f)};
-            const float y = layout_.item_y(float(i)), x = layout_.text_x + slide;
+            const float y = layout_.item_y(float(int(i) - first_)), x = layout_.text_x + slide;
             const float tw = font_.draw(r_, x, y, list_[i].label, px, c);
             if (list_[i].value.empty()) continue;
             const float vpx = px * 0.74f;
@@ -482,6 +498,7 @@ private:
         case Screen::kSaves:
             list_.push_back({"BACK UP NOW", ""});
             list_.push_back({"IMPORT A SAVE", "Choose a folder"});
+            list_.push_back({"IMPORT A MII", "Choose a .ltd file"});
             for (size_t i = 0; i < backups_.size() && i < 4; ++i) {
                 fs::file_time_type t{};
                 dir_size(backups_[i], &t);
@@ -494,6 +511,10 @@ private:
         case Screen::kControls:
             list_ = {{"CONTROLLER", pad_name_.empty() ? "None connected" : pad_name_}, {"EDIT CONTROLLERS.INI", ""}, {"BACK", ""}};
             break;
+        case Screen::kMii:      // the residents the .ltd's Mii can replace
+            for (const auto& r : mii_slots_) list_.push_back({r.second, armed_ == int(list_.size()) ? "Press again to replace" : "Replace"});
+            list_.push_back({"BACK", ""});
+            break;
         case Screen::kMore: {
             char mb[32];
             const long long cache = is_dir(g_cache) ? dir_size(g_cache, nullptr) : 0;
@@ -505,9 +526,9 @@ private:
         if (selected_ >= int(list_.size())) selected_ = int(list_.size()) - 1;
     }
 
-    void go(Screen s) { screen_ = s; selected_ = 0; selection_y_ = 0; fade_ = 0; armed_ = -1; note_.clear(); build_items(); }
+    void go(Screen s) { screen_ = s; selected_ = 0; selection_y_ = 0; first_ = 0; fade_ = 0; armed_ = -1; note_.clear(); build_items(); }
     void move(int d) { const int n = int(list_.size()); selected_ = (selected_ + d + n) % n; if (armed_ >= 0) { armed_ = -1; build_items(); } }
-    void back() { if (screen_ != Screen::kMain) go(Screen::kMain); }
+    void back() { if (screen_ == Screen::kMii) go(Screen::kSaves); else if (screen_ != Screen::kMain) go(Screen::kMain); }
 
     void change(int d) {
         if (screen_ != Screen::kSettings || selected_ >= int(options().size())) return;
@@ -546,15 +567,22 @@ private:
             const int nb = int(std::min<size_t>(backups_.size(), 4));
             if (i == 0) { note_ = backup_now("") ? "Backup made." : "There is no save to back up yet."; note_ok_ = save_size_ > 0; refresh(); }
             else if (i == 1) choose_folder(kForImport, "");
-            else if (i <= nb + 1) {
+            else if (i == 2) choose_ltd();
+            else if (i <= nb + 2) {
                 if (armed_ != i) { armed_ = i; build_items(); break; }
                 armed_ = -1;
-                restore(backups_[i - 2]);
-            } else if (i == nb + 2) { fs::create_directories(g_userdata); open_path(g_userdata); }
-            else if (i == nb + 3) { fs::create_directories(g_saves); open_path(g_saves); }
+                restore(backups_[i - 3]);
+            } else if (i == nb + 3) { fs::create_directories(g_userdata); open_path(g_userdata); }
+            else if (i == nb + 4) { fs::create_directories(g_saves); open_path(g_saves); }
             else back();
             break;
         }
+        case Screen::kMii:
+            if (i >= int(mii_slots_.size())) { go(Screen::kSaves); break; }
+            if (armed_ != i) { armed_ = i; build_items(); break; }
+            armed_ = -1;
+            import_mii(mii_slots_[i].first, mii_slots_[i].second);
+            break;
         case Screen::kControls:
             if (i == 1) edit_file(g_pads_ini);
             else if (i == 2) back();
@@ -638,6 +666,13 @@ private:
         if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
         return found;
     }
+    static void drop_pending_commit() {      // a commit the game left half done (nnfs.c) would be finished over our files
+        std::error_code e;
+        for (auto& d : fs::directory_iterator(g_userdata, e)) {
+            const std::string n = d.path().filename().string();
+            if (n == "save.commit" || n.rfind("save.journal.", 0) == 0) fs::remove(d.path(), e);
+        }
+    }
     void import_save(const fs::path& dir) {
         note_ok_ = false;
         if (game_running() || game_process_running()) { note_ = "Close the game before importing a save."; return; }
@@ -647,10 +682,7 @@ private:
         std::error_code e;
         if (ok) {
             fs::create_directories(g_userdata / "save", e);
-            for (auto& d : fs::directory_iterator(g_userdata, e)) {
-                const std::string n = d.path().filename().string();
-                if (n == "save.commit" || n.rfind("save.journal.", 0) == 0) fs::remove(d.path(), e);
-            }
+            drop_pending_commit();
             for (const char* n : {"Map.sav", "Mii.sav", "Player.sav"})
                 ok = ok && fs::copy_file(from / n, g_userdata / "save" / n, fs::copy_options::overwrite_existing, e);
         }
@@ -659,7 +691,44 @@ private:
         refresh();
     }
 
-    enum { kForGame, kForImport };
+    /* IMPORT A MII: a .ltd (mii_ltd.h) replaces a resident, chosen on the next screen; the save is backed up first */
+    void choose_ltd() {
+        dialog_for_ = kForMii;
+        static const SDL_DialogFileFilter filters[] = {{"Mii files (.ltd)", "ltd"}};
+        SDL_ShowOpenFileDialog(
+            [](void* self, const char* const* list, int) {
+                auto* l = static_cast<Launcher*>(self);
+                std::lock_guard<std::mutex> lock(l->dialog_mutex_);
+                l->dialog_result_ = list && list[0] ? list[0] : "";
+                l->dialog_done_ = true;
+            },
+            this, window_, filters, 1, nullptr, false);
+    }
+    void load_ltd(const fs::path& file) {
+        note_ok_ = false;
+        const std::string err = ltd::load(file, ltd_);
+        if (!err.empty()) { note_ = err; build_items(); return; }
+        mii_slots_ = ltd::residents(g_userdata / "save");
+        if (mii_slots_.empty()) { note_ = "No island to import into yet: play once and save first."; build_items(); return; }
+        ltd_path_ = file;
+        ltd_name_ = ltd::name_of(ltd_);
+        if (ltd_name_.empty()) ltd_name_ = file.stem().u8string();
+        go(Screen::kMii);
+    }
+    void import_mii(int slot, const std::string& old_name) {
+        note_ok_ = false;
+        if (game_running() || game_process_running()) { note_ = "Close the game before importing a Mii."; build_items(); return; }
+        if (!backup_now("before_mii_import")) { note_ = "The save could not be backed up: nothing was changed."; build_items(); return; }
+        drop_pending_commit();
+        const std::string err = ltd::import(g_userdata / "save", slot, ltd_, ltd_path_);
+        note_ok_ = err.empty();
+        note_ = note_ok_ ? ltd_name_ + " replaced " + old_name + ". Your previous save is in the backups." : err + " Your save is unchanged (and backed up).";
+        mii_slots_ = ltd::residents(g_userdata / "save");
+        refresh();
+        build_items();
+    }
+
+    enum { kForGame, kForImport, kForMii };
     void choose_game(bool then_play = false) { play_after_dialog_ = then_play; choose_folder(kForGame, game_dir_.string()); }
     void choose_folder(int purpose, const std::string& def) {
         dialog_for_ = purpose;
@@ -722,8 +791,8 @@ private:
     int item_at(float x, float y) const {
         const float H = layout_.h;
         if (x < layout_.left_chevron - H * 0.03f || x > layout_.right_chevron + H * 0.03f) return -1;
-        for (size_t i = 0; i < list_.size(); ++i) {
-            const float iy = layout_.item_y(float(i));
+        for (size_t i = size_t(first_); i < list_.size() && int(i) < first_ + kVisible; ++i) {
+            const float iy = layout_.item_y(float(int(i) - first_));
             if (y > iy - H * layout_.step * 0.75f && y < iy + H * layout_.step * 0.25f) return int(i);
         }
         return -1;
@@ -780,6 +849,10 @@ private:
                 detail = "The keyboard always works for player 1.";
             }
             if (screen_ == Screen::kMore) detail = (g_repo / "build").string();
+            if (screen_ == Screen::kMii) {
+                if (line.empty()) line = "Which resident does " + ltd_name_ + " replace?";
+                detail = "The resident's look, name, voice and personality become the imported Mii's. Your save is backed up first.";
+            }
             if (!line.empty()) font_.draw(r_, x, y, fit(line, px, layout_.w * 0.6f), px, c);
             if (!detail.empty()) draw_line(x, y + H * 0.048f, fit(detail, px * 0.8f, layout_.w * 0.62f), px * 0.8f, kDim);
             return;
@@ -856,10 +929,15 @@ private:
     int shaders_ = 0, armed_ = -1, session_min_ = -1;
     Screen screen_ = Screen::kMain;
     std::vector<Item> list_;
-    int selected_ = 0;
+    static constexpr int kVisible = 14;      // items shown at once; a longer list scrolls (first_: the top one)
+    int selected_ = 0, first_ = 0;
     float selection_y_ = 0, fade_ = 0, time_ = 0, stick_x_ = 0, stick_y_ = 0, held_x_ = 0, held_y_ = 0;
     bool mouse_moved_ = false, quit_ = false, play_after_dialog_ = false;
-    int dialog_for_ = 0;      // kForGame / kForImport: what the folder dialog is for
+    int dialog_for_ = 0;      // kForGame / kForImport / kForMii: what the dialog is for
+    ltd::Bytes ltd_;          // IMPORT A MII: the file (version 3), its path and Mii name, the residents it can replace
+    fs::path ltd_path_;
+    std::string ltd_name_;
+    std::vector<std::pair<int, std::string>> mii_slots_;
     PROCESS_INFORMATION game_{};
     DWORD exit_code_ = 0;
     Uint64 started_ = 0;
@@ -905,6 +983,9 @@ int main(int argc, char** argv) {
     const char* import_dir = nullptr;
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--shot")) { shot = argv[i + 1]; if (i + 2 < argc) shot_screen = argv[i + 2]; }
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--import")) import_dir = argv[i + 1];      // SAVE DATA > IMPORT A SAVE without the dialog
+    const char* import_mii = nullptr; int import_slot = -1;
+    for (int i = 1; i + 2 < argc; i++) if (!strcmp(argv[i], "--import-mii")) { import_mii = argv[i + 1]; import_slot = atoi(argv[i + 2]); }
+    if (import_mii) import_dir = "";
     if (import_dir) shot = "";
     paths_init();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return 1;
@@ -922,7 +1003,8 @@ int main(int argc, char** argv) {
     set_icon(window);
     {
         Launcher launcher(window, renderer);
-        if (import_dir) { printf("%s\n", launcher.import_now(import_dir).c_str()); fflush(stdout); }
+        if (import_mii) { printf("%s\n", launcher.import_mii_now(import_mii, import_slot).c_str()); fflush(stdout); }
+        else if (import_dir) { printf("%s\n", launcher.import_now(import_dir).c_str()); fflush(stdout); }
         SDL_Texture* target = shot ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, 1600, 900) : nullptr;
         if (shot) launcher.open_screen(shot_screen);
         Uint64 last = SDL_GetTicksNS(), started = last;
