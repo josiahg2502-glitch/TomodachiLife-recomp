@@ -105,5 +105,7 @@ How the port works and what was done: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 
 Built on the runtime and tools of [ssbu-recomp](https://github.com/Denkishi/ssbu-recomp). GPL-3.0 (see `LICENSE`).
 Third-party code: SDL 3 (zlib), Dear ImGui (MIT), stb (MIT / public domain), libopus (BSD), FFmpeg (LGPL, downloaded by the
-installer), the open-source fonts in `runtime/fonts_open` (see the README there).
+installer), the open-source fonts in `runtime/fonts_open` (see the README there). The launcher's Mii import
+(`launcher/mii_ltd.h`) is a port of the `.ltd` import of [ShareMii](https://github.com/Star-F0rce/ShareMii) by Star-F0rce
+(GPL-3.0).
 *Tomodachi Life* is a trademark of Nintendo. This project contains no Nintendo code or assets.
