@@ -1,6 +1,6 @@
 ﻿# The installer window of the Tomodachi Life: Living the Dream native PC port (GPL-3.0). `Install Tomodachi Life.bat` -> scripts\bootstrap.ps1
-# puts a private Python into deps\python and then starts this file:
-#   powershell -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File scripts\installer_window.ps1
+# puts a private Python into deps\python and then runs this file in its own PowerShell (by hand, the same as:
+#   powershell -NoProfile -ExecutionPolicy Bypass -STA -File scripts\installer_window.ps1)
 # Windows PowerShell 5.1 + System.Windows.Forms only; no modules, nothing is installed, nothing is sent anywhere.
 #
 # What it does: looks for your own game files (scripts\find_inputs.py --json) and checks the PC (scripts\precheck.py --json),

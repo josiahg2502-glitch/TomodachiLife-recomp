@@ -39,15 +39,6 @@ function Get-Verified([string]$url, [string]$file, [string]$sha) {
     if ($h -ne $sha.ToUpper()) { Remove-Item $file -Force; throw "SHA-256 mismatch for $(Split-Path -Leaf $file): got $h" }
 }
 
-# Files from a downloaded ZIP carry the Mark-of-the-Web; clear it so Windows does not block the scripts and tools.
-function Unblock-Tree {
-    try {
-        Get-ChildItem -LiteralPath $repo -Recurse -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notlike "$repo\deps\*" -and $_.FullName -notlike "$repo\build\*" -and $_.FullName -notlike "$repo\.git\*" } |
-            Unblock-File -ErrorAction SilentlyContinue
-    } catch {}
-}
-
 function Test-Private {
     if (-not (Test-Path $pyExe)) { return $false }
     try {
@@ -142,7 +133,6 @@ function Start-Fallback {
 
 try {
     New-Item -ItemType Directory -Force (Join-Path $repo 'build') | Out-Null
-    Unblock-Tree
     $ok = Test-Private
     if (-not $ok) {
         try { Install-Private; $ok = $true }
@@ -151,8 +141,11 @@ try {
     if ($ok) {
         Set-Content -Path (Join-Path $repo 'build\python_path.txt') -Value $pyExe -Encoding ASCII
         if (-not $NoLaunch) {
-            Start-Process -FilePath 'powershell.exe' -WorkingDirectory $repo -WindowStyle Hidden -ArgumentList @(
-                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$repo\scripts\installer_window.ps1`"")
+            # The installer window runs right here, in this PowerShell (Windows PowerShell is STA, as WinForms needs). It used
+            # to start a hidden second PowerShell with -ExecutionPolicy Bypass, and with the Mark-of-the-Web cleared over the
+            # whole folder that made Windows Defender's machine learning call this script a trojan (Trojan:Script/Wacatac.H!ml,
+            # 2026-10-30) and remove it.
+            & (Join-Path $repo 'scripts\installer_window.ps1')
         }
     } else {
         Start-Fallback
