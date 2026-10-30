@@ -1307,6 +1307,7 @@ static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
         for (size_t i = 0; i < sizeof v262144 / sizeof v262144[0]; i++) if (v262144[i][0] == a) at = v262144[i][1];
     return at && hook_install(at, repl, NULL, orig);
 }
+#include "mii_chatter.c"                         /* the Mii chatter mod (more for Miis to say) */
 static ImportFn g_try_alloc;
 const char *guest_thread_name_of(DWORD tid);               /* os_threads.c */
 static const char *heap_name(uint64_t heap) {
@@ -1553,6 +1554,7 @@ static const ImportDef tomo_overrides[] = {
 void register_tomo_imports(void) {
     persp_install();
     pointer_install();
+    chatter_install();
     audio_volume_selftest();                     /* SSBU_AUDIO_VOLUME_SELFTEST=<expected startup percent>, -1 for no device */
     for (size_t i = 0; i < sizeof tomo_imports / sizeof tomo_imports[0]; i++)
         if (!import_lookup(tomo_imports[i].name)) register_imports(&tomo_imports[i], 1);
