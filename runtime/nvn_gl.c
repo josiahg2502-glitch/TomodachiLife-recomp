@@ -2073,12 +2073,20 @@ static uint64_t sh_hash(uint64_t h, const void *data, size_t n) {
  *   turns it off (every stage is then compiled with glCreateShaderProgramv, as before). */
 static LONG64 g_shd_loaded, g_shd_saved, g_shd_refused;
 static volatile LONG64 g_shw_queued, g_shw_done, g_shw_compiled, g_shw_present, g_shw_failed;
+static volatile LONG64 g_shw_bg_queued, g_shw_bg_done;     /* pairs re-warmed while the game runs (pw_sample_note): not waited for */
+static volatile LONG g_shp_queueing;                       /* the shader store's variations are being queued (shp_queue) */
 static DWORD g_shw_tid[8];
 /* hostrt.c, the crash report: which of this file's host threads a thread id is, or NULL */
 const char *nvn_front_thread_kind(unsigned long tid) { static char b[32]; if (tid == g_render_tid) return "render thread"; for (int i = 0; i < 8; i++) if (g_shw_tid[i] && g_shw_tid[i] == tid) { snprintf(b, sizeof b, "shader worker %d", i); return b; } return NULL; }
 static volatile LONG g_pw_listed_done;                      /* the start-up queueing of pairs.txt is over (boot.c waits for the workers then) */
 /* boot.c: how many worker jobs are still pending, and how many were queued in all; -1 until the start-up queueing is over */
-long long nvn_front_warm_pending(long long *total) { *total = g_shw_queued; return g_pw_listed_done ? g_shw_queued - g_shw_done : -1; }
+/* boot.c: the jobs the start waits for (-1: not all queued yet). The pairs re-warmed after a cold sample (pw_sample_note) are
+ * not among them: the total grew while the screen counted (user, 2026-10-30: "9306 of 13770", the amount going up). */
+long long nvn_front_warm_pending(long long *total) {
+    LONG64 q = g_shw_queued - g_shw_bg_queued, d = g_shw_done - g_shw_bg_done;
+    *total = q;
+    return g_pw_listed_done && !g_shp_queueing ? (q > d ? q - d : 0) : -1;
+}
 static int g_shd_mode = -1;
 static char g_shd_dir[200];
 static uint64_t g_shd_drv;
@@ -2363,7 +2371,8 @@ static volatile LONG64 g_shp_total, g_shp_done, g_shp_t0;      /* shader prepara
  * a day after they were warmed; the 2026-10-29 session stalled at 651 of 850 first draws, 26 ms each). Re-warming the
  * whole list at each start costs 15 s, so: the first PW_SAMPLE listed pairs (the title's and the island's) are warmed at
  * every start, 0.2 s when the driver has them; when more than PW_SAMPLE_COLD of them are cold the cache was purged, and
- * the rest of the list is warmed before the game starts (30 s, once). TOMO_PAIR_REWARM=1: the whole list, every start. */
+ * the rest of the list is warmed by the workers while the game runs (it was waited for before the game started: 5-12 min on
+ * 2026-10-30, the screen's total growing meanwhile). TOMO_PAIR_REWARM=1: the whole list, every start. */
 #define PW_SAMPLE 64
 #define PW_SAMPLE_COLD 10
 typedef struct { uint64_t vh, fh; uint32_t vl, fl, mask; } PwPair;
@@ -2375,8 +2384,8 @@ static void pw_sample_note(int cold) {              /* worker: a sampled pair is
     if (cold) InterlockedIncrement(&g_pw_sample_cold);
     if (InterlockedIncrement(&g_pw_sample_done) != g_pw_sample_n || InterlockedExchange(&g_pw_sample_decided, 1)) return;
     if (g_pw_sample_cold > PW_SAMPLE_COLD) {
-        printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache was purged, the other %d listed pairs are warmed before the game starts%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
-        for (int i = 0; i < g_pw_rest_n; i++) pw_queue_named(g_pw_rest[i].vh, g_pw_rest[i].vl, g_pw_rest[i].fh, g_pw_rest[i].fl, g_pw_rest[i].mask, 0);
+        printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache was purged, the other %d listed pairs are warmed while the game runs%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
+        for (int i = 0; i < g_pw_rest_n; i++) pw_queue_named(g_pw_rest[i].vh, g_pw_rest[i].vl, g_pw_rest[i].fh, g_pw_rest[i].fl, g_pw_rest[i].mask, 2);      /* in the background: the game starts meanwhile */
     } else printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache holds them, the other %d listed pairs are not warmed again%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
     fflush(stdout);
     free(g_pw_rest); g_pw_rest = NULL; g_pw_rest_n = g_pw_rest_cap = 0;
@@ -2455,7 +2464,8 @@ static int pw_job_inner(ShJob *j, GLuint pipe, GLuint empty_fs) {      /* 1 = th
 }
 static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
     int c = pw_job_inner(j, pipe, empty_fs);
-    if (j->stage == 2 && j->key[3]) pw_sample_note(c);
+    if (j->stage == 2 && j->key[3] == 1) pw_sample_note(c);
+    if (j->stage == 2 && j->key[3] == 2) InterlockedIncrement64(&g_shw_bg_done);
 }
 static void pw_enqueue(ShJob *j) {
     j->next = NULL;
@@ -2473,6 +2483,7 @@ static void pw_queue_named(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, u
     j->stage = 2; j->key[3] = (uint32_t)sample;
     memcpy(j->data, &vh, 8); memcpy(j->data + 8, &fh, 8); memcpy(j->data + 16, &vl, 4); memcpy(j->data + 20, &fl, 4); memcpy(j->data + 24, &mask, 4);
     g_pw_named++;
+    if (sample == 2) InterlockedIncrement64(&g_shw_bg_queued);      /* (counted before it is queued: the start-up wait never sees it) */
     pw_enqueue(j);
 }
 static volatile LONG64 g_pw_gate_t0;
@@ -2616,7 +2627,7 @@ static void shd_workers_start(void) {
  * Done once per store, shader-text settings (resolution scale, widescreen), driver and exe (name, size, time): the key of
  * the last complete one is in <cache>/prepared_<exe>.txt; a start with the same key queues nothing. TOMO_SHADER_PREP=0 = off,
  * TOMO_SHADER_STORE=<dir> = another store. Compute stages are left out (their text depends on the images bound). */
-static volatile LONG g_shp_queueing, g_shp_marked;
+static volatile LONG g_shp_marked;
 static int g_shp_store;                            /* the store is read: its preparation covers every pair (prec_load warms none at start) */
 static uint64_t g_shp_key;
 static char g_shp_mark[320];
@@ -4649,6 +4660,12 @@ static int draw_prepare(void) {
             printf("\n");
         }
     }
+    /* The texture handles of this draw were resolved above (handle_make -> tex_sync_a): a texture made anew whose blocks
+     * were seen before is decoded on the GPU right there, after exec's barrier. Without this one the draw sampled it before
+     * the decoder's stores were visible: the game's texture streaming remakes textures every few frames, and each time the
+     * object showed its old or empty texels for a frame (the Island Builder's flicker, 2026-10-30). TOMO_GA_DRAW_BARRIER=0: TEST, without. */
+    {   static int off = -1; if (off < 0) off = getenv("TOMO_GA_DRAW_BARRIER") && getenv("TOMO_GA_DRAW_BARRIER")[0] == '0';
+        if (!off) ga_barrier(); }
     return 1;
 }
 
@@ -4974,6 +4991,7 @@ static void compute_dispatch(unsigned gx, unsigned gy, unsigned gz) {
     }
     nvn_front_ccmp_dispatch(S.ubo[5], S.ssbo[5], written, st->code, st->code_len, gx, gy, gz);      /* SSBU_COMPUTE_CMP */
     if (g_frag_ssbo_pending) { glMemoryBarrier(0x2000 | 0x4 /* SHADER_STORAGE | UNIFORM */); g_frag_ssbo_pending = 0; }     /* what fragment stages wrote */
+    ga_barrier();                                  /* textures the GPU decoder filled while this dispatch's handles were resolved */
     glDispatchCompute(gx, gy, gz);
     if (glsl && st->glsl_images_w) glMemoryBarrier(0xffffffffu);
     if (written) {
@@ -6624,6 +6642,39 @@ static void job_present(void *arg) {
             const char *dir = getenv("SSBU_SHOT_DIR");                /* default: the current directory */
             snprintf(path, sizeof path, "%s%sframe_%lld.bmp", dir ? dir : "", dir ? "/" : "", (long long)frame);
             save_bmp(path, t);
+        }
+        {   /* TOMO_LUMLOG=1 (TEST): the presented picture's mean luminance per frame against the real time ("lum: <frame> <ms>
+             * <mean>"), read back 3 frames late through a mapped buffer, so the frame rate is not disturbed: compares the game's
+             * speed between frame rates (scratch speed.py: the title camera's flight over the island) */
+            static int on = -1; static GLuint fb2[2], tex2, pb; static uint8_t *pm; static void *fs[4]; static LONG64 ff[4], ft[4], qf; static int k;
+            if (on < 0) { on = getenv("TOMO_LUMLOG") && gl_has(glNamedBufferStorage, "glNamedBufferStorage") && gl_has(glMapNamedBufferRange, "glMapNamedBufferRange"); LARGE_INTEGER f; QueryPerformanceFrequency(&f); qf = f.QuadPart; }
+            if (on && t && t->o.gl && t->b.width > 0 && t->b.height > 0) {
+                enum { LW = 160, LH = 90, LB = LW * LH * 4 };
+                if (!pb) {
+                    glGenFramebuffers(2, fb2); glGenTextures(1, &tex2);
+                    glBindTexture(GL_TEXTURE_2D, tex2); glTexStorage2D(GL_TEXTURE_2D, 1, 0x8058 /* RGBA8 */, LW, LH);
+                    glCreateBuffers(1, &pb); glNamedBufferStorage(pb, 4 * LB, NULL, 0x1 | 0x40 | 0x80 /* READ | PERSISTENT | COHERENT */);
+                    pm = glMapNamedBufferRange(pb, 0, 4 * LB, 0x1 | 0x40 | 0x80);
+                }
+                glBindFramebuffer(GL_READ_FRAMEBUFFER_, fb2[0]); glFramebufferTexture(GL_READ_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, t->o.gl, 0);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, fb2[1]); glFramebufferTexture(GL_DRAW_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, tex2, 0);
+                glDisable(GL_SCISSOR_TEST);
+                glBlitFramebuffer(0, 0, tw(t), th(t), 0, 0, LW, LH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER_, fb2[1]);
+                glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, pb); glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, LW, LH, 0x1908 /* RGBA */, GL_UNSIGNED_BYTE, (void *)(uintptr_t)(k * LB));
+                glBindBuffer(0x88EB, 0);
+                glEnable(GL_SCISSOR_TEST);
+                glBindFramebuffer(GL_FRAMEBUFFER_, S.have_fbo ? S.fbo : 0);
+                if (fs[k]) glDeleteSync(fs[k]);
+                fs[k] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0); ff[k] = frame; ft[k] = pf_now();
+                k = (k + 1) & 3;                           /* the oldest of the four: 3 frames ago */
+                if (pm && fs[k] && glClientWaitSync(fs[k], 1, 50000000) != 0x911D /* WAIT_FAILED */) {
+                    const uint8_t *q = pm + k * LB; unsigned s = 0;
+                    for (int i = 0; i < LW * LH; i++) s += (q[i * 4] * 2u + q[i * 4 + 1] * 5u + q[i * 4 + 2]) / 8u;
+                    printf("lum: %lld %.1f %.2f%c", (long long)ff[k], (double)ft[k] * 1000.0 / (double)qf, s / (double)(LW * LH), 10);
+                }
+            }
         }
         {   /* TOMO_FLICKER=1 (diagnosis): one-frame spikes in the presented picture. 48x27 cells of mean luminance; a cell of a frame
              * that differs by more than 12 from both the frame before and the one after, while those two agree, flickered. */
@@ -8504,7 +8555,12 @@ static void wb_get_num_textures(Ctx *c) { RET(rd32(A0) & 0xff); }
 static void wb_get_num_active(Ctx *c) { RET(rd8(A0 + 5) ? rd8(A0 + 5) : (rd32(A0) & 0xff)); }
 static void wb_get_texture(Ctx *c) { RET((uint32_t)A1 < 6 ? rd64(A0 + 8 + (A1 & 7) * 8) : 0); }
 static void win_finalize(Ctx *c) { gl_barrier(); Window *w = hobj(A0, K_WIN); if (w) { wr32(A0 + 8, 0); w->count = 0; } nvn_label_drop(A0); }
-static void win_set_interval(Ctx *c) { Window *w = hobj(A0, K_WIN); if (w) { w->interval = (int)A1; display_set_interval((int)A1); } }
+static void win_set_interval(Ctx *c) {
+    Window *w = hobj(A0, K_WIN);
+    void display_rate_site(uint64_t lr);
+    display_rate_site(c->x[30]);                     /* display.c: the game's frame-rate controller (frame_rate = 60) */
+    if (w) { w->interval = (int)A1; display_set_interval((int)A1); }
+}
 static void win_get_interval(Ctx *c) { Window *w = hobj(A0, K_WIN); RET(w ? w->interval : 1); }
 static void win_get_native(Ctx *c) { Window *w = hobj(A0, K_WIN); RET(w ? w->native : 0); }
 static void win_get_num_textures(Ctx *c) { Window *w = hobj(A0, K_WIN); RET(w ? w->count : 0); }

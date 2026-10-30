@@ -803,16 +803,68 @@ int gfx_frame_rate(void);
  * try every 20 s. */
 static volatile LONG g_adapt;                 /* 1: the interval is the game's halved and adapts (frame_rate = 60) */
 static LARGE_INTEGER g_release_at;            /* end of the last refresh wait */
+/* THE GAME'S OWN FRAME-RATE CONTROLLER (2026-10-30). Tomodachi Life picks its present interval itself, every frame
+ * (1.0.4: 0x710027f474, called from 0x710027efe4; 1.0.0: 0x710028b2b8 from 0x710028ae34): interval = clamp(int(frame time
+ * x 60 + bias) + 1, minimum, maximum) (fields +0 and +4 of the controller, a singleton behind a global), fps = 60 / interval
+ * (+0x50), and the game steps its logic by that. frame_rate = 60 used to halve the interval the game asked for: the game was
+ * sure it ran at 30 and every movement went twice as fast (user, 2026-10-30). Now its minimum (2 on the console) is set to 1:
+ * the game chooses 60 itself and steps 1/60 a frame; the 30 fps fallback below moves that minimum, never the interval. */
+static uint64_t g_rate_ctl;                   /* the controller (0: not found: the interval is halved as before) */
+static uint32_t g_rate_min0;                  /* its own minimum */
+static int g_rate_v104;                       /* found through 1.0.4's call site (TOMO_STEPLOG knows only its addresses) */
+static volatile LONG g_rate_floor = 1;        /* the minimum it has from us (frame_rate = 60) */
+static void rate_floor(int n) {
+    if (!g_rate_ctl) return;
+    InterlockedExchange(&g_rate_floor, n);
+    uint32_t mn = (uint32_t)(gfx_frame_rate() >= 60 ? n : (int)g_rate_min0);
+    wr32(g_rate_ctl, mn);
+    /* +0x44: the lower interval the controller tries next once its countdown (+0x4c) ends, set when it goes UP to
+     * max(new - 1, minimum): raised while the minimum was 2, it stayed 2 and the game never came back to 60 (2026-10-30). */
+    if (rd32(g_rate_ctl + 0x40) > mn && rd32(g_rate_ctl + 0x44) > mn) wr32(g_rate_ctl + 0x44, mn);
+}
+/* nvn_gl.c, at nvnWindowSetPresentInterval: lr = the game's return address. The controller's call site finds the controller. */
+void display_rate_site(uint64_t lr) {
+    static int tried;
+    uint64_t slot = lr == 0x710027f5c4ULL ? 0x710326d880ULL : lr == 0x710028b408ULL ? 0x71032cb138ULL : 0;
+    if (g_rate_ctl || tried || !slot || getenv("TOMO_INTERVAL")) return;
+    tried = 1;
+    if ((rd32(lr - 4) & 0xFFFFFC1Fu) != 0xD63F0000u) return;          /* BLR at the call site: the code is the one studied */
+    uint64_t g = rd64(slot), ctl = g ? rd64(g) : 0;
+    uint32_t mn = ctl ? rd32(ctl) : 0, mx = ctl ? rd32(ctl + 4) : 0, cur = ctl ? rd32(ctl + 0x40) : 0;
+    float bias = 0; if (ctl) { uint32_t b = rd32(ctl + 8); memcpy(&bias, &b, 4); }
+    printf("display: the game's frame-rate controller at %llx: interval %u..%u (now %u, %u fps), bias %.2f%c", (unsigned long long)ctl, mn, mx, cur, ctl ? rd32(ctl + 0x50) : 0, bias, 10);
+    if (!ctl || mn < 1 || mn > 4 || mx < mn || mx > 8 || cur < mn || cur > mx) { printf("display: ... not the expected values: frame_rate = 60 halves the interval as before%c", 10); return; }
+    g_rate_min0 = mn; g_rate_ctl = ctl; g_rate_v104 = lr == 0x710027f5c4ULL;
+    rate_floor(1);
+    printf("display: frame_rate %d: the game's minimum interval is now %u (it steps its logic by the interval it chooses)%c", gfx_frame_rate(), rd32(ctl), 10);
+}
 static void adapt_frame(LARGE_INTEGER now) {
     static double ema;
     static int over, at30, window, missed;
     static LARGE_INTEGER last;
+    if (g_rate_ctl && (int)rd32(g_rate_ctl) != (gfx_frame_rate() >= 60 ? (int)g_rate_floor : (int)g_rate_min0)) rate_floor(g_rate_floor);      /* (frame_rate changed in the menu) */
+    {   static LONG64 n; static int every = -1;              /* TOMO_STEPLOG=<k> (TEST): the game's own step every k frames (1.0.4: its frame object's +0x10, 60 Hz ticks a frame) */
+        if (every < 0) every = getenv("TOMO_STEPLOG") ? atoi(getenv("TOMO_STEPLOG")) : 0;
+        if (every > 0 && g_rate_ctl && g_rate_v104 && ++n % every == 0) { uint64_t fo = rd64(0x710390f270ULL); printf("steplog: frame %lld: interval %u, the game's step %u ticks%c", (long long)n, rd32(g_rate_ctl + 0x40), fo ? rd32(fo + 0x10) : 0, 10); }
+    }
     if (!g_adapt || !g_release_at.QuadPart || g_ff > 1) return;
     double ms = (double)(now.QuadPart - g_release_at.QuadPart) * 1000.0 / (double)g_freq.QuadPart;
     double gap = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)g_freq.QuadPart : 0;      /* since the last present */
     last = now;
     if (ms < 0 || ms > 500) return;
     ema = ema ? ema * 0.85 + ms * 0.15 : ms;
+    if (g_rate_ctl) {                                  /* the game's controller is in charge: the fallback moves its minimum */
+        static int over, at30, window, missed, off = -1;
+        if (off < 0) off = getenv("TOMO_ADAPT") && getenv("TOMO_ADAPT")[0] == '0';      /* TEST: no fallback to 30 */
+        if (off) return;
+        if (g_rate_floor == 1) {
+            double due = (double)(g_interval > 0 ? g_interval : 1) * 1000.0 / 60.0;      /* (the game may choose 2 for a while itself: not late) */
+            missed += gap > due + 8.3 && gap < due + 33.4; if (++window >= 60) { if (missed >= 4) over = 60; window = missed = 0; }      /* 4 a second: steady 30 beats a 55 fps judder (the quality bar) */
+            over = ema > 15.5 || over >= 60 ? over + 1 : 0;
+            if (over >= 60) { window = missed = 0; over = at30 = 0; rate_floor(2); static int n; if (n++ < 20) printf("display: frame_rate 60: frames take %.1f ms: 30 fps for now (the game's minimum interval 2)%c", ema, 10); }
+        } else if (++at30 >= 600) { over = at30 = 0; rate_floor(1); static int n; if (n++ < 20) printf("display: frame_rate 60: 60 fps again (the game's minimum interval 1)%c", 10); }
+        return;
+    }
     if (g_interval == 1) {
         /* also: presents a refresh late (the render thread or the GPU, which the busy time does not see): 40-50 fps on a
          * 60 Hz display judders; 6 late ones in a second -> 30. A stall of 50 ms or more is not counted: 30 fps would not
@@ -834,6 +886,7 @@ void display_set_interval(int n) {
     static int force = -2;
     if (force == -2) force = getenv("TOMO_INTERVAL") ? atoi(getenv("TOMO_INTERVAL")) : -1;
     if (force >= 0) n = force;
+    else if (g_rate_ctl) InterlockedExchange(&g_adapt, gfx_frame_rate() >= 60);      /* the game chose this interval itself (display_rate_site) */
     else if (n > 1 && gfx_frame_rate() >= 60) { n /= 2; InterlockedExchange(&g_adapt, n == 1); }
     else InterlockedExchange(&g_adapt, 0);
     InterlockedExchange(&g_interval, n < 0 ? 0 : n > 5 ? 5 : n);
