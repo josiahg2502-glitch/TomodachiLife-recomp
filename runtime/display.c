@@ -44,6 +44,23 @@ static LARGE_INTEGER g_freq;
  * texture (nvnSyncWait on the sync of nvnWindowAcquireTexture), which is AFTER it has read the refresh count, as on
  * the console. SSBU_OLD_PACING=1: the two clocks as before. SSBU_CLOCKSTAT=1: one line every 600 presented frames. */
 static int g_old_pacing = -1, g_clockstat;
+/* FAST-FORWARD (2026-10-30, the quality bar's "fast-forward" option): while Tab (display_ff_key) or both stick buttons
+ * (display_ff_pad, menu.cpp) are held, the refresh clock gives graphics.ini fast_forward (2, 3, 4) x 60 ticks a second
+ * from our own clock (the display lock is left and retaken afterwards): the game steps one frame per tick, so it runs
+ * that many times faster, the island's clock included. nvn_gl.c presents every ff-th frame (the monitor cannot show
+ * more), nnaudio.c plays every ff-th sound buffer and releases the others on a clock ff times faster, tomo.c's audio
+ * frame clock ticks ff times faster. TOMO_FF=<n> (test): always on. */
+volatile LONG g_ff = 1;
+static int g_ff_key, g_ff_pad, g_ff_env = -1;
+int gfx_ff_speed(void);
+static void ff_update(void) {
+    if (g_ff_env < 0) { const char *e = getenv("TOMO_FF"); g_ff_env = e ? atoi(e) : 0; }
+    int ff = g_ff_env > 1 ? g_ff_env : (g_ff_key || g_ff_pad) ? gfx_ff_speed() : 1;
+    if (ff != g_ff) { InterlockedExchange(&g_ff, ff); printf("display: fast-forward %s%c", ff > 1 ? "on" : "off", 10); fflush(stdout); }
+}
+int display_ff(void) { return g_ff; }
+void display_ff_key(int on) { g_ff_key = on != 0; ff_update(); }
+void display_ff_pad(int on) { g_ff_pad = on != 0; ff_update(); }
 static volatile LONG64 g_vsync_n;            /* refreshes passed (published after the event was signalled) */
 static volatile LONG64 g_vsync_signals, g_vsync_late;
 static SRWLOCK g_vsync_lock = SRWLOCK_INIT;
@@ -458,6 +475,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
+    {   int menu_is_open(void);
+        if (m == WM_KEYDOWN && w == VK_TAB && !(l & (1 << 30)) && !menu_is_open()) { display_ff_key(1); return 0; }      /* fast-forward while held */
+        if (m == WM_KEYUP && w == VK_TAB) { display_ff_key(0); return 0; }
+        if (m == WM_KILLFOCUS) display_ff_key(0); }
     if (m == WM_APP + 0x51) { window_mode_set(h, (int)w); return 0; }                                 /* U1: the settings menu (menu.cpp) */
     if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
     {   int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);      /* U1 (menu.cpp): F1 opens / closes; the menu takes the mouse and keys while open */
@@ -642,7 +663,7 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         LONG64 n = 0;
         HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        int lock_tried = 0;
+        int lock_tried = 0, ff_was = 1;
         LONG64 vb_last = 0, relock_at = 0;      /* the lock was dropped (no vblank for 100 ms): tried again from this time on */
         pace_options();
         display_perf_host_thread();
@@ -668,6 +689,15 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                     } else relock_at = now.QuadPart + 2 * g_freq.QuadPart;
                 }
             }
+            {   int ff = g_ff;                                                     /* fast-forward: our own clock, ff x 60 Hz */
+                if (ff != ff_was) {
+                    QueryPerformanceCounter(&now);
+                    if (ff > 1 && g_lock_k) { InterlockedExchange(&g_lock_k, 0); }
+                    t0.QuadPart = now.QuadPart - n * g_freq.QuadPart / (60 * ff);
+                    if (ff == 1) relock_at = now.QuadPart + g_freq.QuadPart / 2;
+                    ff_was = ff;
+                }
+            }
             if (g_lock_k) {
                 LONG64 k = g_lock_k, vb_target = vb_last + k, vc, vq;
                 int timeouts = 0;
@@ -691,11 +721,12 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                 n += 1 + extra;
                 t0.QuadPart = 0;
             } else {
-            if (!t0.QuadPart) { QueryPerformanceCounter(&now); t0.QuadPart = now.QuadPart - n * g_freq.QuadPart / 60; }
-            LONGLONG target = t0.QuadPart + (n + 1) * g_freq.QuadPart / 60;       /* no accumulated rounding */
+            LONGLONG hz = 60 * (LONGLONG)ff_was;
+            if (!t0.QuadPart) { QueryPerformanceCounter(&now); t0.QuadPart = now.QuadPart - n * g_freq.QuadPart / hz; }
+            LONGLONG target = t0.QuadPart + (n + 1) * g_freq.QuadPart / hz;       /* no accumulated rounding */
             precise_wait_until(target, timer);
             QueryPerformanceCounter(&now);
-            LONG64 passed = (now.QuadPart - t0.QuadPart) * 60 / g_freq.QuadPart;   /* >= n + 1; more when this thread was kept off the CPU */
+            LONG64 passed = (now.QuadPart - t0.QuadPart) * hz / g_freq.QuadPart;   /* >= n + 1; more when this thread was kept off the CPU */
             if (passed < n + 1) passed = n + 1;
             if (passed > n + 1) InterlockedExchangeAdd64(&g_vsync_late, passed - (n + 1));
             n = passed;
@@ -776,7 +807,7 @@ static void adapt_frame(LARGE_INTEGER now) {
     static double ema;
     static int over, at30, window, missed;
     static LARGE_INTEGER last;
-    if (!g_adapt || !g_release_at.QuadPart) return;
+    if (!g_adapt || !g_release_at.QuadPart || g_ff > 1) return;
     double ms = (double)(now.QuadPart - g_release_at.QuadPart) * 1000.0 / (double)g_freq.QuadPart;
     double gap = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)g_freq.QuadPart : 0;      /* since the last present */
     last = now;
@@ -1095,7 +1126,7 @@ void display_present_plan(int vulkan) {
     InterlockedExchange(&g_latch_pending, iv != 0);
     if (iv && !on_time) g_hold_late++;
     l1_plan(iv && !on_time && now_n > prev + iv);      /* L1 (a frame queued after the tick it was due at = late) */
-    InterlockedExchange64(&g_hold_target, on_time && g_hold_on && !g_lockstep ? at : 0);
+    InterlockedExchange64(&g_hold_target, on_time && g_hold_on && !g_lockstep && g_ff == 1 ? at : 0);
     InterlockedExchange(&g_planned, 1);
 }
 /* Render thread, at the place of vkQueuePresentKHR. Returns 1 when the finished frame is to be KEPT for the tick decided

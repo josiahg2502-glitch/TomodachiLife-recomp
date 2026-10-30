@@ -92,6 +92,7 @@ static uint64_t g_released[SLOTS];
 static unsigned g_rel_head, g_rel_tail;
 static LARGE_INTEGER g_freq;
 static LONGLONG g_clock_due;
+int display_ff(void);                            /* display.c: fast-forward factor, 1 = none */
 static float g_volume = 1.0f;                         /* output volume of the active device */
 static int g_host_percent = -1;                      /* U1: the host volume set at open (0..100), -1 before; nnaudio_set_volume changes it */
 static const char g_device_name[] = "AudioTvOutput";
@@ -348,7 +349,8 @@ static void audio_AppendAudioOutBuffer(Ctx *c) {      /* (AudioOut *, AudioOutBu
             fwrite(s->pcm, 4, frames, g_wav);
             g_wav_bytes += (unsigned long long)frames * 4;
         }
-        if (g_wave) {
+        int ff = display_ff();
+        if (g_wave && !(ff > 1 && (g_total_appended % (unsigned)ff) != 0)) {      /* fast-forward: every ff-th buffer is heard */
             if (g_started && g_heard && g_frames_submitted) {
                 MMTIME mt;
                 memset(&mt, 0, sizeof mt);
@@ -367,7 +369,7 @@ static void audio_AppendAudioOutBuffer(Ctx *c) {      /* (AudioOut *, AudioOutBu
         if (!s->prepared) {                           /* clock-driven: one buffer after the other in real time */
             LONGLONG now = now_ticks();
             if (g_clock_due < now) g_clock_due = now;
-            g_clock_due += (LONGLONG)frames * g_freq.QuadPart / g_rate;
+            g_clock_due += (LONGLONG)frames * g_freq.QuadPart / g_rate / (ff > 1 ? ff : 1);
             s->due = g_clock_due;
         }
         g_tail++;

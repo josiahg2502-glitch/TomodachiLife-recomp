@@ -31,6 +31,9 @@ int gfx_frame_rate(void) {
     if (env > 0) return env;
     gfx_options(); return g_gfx_fps;
 }
+static int g_gfx_ff = 2;
+int gfx_ff_speed(void) { gfx_options(); return g_gfx_ff; }
+void gfx_ff_set(int n) { gfx_options(); g_gfx_ff = n < 2 ? 2 : n > 4 ? 4 : n; }
 static float g_gfx_wide = -1.0f;                           /* widescreen = off 0 | auto -1 | an aspect ratio (21:9 -> 2.333) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
@@ -141,6 +144,11 @@ static const char *const k_default_ini =
 ";   TOMO_FRAME_RATE / TOMO_INTERVAL win.\r\n"
 "frame_rate = 60\r\n"
 "\r\n"
+"; fast_forward = 2 | 3 | 4\r\n"
+";   The speed of the game while Tab, or both stick buttons of a controller, are held: as many game frames per second.\r\n"
+";   The picture shows every 2nd (3rd, 4th) frame, the sound every 2nd (3rd, 4th) slice.\r\n"
+"fast_forward = 2\r\n"
+"\r\n"
 "; widescreen = auto | off | 21:9 | 32:9 | <width:height>\r\n"
 ";   Wider than 16:9 (OpenGL): the 3D picture shows more at the sides, menus and text stay 16:9 in the middle.\r\n"
 ";   auto: the monitor's shape (borderless, fullscreen) or width:height (windowed). off: 16:9. TOMO_WIDESCREEN wins.\r\n"
@@ -239,6 +247,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
         else if (!_stricmp(key, "frame_rate")) g_gfx_fps = atoi(val) >= 60 ? 60 : 30;
+        else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : strchr(val, ':') && atof(strchr(val, ':') + 1) > 0 ? (float)(atof(val) / atof(strchr(val, ':') + 1)) : (float)atof(val);
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */

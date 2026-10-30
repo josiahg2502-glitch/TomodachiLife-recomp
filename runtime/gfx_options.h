@@ -22,7 +22,9 @@ const GfxOptions *gfx_options(void);      /* any thread; read once (the file is 
 int gfx_latency(void);                    /* latency = normal 0 | low 1 | lowest 2 */
 int gfx_runahead(void);                   /* runahead = off 0 | on 1 */
 int gfx_frame_rate(void);                 /* frame_rate = 30 | 60 (display.c: the present interval, halved and adaptive at 60) */
-float gfx_widescreen(void);               /* widescreen = off 0 | auto -1 | an aspect ratio (nvn_gl.c wide_k, display.c) */
+float gfx_widescreen(void);
+int gfx_ff_speed(void);                   /* fast_forward = 2 | 3 | 4: the speed while the fast-forward key is held */
+void gfx_ff_set(int n);                   /* changed while running (PC Settings) */               /* widescreen = off 0 | auto -1 | an aspect ratio (nvn_gl.c wide_k, display.c) */
 int gfx_stats_overlay(void);              /* stats_overlay = off 0 | on 1 (menu.cpp, F2) */
 int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game settings menu, F1) */
 int gfx_volume(void);                     /* volume = auto -1 | 0..100 (the copies a person plays; nnaudio.c) */

@@ -6590,6 +6590,8 @@ static void job_present(void *arg) {
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_FRAMEBUFFER_SRGB_);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, 0);
+    int ff_skip = 0;                             /* fast-forward (display.c): the monitor shows every ff-th frame */
+    {   int display_ff(void); static unsigned ffk; int ff = display_ff(); ff_skip = ff > 1 && (++ffk % (unsigned)ff) != 0; }
     if (t && getenv("TOMO_ALIASLOG")) {              /* diagnosis: textures laid over the presented window texture's memory */
         static int said;
         if (said++ < 3) {
@@ -6600,7 +6602,8 @@ static void job_present(void *arg) {
                     printf("aliaslog:   gl %u mem %p (%+lld) %dx%d format 0x%x flags 0x%x\n", o->o.gl, (void *)o->mem, (long long)(o->mem - t->mem), o->b.width, o->b.height, o->b.format, (unsigned)o->b.flags);
         }
     }
-    if (t && !t->dead && t->o.gl) {
+    if (ff_skip) { present_fence(frame); }
+    else if (t && !t->dead && t->o.gl) {
         int sr[4] = {0, 0, t->b.width, t->b.height};
         ga_barrier();
         if (j->win->crop[2] > 0 && j->win->crop[3] > 0) memcpy(sr, j->win->crop, sizeof sr);
@@ -6713,10 +6716,11 @@ static void job_present(void *arg) {
         glClear(GL_COLOR_BUFFER_BIT);
     }
 #ifdef _WIN32
-    menu_gl_draw((int)r.right, (int)r.bottom);      /* the in-game settings menu over the picture (nvn_gl_menu.c) */
+    if (!ff_skip) menu_gl_draw((int)r.right, (int)r.bottom);      /* the in-game settings menu over the picture (nvn_gl_menu.c) */
     fbo_detach(g_fbo_read);
-    present_fence(frame);
-    if (!j->shot_fight && display_present_defer()) {      /* kept in the back buffer for its tick (see gl_swap_now) */
+    if (!ff_skip) present_fence(frame);
+    if (ff_skip) { (void)display_present_defer(); }           /* (not shown; the plan's target is consumed) */
+    else if (!j->shot_fight && display_present_defer()) {      /* kept in the back buffer for its tick (see gl_swap_now) */
         glFlush();
         InterlockedExchange(&g_display_holding, 1);
         InterlockedExchange(&g_gl_swap_pending, 1);

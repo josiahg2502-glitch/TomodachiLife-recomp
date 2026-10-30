@@ -1623,7 +1623,7 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
@@ -1634,7 +1634,8 @@ static const char *const k_wide_name[] = {"Fit the screen", "Off (16:9)", "21:9"
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Quit to desktop"};
+static int g_t_ff;
 static const uint32_t NAVY = 0x022240;
 
 static int classic(void) {
@@ -1646,6 +1647,7 @@ static void t_init(void) {
     float w = gfx_widescreen();
     g_t_wide0 = g_t_wide = w < 0 ? 0 : w == 0 ? 1 : w < 3.0f ? 2 : 3;
     g_t_fps0 = g_t_fps = gfx_frame_rate();
+    g_t_ff = gfx_ff_speed();
 }
 static int t_res_idx(void) { int b = 0; for (int i = 1; i < N(k_res); i++) if (fabsf(k_res[i] - S.scale) < fabsf(k_res[b] - S.scale)) b = i; return b; }
 static int t_changed(int r) {                  /* a setting read at start, changed since: it applies at the next start */
@@ -1669,6 +1671,7 @@ static void t_value(int r, char *v, int n) {
     case T_VSYNC: snprintf(v, (size_t)n, "%s", k_vsync_name[S.vsync]); break;
     case T_VOLUME: snprintf(v, (size_t)n, "%d", S.volume < 0 ? 100 : S.volume); break;
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
+    case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
     default: v[0] = 0;
     }
 }
@@ -1686,6 +1689,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_VOLUME: S.volume = (S.volume < 0 ? 100 : S.volume) + dir * 10; S.volume = S.volume < 0 ? 0 : S.volume > 100 ? 100 : S.volume;
         nnaudio_set_volume(S.volume); snprintf(v, sizeof v, "%d", S.volume); ini("volume", v); break;
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
+    case T_FF: g_t_ff = 2 + (g_t_ff - 2 + dir + 3) % 3; snprintf(v, sizeof v, "%d", g_t_ff); ini("fast_forward", v); gfx_ff_set(g_t_ff); break;
     }
     char now[64]; t_value(r, now, sizeof now);
     printf("menu: %s = %s%s\n", k_tlabel[r], now, t_changed(r) ? " (at the next start)" : ""); fflush(stdout);
@@ -1792,7 +1796,7 @@ static void draw_tomo(void) {
     t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFD05A, in));
     t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), "PC Settings");
 
-    const float rw = 1180.0f * u, rh = 74.0f * u, gap = 12.0f * u, rx = bx + (bw - rw) * 0.5f, ry0 = by + 168.0f * u + rise;
+    const float rw = 1180.0f * u, rh = 66.0f * u, gap = 10.0f * u, rx = bx + (bw - rw) * 0.5f, ry0 = by + 160.0f * u + rise;
     int pending = 0;
     for (int r = 0; r < T_N; r++) {
         ImVec2 a(rx, ry0 + (float)r * (rh + gap)), b(rx + rw, ry0 + (float)r * (rh + gap) + rh);
@@ -2106,6 +2110,8 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     }
     pad_feed(io, g_open && !capturing() && !osk_active() ? b : 0);
     if (g_open && !classic() && !osk_active()) t_pad(b, down);
+    {   void display_ff_pad(int on); const uint64_t sticks = BIT(B_LS) | BIT(B_RS);      /* both stick buttons held: fast-forward (display.c) */
+        display_ff_pad(!g_open && (b & sticks) == sticks); }
     if (g_open && classic() && !capturing() && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
     if (g_open && classic() && !capturing() && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
     io.MouseDrawCursor = false;

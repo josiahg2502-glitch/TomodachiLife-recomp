@@ -60,7 +60,8 @@ The **first start** prepares every shader of the game ("preparing shaders"): a f
 **In the game**, **PC Settings** opens with **F1**, the controller's **HOME** / Guide button, or by holding **-** and **+**
 together for a second (Steam Deck): screen, window size, resolution, widescreen, frame rate, vsync, volume, language and
 Quit to desktop, on a page in the game's own style and with its own fonts. Played like the game's menus (d-pad or arrow
-keys, A / Enter, B / Esc); the mouse works too.
+keys, A / Enter, B / Esc); the mouse works too. **Fast-forward:** hold **Tab**, or both stick buttons of a controller; the
+speed (2x, 3x, 4x) is on that page.
 
 Your save lives in `build\userdata` (or the install location you chose). **Playing 1.0.4 upgrades a 1.0.0 save; 1.0.0 cannot
 read it afterwards.** Back it up first (SAVE DATA) if you may go back.

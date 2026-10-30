@@ -360,8 +360,10 @@ static DWORD WINAPI ren_clock(void *p) {
     if (!t) t = CreateWaitableTimerW(NULL, FALSE, NULL);
     LARGE_INTEGER f, now; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&now);
     long long period = f.QuadPart / 200, next = now.QuadPart + period;
+    int display_ff(void);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     while (r->run) {
+        period = f.QuadPart / (200 * (long long)display_ff());                 /* fast-forward: as many audio frames as game frames */
         QueryPerformanceCounter(&now);
         long long wait = next - now.QuadPart;
         if (wait > 0) { LARGE_INTEGER due; due.QuadPart = -(wait * 10000000 / f.QuadPart); SetWaitableTimer(t, &due, 0, NULL, NULL, FALSE); WaitForSingleObject(t, 20); }
