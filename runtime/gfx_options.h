@@ -21,7 +21,7 @@ const GfxOptions *gfx_options(void);      /* any thread; read once (the file is 
 /* U1 (settings menu, menu.cpp): the keys of graphics.ini that are not in GfxOptions, and the writer */
 int gfx_latency(void);                    /* latency = normal 0 | low 1 | lowest 2 */
 int gfx_runahead(void);                   /* runahead = off 0 | on 1 */
-int gfx_frame_rate(void);                 /* 30; TOMO_FRAME_RATE=60 in development (display.c: the present interval, halved) */
+int gfx_frame_rate(void);                 /* frame_rate = 30 | 60 (display.c: the present interval, halved and adaptive at 60) */
 float gfx_widescreen(void);               /* widescreen = off 0 | auto -1 | an aspect ratio (nvn_gl.c wide_k, display.c) */
 int gfx_stats_overlay(void);              /* stats_overlay = off 0 | on 1 (menu.cpp, F2) */
 int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game settings menu, F1) */

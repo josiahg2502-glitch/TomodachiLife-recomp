@@ -22,9 +22,15 @@ static int g_gfx_menu = 1, g_gfx_volume = -1;      /* U1: menu = on (default) | 
 static char g_gfx_language[16];                      /* U1: language = auto ("") | a code */
 int gfx_menu(void) { gfx_options(); return g_gfx_menu; }
 static int g_gfx_stats;                              /* U1: stats_overlay = off | on */
-/* 30 fps, as on the console. 60 fps is not offered until the port is done (owner, 2026-10-25): the frame_rate key of
- * graphics.ini is not read; TOMO_FRAME_RATE=60 (development only) turns the adaptive 60 fps mode on (display.c). */
-int gfx_frame_rate(void) { static int fps = -1; if (fps < 0) fps = getenv("TOMO_FRAME_RATE") && atoi(getenv("TOMO_FRAME_RATE")) >= 60 ? 60 : 30; return fps; }
+/* frame_rate = 30 (default, as on the console) | 60 (opt-in, issue 3: the adaptive mode of display.c; the game's logic
+ * counts refreshes, so it keeps its speed). TOMO_FRAME_RATE wins. */
+static int g_gfx_fps = 30;
+int gfx_frame_rate(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("TOMO_FRAME_RATE") ? (atoi(getenv("TOMO_FRAME_RATE")) >= 60 ? 60 : 30) : -1;
+    if (env > 0) return env;
+    gfx_options(); return g_gfx_fps;
+}
 static float g_gfx_wide;                             /* widescreen = off 0 | auto -1 | an aspect ratio (21:9 -> 2.333) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
@@ -129,6 +135,12 @@ static const char *const k_default_ini =
 ";   vsync = clock; those three keys of the file are then not used. The log says which profile is active.\r\n"
 "profile = custom\r\n"
 "\r\n"
+"; frame_rate = 30 | 60\r\n"
+";   30: as on the console. 60: presented at 60 frames per second; the game's logic counts the display's refreshes, so\r\n"
+";   it keeps its speed; a scene the PC cannot hold at 60 drops to 30 for a while instead of stuttering.\r\n"
+";   TOMO_FRAME_RATE / TOMO_INTERVAL win.\r\n"
+"frame_rate = 30\r\n"
+"\r\n"
 "; widescreen = off | auto | 21:9 | 32:9 | <width:height>\r\n"
 ";   Wider than 16:9 (OpenGL): the 3D picture shows more at the sides, menus and text stay 16:9 in the middle.\r\n"
 ";   auto: the monitor's shape (borderless, fullscreen) or width:height (windowed). TOMO_WIDESCREEN wins.\r\n"
@@ -226,7 +238,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "latency")) g_gfx_latency = !_stricmp(val, "lowest") ? 2 : !_stricmp(val, "low") ? 1 : 0;      /* track L1 (display.c latency_mode) */
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
-        else if (!_stricmp(key, "frame_rate")) {}      /* not offered yet: 30 fps (gfx_frame_rate) */
+        else if (!_stricmp(key, "frame_rate")) g_gfx_fps = atoi(val) >= 60 ? 60 : 30;
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : strchr(val, ':') && atof(strchr(val, ':') + 1) > 0 ? (float)(atof(val) / atof(strchr(val, ':') + 1)) : (float)atof(val);
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */
