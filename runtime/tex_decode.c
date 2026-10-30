@@ -1090,26 +1090,30 @@ static void decode_rows(int nf, const TexFormat *f, const void *src, int w, int 
 #include <windows.h>
 /* A large image is decoded by the system thread pool in bands of 16 block rows: an ASTC 2048x2048 took 100+ ms on the
  * render thread alone (hitches whenever the island streamed textures in). Each band writes its own rows only. */
-typedef struct { int nf; const TexFormat *f; const void *src; int w, h, hb; uint8_t *dst; volatile LONG next; int prio; } Bands;
+typedef struct { int nf; const TexFormat *f; const void *src; int w, h, hb, rows; uint8_t *dst; volatile LONG next; int prio; } Bands;
 static void CALLBACK decode_band(PTP_CALLBACK_INSTANCE inst, void *arg, PTP_WORK work) {
     Bands *b = arg;
     int prio = inst ? GetThreadPriority(GetCurrentThread()) : b->prio;
     (void)work;
     if (prio != b->prio) SetThreadPriority(GetCurrentThread(), b->prio);      /* the caller's (nvn_gl.c: the decoder thread is below normal) */
-    for (LONG i; (i = InterlockedIncrement(&b->next) - 1) * 16 < b->hb;)
-        decode_rows(b->nf, b->f, b->src, b->w, b->h, b->dst, (int)i * 16, (int)i * 16 + 16 < b->hb ? (int)i * 16 + 16 : b->hb);
+    for (LONG i; (i = InterlockedIncrement(&b->next) - 1) * b->rows < b->hb;)
+        decode_rows(b->nf, b->f, b->src, b->w, b->h, b->dst, (int)i * b->rows, (int)i * b->rows + b->rows < b->hb ? (int)i * b->rows + b->rows : b->hb);
     if (prio != b->prio) SetThreadPriority(GetCurrentThread(), prio);
 }
 static int decode_parallel(int nf, const TexFormat *f, const void *src, int w, int h, uint8_t *dst, int wb, int hb) {
     static int off = -1;
     if (off < 0) off = getenv("TOMO_DECODE_THREADS") && !strcmp(getenv("TOMO_DECODE_THREADS"), "0");
-    if (off || (long long)wb * hb < 1024 || hb < 32) return 0;      /* 1024: a 512x512 ASTC 6x6 (7,396 blocks) took 6 ms alone */
-    Bands b = {nf, f, src, w, h, hb, dst, 0, GetThreadPriority(GetCurrentThread())};
+    /* 2026-10-30: small textures too, in thinner bands: a scene change brings dozens of 128-512 px textures at once, each
+     * decoded alone on the render thread (talking scene: 100-180 ms frames); a band of 2 block rows of a 32x32-block
+     * texture is ~100 us of work against ~10 us of pool overhead. */
+    if (off || (long long)wb * hb < 512 || hb < 4) return 0;
+    int rows = hb >= 256 ? 16 : hb >= 64 ? 4 : 2;
+    Bands b = {nf, f, src, w, h, hb, rows, dst, 0, GetThreadPriority(GetCurrentThread())};
     PTP_WORK work = CreateThreadpoolWork(decode_band, &b, NULL);
     if (!work) return 0;
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    int n = (int)si.dwNumberOfProcessors - 1, bands = (hb + 15) / 16;
+    int n = (int)si.dwNumberOfProcessors - 1, bands = (hb + rows - 1) / rows;
     if (n > bands - 1) n = bands - 1;
     if (n > 7) n = 7;
     for (int i = 0; i < n; i++) SubmitThreadpoolWork(work);
