@@ -52,8 +52,8 @@ The **first start** prepares every shader of the game ("preparing shaders"): a f
 
 - **PLAY** starts the game.
 - **GAME** shows the game version (1.0.0 or 1.0.4) and lets you choose another game folder.
-- **SETTINGS**: window or full screen, resolution (up to 4K), widescreen, vsync, volume, language, Local Play online (saved in
-  `build\config\graphics.ini`).
+- **SETTINGS**: window or full screen, resolution (up to 4K and above), widescreen (fits the monitor by default, ultrawide
+  too), frame rate (60 fps by default), vsync, volume, language, Local Play online (saved in `build\config\graphics.ini`).
 - **SAVE DATA**: back up and restore your save, or import a save dumped from your Switch (`Map.sav`, `Mii.sav`, `Player.sav`).
 - **CONTROLS**: the controller it sees and the keyboard keys (`build\config\controllers.ini`).
 
@@ -75,6 +75,14 @@ The game is played as on a docked Switch.
 
 **Mouse:** the hand follows the mouse. Left click = A, right click = B; the wheel acts as ZL / ZR (in menus it moves the selection).
 Keys and buttons can be changed in `build\config\controllers.ini`.
+
+## Mods
+
+Put each mod in its own folder in `build\mods` (made at the first start). Mods made for emulators or a modded Switch
+(LayeredFS) work as they are: the game uses the first `romfs` folder inside each mod, for example
+`build\mods\MyMod\romfs\...` or `build\mods\MyMod\atmosphere\contents\010051F0207B2000\romfs\...`. When two mods change the
+same file, the one whose folder name comes first wins. To turn a mod off, move its folder out. `exefs` code patches cannot
+work here: the game's code is translated ahead of time.
 
 ## Local Play (Mii exchange)
 

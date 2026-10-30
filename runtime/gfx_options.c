@@ -22,16 +22,16 @@ static int g_gfx_menu = 1, g_gfx_volume = -1;      /* U1: menu = on (default) | 
 static char g_gfx_language[16];                      /* U1: language = auto ("") | a code */
 int gfx_menu(void) { gfx_options(); return g_gfx_menu; }
 static int g_gfx_stats;                              /* U1: stats_overlay = off | on */
-/* frame_rate = 30 (default, as on the console) | 60 (opt-in, issue 3: the adaptive mode of display.c; the game's logic
- * counts refreshes, so it keeps its speed). TOMO_FRAME_RATE wins. */
-static int g_gfx_fps = 30;
+/* frame_rate = 60 (default: the adaptive mode of display.c; the game's logic counts refreshes, so it keeps its speed) |
+ * 30 (as on the console). TOMO_FRAME_RATE wins. */
+static int g_gfx_fps = 60;
 int gfx_frame_rate(void) {
     static int env = -2;
     if (env == -2) env = getenv("TOMO_FRAME_RATE") ? (atoi(getenv("TOMO_FRAME_RATE")) >= 60 ? 60 : 30) : -1;
     if (env > 0) return env;
     gfx_options(); return g_gfx_fps;
 }
-static float g_gfx_wide;                             /* widescreen = off 0 | auto -1 | an aspect ratio (21:9 -> 2.333) */
+static float g_gfx_wide = -1.0f;                           /* widescreen = off 0 | auto -1 | an aspect ratio (21:9 -> 2.333) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
 int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
@@ -135,16 +135,16 @@ static const char *const k_default_ini =
 ";   vsync = clock; those three keys of the file are then not used. The log says which profile is active.\r\n"
 "profile = custom\r\n"
 "\r\n"
-"; frame_rate = 30 | 60\r\n"
-";   30: as on the console. 60: presented at 60 frames per second; the game's logic counts the display's refreshes, so\r\n"
-";   it keeps its speed; a scene the PC cannot hold at 60 drops to 30 for a while instead of stuttering.\r\n"
+"; frame_rate = 60 | 30\r\n"
+";   60: presented at 60 frames per second; the game's logic counts the display's refreshes, so it keeps its speed;\r\n"
+";   a scene the PC cannot hold at 60 drops to 30 for a while instead of stuttering. 30: as on the console.\r\n"
 ";   TOMO_FRAME_RATE / TOMO_INTERVAL win.\r\n"
-"frame_rate = 30\r\n"
+"frame_rate = 60\r\n"
 "\r\n"
-"; widescreen = off | auto | 21:9 | 32:9 | <width:height>\r\n"
+"; widescreen = auto | off | 21:9 | 32:9 | <width:height>\r\n"
 ";   Wider than 16:9 (OpenGL): the 3D picture shows more at the sides, menus and text stay 16:9 in the middle.\r\n"
-";   auto: the monitor's shape (borderless, fullscreen) or width:height (windowed). TOMO_WIDESCREEN wins.\r\n"
-"widescreen = off\r\n"
+";   auto: the monitor's shape (borderless, fullscreen) or width:height (windowed). off: 16:9. TOMO_WIDESCREEN wins.\r\n"
+"widescreen = auto\r\n"
 "\r\n"
 "; frame_time_overlay = off | on\r\n"
 ";   on: the average frame time of the last second in the window title ('.. fps - 16.67 ms per frame') and as a\r\n"
