@@ -1,4 +1,4 @@
-/* SPIR-V of menu_gl.vert / menu_gl.frag (OpenGL target), made by scripts/menu_shaders.sh. Do not edit. */
+/* SPIR-V of menu_gl.vert / menu_gl.frag (OpenGL target), made by scripts/gl_shaders.sh. Do not edit. */
 	// 1116.6.0
 	 #pragma once
 const uint32_t k_menu_gl_vert_spv[] = {

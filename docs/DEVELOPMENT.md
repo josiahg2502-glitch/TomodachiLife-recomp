@@ -110,7 +110,7 @@ frame is what the driver could not take. Two changes: finalized GPU-written text
 texture of the same shape takes their GL objects over (`tex_take_spare`: 2,100 textures made in a 5 minute run instead
 of 29,000, the framebuffer cache then hits); and no framebuffer ever names a texture at the time it is deleted (cache
 entries are detached and their names reused instead of deleted; the static blit / clear / present framebuffers are
-detached after each use). Views of software-decoded (ASTC) textures name the decoded storage format. Not touched yet:
+detached after each use). Views of decoded (ASTC) textures name the decoded storage format (RGBA8; the levels are decoded by astc_decode.comp on the GPU, nvn_gl_astc.c, or in software with TOMO_GPU_ASTC=0). Not touched yet:
 audio output, rumble, the Vulkan back end. Visible gaps: dialog text has an offset blue copy under lines with
 highlighted words; the island's buildings are flat black blocks; thin vertical lines near signs.
 

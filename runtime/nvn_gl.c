@@ -1145,6 +1145,7 @@ static void dec_finish(Tex *t) {                   /* render thread: wait for th
 static void rb_land_range(uint64_t addr, uint64_t size);
 static void rs_blit(GLuint from, int fl, GLuint to, int tl, GLenum att, const int *a, const int *b, GLbitfield mask);
 static int g_rbp_n;
+#include "nvn_gl_astc.c"                       /* ASTC levels decoded on the GPU */
 static void tex_upload_memory(Tex *t, const Fmt *f, int async) {
     static uint8_t *tmp;
     static size_t tmp_cap;
@@ -1169,7 +1170,7 @@ static void tex_upload_memory(Tex *t, const Fmt *f, int async) {
     int defer = 0, queued = 0, keep = 0;
     if (tf && tf->sw_decode) {
         t->dec_gen++;                              /* (levels still with the decoder are older now) */
-        defer = async && dec_async() && t->data_size >= (256u << 10) && g_dec_spent >= g_dec_budget && g_dec_bytes < (256u << 20);
+        defer = async && !ga_on() && dec_async() && t->data_size >= (256u << 10) && g_dec_spent >= g_dec_budget && g_dec_bytes < (256u << 20);
         if (defer) {                               /* (async: a first upload of blocks never seen before, tex_sync_a) the levels from
                                                     * `keep` (128x128 and smaller) are decoded now and stand in, scaled up, for the
                                                     * larger ones until they land (zeros flickered: a dark frame on the island whenever
@@ -1179,7 +1180,22 @@ static void tex_upload_memory(Tex *t, const Fmt *f, int async) {
         }
     }
     for (int layer = 0; layer < L.layers; layer++) {
-        for (int l = 0; l < t->glevels && l < L.levels; l++) {
+        int gpu_done = 0;                          /* the first levels of this layer, decoded on the GPU by one dispatch (nvn_gl_astc.c) */
+        if (tf && tf->sw_decode && !defer && ga_on()) {
+            size_t offs[GA_LEVELS], total = 0;
+            int nl = 0;
+            for (; nl < t->glevels && nl < L.levels && nl < GA_LEVELS; nl++) {
+                const uint8_t *p = tex_level_ptr(&L, src, nl, layer);
+                if (!b->packaged && t->limit && p + L.lvl_size[nl] > t->limit) break;      /* (reported by the loop below) */
+                offs[nl] = total; total += (L.lvl_linear_size[nl] + 15) & ~(size_t)15;
+            }
+            size_t scratch = g_ga.check ? (size_t)L.lvl_w[0] * L.lvl_h[0] * 4 : 0;
+            if (nl && total + scratch > tmp_cap) { tmp_cap = (total + scratch) * 2; tmp = realloc(tmp, tmp_cap); }
+            for (int l = 0; l < nl; l++) tex_deswizzle_level(&L, l, tex_level_ptr(&L, src, l, layer), tmp + offs[l]);
+            if (nl) { LONG64 d0 = pf_now(); gpu_done = ga_decode_levels(t, tf, &L, tmp, offs, nl, layer, gl_target(b->target, b->samples), tmp + total); g_dec_spent += pf_now() - d0; }
+            for (int l = 0; l < gpu_done; l++) g_st.tex_bytes += (LONG64)L.lvl_linear_size[l];
+        }
+        for (int l = gpu_done; l < t->glevels && l < L.levels; l++) {
             const uint8_t *p = tex_level_ptr(&L, src, l, layer);
             size_t lin = L.lvl_linear_size[l], need = lin + (tf && tf->sw_decode ? (size_t)L.lvl_w[l] * L.lvl_h[l] * 4 : 0);
             if (!b->packaged && t->limit && p + L.lvl_size[l] > t->limit) {
@@ -1241,6 +1257,7 @@ static uint64_t twin_key(Tex *t, uint64_t h, int full) {      /* 0: not a candid
     return k ? k : 1;
 }
 static GLuint twin_copy(Tex *t, uint64_t key) {   /* the GL texture copied from, 0 = none */
+    ga_barrier();
     unsigned i = (unsigned)key & (TWIN_SLOTS - 1);
     Tex *c = g_twin[i].t;
     if (!key || !c || c == t || g_twin[i].key != key || c->hash != g_twin[i].h || !c->o.gl || c->gpu_written || c->rw || c->b.format != t->b.format
@@ -5068,6 +5085,7 @@ static GLuint rs_temp(Tex *t, int w, int h, GLbitfield *mask, GLenum *att) {
     return tmp;
 }
 static void rs_blit(GLuint from, int fl, GLuint to, int tl, GLenum att, const int *a, const int *b, GLbitfield mask) {
+    ga_barrier();
     glBindFramebuffer(GL_READ_FRAMEBUFFER_, g_fbo_tmp[0]); glFramebufferTexture(GL_READ_FRAMEBUFFER_, att, from, fl);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, g_fbo_tmp[1]); glFramebufferTexture(GL_DRAW_FRAMEBUFFER_, att, to, tl);
     glDisable(GL_SCISSOR_TEST); glDisable(GL_FRAMEBUFFER_SRGB_);
@@ -5370,6 +5388,7 @@ static void gputime_note(const Cmd *m) {
 static void exec(const Cmd *m, int depth) {
     const uint8_t *blob = BLOB(m);
     const uint64_t *a = m->a;
+    ga_barrier();                                  /* texels the GPU decoder stored are visible to this command */
     g_cur_op = k_op_name[m->op < OP_COUNT ? m->op : 0];
     /* TOMO_GPUTIME_EVERY=<n>: only every n-th draw / dispatch is finished and timed (the others run pipelined, as without the
      * diagnostic); the last commands are noted for the record either way */
@@ -6292,6 +6311,7 @@ static void job_submit(void *arg) {
 static void job_submit_async(void *arg) { SubmitJob *j = arg; j->handles = (const uint64_t *)(j + 1); job_submit(j); }
 
 static void save_bmp(const char *path, Tex *t) {
+    ga_barrier();
     int w = tw(t), h = th(t);
     uint8_t *px = malloc((size_t)w * h * 3), head[54] = {'B', 'M'};
     uint32_t row = ((uint32_t)w * 3 + 3) & ~3u, size = 54 + row * (uint32_t)h, v;
@@ -6582,6 +6602,7 @@ static void job_present(void *arg) {
     }
     if (t && !t->dead && t->o.gl) {
         int sr[4] = {0, 0, t->b.width, t->b.height};
+        ga_barrier();
         if (j->win->crop[2] > 0 && j->win->crop[3] > 0) memcpy(sr, j->win->crop, sizeof sr);
         if (t->rw) { int x0 = rsx(t, sr[0]), y0 = rsy(t, sr[1]); sr[2] = rsx(t, sr[0] + sr[2]) - x0; sr[3] = rsy(t, sr[1] + sr[3]) - y0; sr[0] = x0; sr[1] = y0; }      /* resolution scale */
         glBindFramebuffer(GL_READ_FRAMEBUFFER_, g_fbo_read);
@@ -6943,6 +6964,7 @@ void nvn_gl_report(FILE *out) {
     fprintf(out, "nvn_gl: shader binaries on disk: %lld loaded, %lld compiled and saved by the render thread, %lld refused by the driver (compiled again)\n", (long long)g_shd_loaded, (long long)g_shd_saved, (long long)g_shd_refused);
     for (int i = 0; g_fdlog && i < 64 && g_fd_ids[i].n; i++) fprintf(out, "fdlog-id: %u type %x severity %x: %lld messages, first: %s\n", g_fd_ids[i].id, g_fd_ids[i].type, g_fd_ids[i].sev, (long long)g_fd_ids[i].n, g_fd_ids[i].text);
     { LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+    ga_report(out);
       fprintf(out, "nvn_gl: shader pairs made ready by the workers (SSBU_PAIR_WARM=%d): %lld from pairs.txt + %lld programs handed over; %lld warm draws, %lld of them over 8 ms (not in the driver's cache), %.1f s in all; %lld known already, %lld without binaries or not translated, %lld stages compiled for it\n",
               pw_mode(), (long long)g_pw_named, (long long)g_pw_progs, (long long)g_pw_warmed, (long long)g_pw_cold_n, (double)g_pw_ticks / (double)f.QuadPart, (long long)g_pw_dup, (long long)g_pw_missing, (long long)g_pw_compiled);
       fprintf(out, "nvn_gl: presents held for shader preparation: %lld times, %.2f s in all\n", (long long)g_pw_gates, (double)g_pw_gate_ticks / (double)f.QuadPart); }

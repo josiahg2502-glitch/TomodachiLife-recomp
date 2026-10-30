@@ -6,7 +6,7 @@
  * on the GPU is kept with two fences: the menu waits for the picture, the renderer's SwapBuffers waits for the menu.
  * Costs nothing while the menu shows nothing (menu_frame returns 0).
  *
- * Shaders: SPIR-V made ahead of time (menu_gl_spv.h, scripts/menu_shaders.sh), taken by the driver through
+ * Shaders: SPIR-V made ahead of time (menu_gl_spv.h, scripts/gl_shaders.sh), taken by the driver through
  * GL_ARB_gl_spirv; without it the menu stays off and the log says so. */
 #include "menu.h"
 #include "menu_gl_spv.h"
