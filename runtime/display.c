@@ -643,7 +643,7 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         int lock_tried = 0;
-        LONG64 vb_last = 0;
+        LONG64 vb_last = 0, relock_at = 0;      /* the lock was dropped (no vblank for 100 ms): tried again from this time on */
         pace_options();
         display_perf_host_thread();
         for (;;) {
@@ -653,6 +653,21 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                 if (k) { vb_last = g_vb_count; InterlockedExchange(&g_lock_k, k); }
             }
             if (g_pace_want && !lock_tried && g_vb_state == -1) { lock_tried = 1; printf("display: no vblank source: our own 60 Hz clock%c", 10); }
+            if (g_pace_want && !g_lock_k && relock_at && g_vb_state == 2) {
+                /* 2026-10-30: the vblanks stop for a moment when the window takes the screen (the first present on a
+                 * 240 Hz monitor, 2026-10-29 log): the lock was dropped and never taken again, so the whole session ran
+                 * on our own clock. Now: once the vblanks are back, the lock is taken again. */
+                QueryPerformanceCounter(&now);
+                if (now.QuadPart >= relock_at) {
+                    LONG64 vc, vq; double period;
+                    AcquireSRWLockShared(&g_vb_lock); vc = g_vb_count; vq = g_vb_qpc; period = g_vb_period; ReleaseSRWLockShared(&g_vb_lock);
+                    if ((double)(now.QuadPart - vq) < period * 3.0) {
+                        int k = pace_try_lock();
+                        if (k) { vb_last = vc; InterlockedExchange(&g_lock_k, k); printf("display: the vblanks are back: display lock on again%c", 10); }
+                        relock_at = 0;
+                    } else relock_at = now.QuadPart + 2 * g_freq.QuadPart;
+                }
+            }
             if (g_lock_k) {
                 LONG64 k = g_lock_k, vb_target = vb_last + k, vc, vq;
                 int timeouts = 0;
@@ -662,10 +677,11 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                 vc = g_vb_count; vq = g_vb_qpc; period = g_vb_period;
                 ReleaseSRWLockExclusive(&g_vb_lock);
                 if (vc < vb_target) {                                              /* no vblank for 100 ms (display off, mode change): our clock goes on from here */
-                    printf("display: no vblank for 100 ms: display lock off, our own 60 Hz clock goes on%c", 10);
+                    printf("display: no vblank for 100 ms: display lock off, our own 60 Hz clock goes on (the lock is tried again once the vblanks are back)%c", 10);
                     InterlockedExchange(&g_lock_k, 0);
                     QueryPerformanceCounter(&now);
                     t0.QuadPart = now.QuadPart - n * g_freq.QuadPart / 60;
+                    relock_at = now.QuadPart + 2 * g_freq.QuadPart;
                     continue;
                 }
                 LONG64 extra = (vc - vb_target) / k;                               /* whole game frames this thread slept through */
@@ -825,6 +841,7 @@ static void frame_queued(void) {
     if (!second_start.QuadPart) second_start = now;
     LONG64 n = InterlockedIncrement64(&g_frames);
     second_frames++;
+    if (n == 120) { void os_cc_relax(void); os_cc_relax(); }      /* os_threads.c: the game is running: its low-priority threads may leave their console cores */
     adapt_frame(now);
     { void display_l1_trace_frame(long long n); display_l1_trace_frame(n); }
     {   /* session 14: the game's thread on the performance cores (set once), and where it is seen at each present */
@@ -1067,7 +1084,8 @@ static void l1_report(FILE *out) {
  * queued before the tick it is due at (on time) is held until that tick; a late one is presented at once. */
 void display_present_plan(int vulkan) {
     if (!g_la_first) la_stop();                            /* U3: the first present: the loading animation stops before it (loading_anim.c) */
-    if (!vulkan || old_pacing()) return;
+    if (old_pacing()) return;                          /* 2026-10-30: OpenGL presents at the tick too (nvn_gl.c job_present / job_gl_swap_flush) */
+    (void)vulkan;
     pace_options();
     LONG64 now_n = g_vsync_n, iv = g_interval, prev = g_latch, at = now_n + 1;
     int on_time = iv && now_n < prev + iv && prev + iv - now_n <= 6;

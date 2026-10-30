@@ -75,6 +75,8 @@ int nvn_pool_range(uint64_t pool, uint64_t *mem, uint64_t *size);     /* nvn_stu
 uint64_t nvn_pool_flags_of(uint64_t pool);
 void input_frame_draws(int draws);                                    /* nnhid.c */
 void display_pace(void);                                              /* display.c */
+int display_present_defer(void); int display_present_due(void); void display_present_flushed(void); void display_present_done(int fight);      /* display.c: the present at the tick */
+extern volatile LONG g_display_holding;                              /* display.c: a finished frame is held for its tick (hitch.c: pacing, not a cost) */
 int display_wait_refresh(void);                                       /* display.c, P3 round 3: one refresh clock */
 void display_before_present(void);
 void display_clock_sample(uint64_t index_ptr);                        /* SSBU_CLOCKSTAT */
@@ -935,6 +937,7 @@ void nvn_ww_region(uint64_t base, uint64_t size, int add) {      /* nnsdk.c: mem
 static uint64_t *g_wwc, g_wwc_n, g_wwc_cap;       /* the chunks (address >> WW_CHUNK_SHIFT), sorted when g_wwc_sorted */
 static int g_wwc_sorted = 1;
 static struct { uint64_t chunk; } g_wwc_set[1 << 14];      /* membership (open addressing; 0 = empty) */
+static SRWLOCK g_wwc_lock = SRWLOCK_INIT;                  /* g_wwc: the render thread adds, the scan thread reads */
 static void ww_chunk_mark(uint64_t addr, uint64_t size) {
     for (uint64_t ch = addr >> WW_CHUNK_SHIFT, last = (addr + size - 1) >> WW_CHUNK_SHIFT; ch <= last; ch++) {
         unsigned h = (unsigned)((ch * 0x9E3779B97F4A7C15ULL) >> 50);
@@ -943,57 +946,116 @@ static void ww_chunk_mark(uint64_t addr, uint64_t size) {
             if (g_wwc_set[h].chunk) continue;
             if (g_wwc_n >= (1u << 13)) return;     /* (16 GB of chunks: the full scan below takes over) */
             g_wwc_set[h].chunk = ch;
+            AcquireSRWLockExclusive(&g_wwc_lock);
             if (g_wwc_n == g_wwc_cap) { g_wwc_cap = g_wwc_cap ? g_wwc_cap * 2 : 256; g_wwc = realloc(g_wwc, g_wwc_cap * sizeof *g_wwc); }
             g_wwc[g_wwc_n++] = ch; g_wwc_sorted = 0;
+            ReleaseSRWLockExclusive(&g_wwc_lock);
             break;
         }
     }
 }
 static int u64_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
-static int ww_ask(uint64_t base, uint64_t size, void **pages, uint64_t *stamp, LONG64 *wpages) {      /* 0: the list overflowed */
+/* The scan runs on a thread of its own (2026-10-30): GetWriteWatch with its reset costs about 60 us a call, a few ms a frame
+ * on the island, 18 % of the render thread at 4K. The game asks for it when it submits a batch (ww_scan_request: its writes
+ * for that batch are done then); the render thread, starting that batch, waits for that scan (normally long done while it
+ * replayed the batch before) and stamps the pages it found (ww_scan_apply). Writes the scan sees early belong to a later
+ * batch and only make a kept upload stream again sooner, as before. TOMO_WW_SYNC=1: the scan on the render thread. */
+static SRWLOCK g_wws_lock = SRWLOCK_INIT;                  /* the pages found and not stamped yet */
+static uint64_t *g_wws_pg;
+static size_t g_wws_n, g_wws_cap;
+static int g_wws_all, g_wws_sync = -1;
+static volatile LONG64 g_wws_asked, g_wws_done;
+static volatile LONG g_wws_started;
+static HANDLE g_wws_ev, g_wws_done_ev;
+static void ww_ask(uint64_t base, uint64_t size, void **pages, LONG64 *wpages) {
     ULONG_PTR count = 1 << 18;
     DWORD gran = 0;
-    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)base, (SIZE_T)size, pages, &count, &gran)) return 1;
-    if (count == (ULONG_PTR)1 << 18) { g_ww_floor = ++g_ww_stamp; return 0; }      /* more than the list holds: everything counts as written */
-    if (count && !*stamp) *stamp = ++g_ww_stamp;
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)base, (SIZE_T)size, pages, &count, &gran) || !count) return;
     *wpages += (LONG64)count;
-    for (ULONG_PTR i = 0; i < count; i++) *ww_slot((uint64_t)(uintptr_t)pages[i] >> 12, 1) = *stamp;
-    return 1;
+    AcquireSRWLockExclusive(&g_wws_lock);
+    if (count == (ULONG_PTR)1 << 18) g_wws_all = 1;          /* more than the list holds: everything counts as written */
+    else {
+        if (g_wws_n + count > g_wws_cap) { g_wws_cap = (g_wws_n + count) * 2; g_wws_pg = realloc(g_wws_pg, g_wws_cap * sizeof *g_wws_pg); }
+        for (ULONG_PTR i = 0; i < count; i++) g_wws_pg[g_wws_n++] = (uint64_t)(uintptr_t)pages[i] >> 12;
+    }
+    ReleaseSRWLockExclusive(&g_wws_lock);
 }
-static void ww_scan_regions(void) {
+static void ww_scan_once(void) {
     static void *pages[1 << 18];
-    ww_newest(NULL, 0);                          /* (the table) */
-    if (g_ww_off) { g_wwr_n = 0; return; }
+    static uint64_t *ch, cap;
+    uint64_t base[64], size[64], n;
+    int nr;
     AcquireSRWLockShared(&g_wwl_lock);
-    g_wwr_n = g_wwl_n;
-    memcpy(g_wwr_base, g_wwl_base, sizeof g_wwr_base); memcpy(g_wwr_size, g_wwl_size, sizeof g_wwr_size);
+    nr = g_wwl_n;
+    memcpy(base, g_wwl_base, sizeof base); memcpy(size, g_wwl_size, sizeof size);
     ReleaseSRWLockShared(&g_wwl_lock);
-    uint64_t stamp = 0;
+    AcquireSRWLockShared(&g_wwc_lock);
+    n = g_wwc_n;
+    if (n > cap) { cap = n * 2; ch = realloc(ch, cap * sizeof *ch); }
+    if (n) memcpy(ch, g_wwc, n * sizeof *ch);
+    ReleaseSRWLockShared(&g_wwc_lock);
     static int wwlog = -1, full = -1; static LONG64 wt, wn, wpages, wcalls;
     if (wwlog < 0) { wwlog = getenv("TOMO_WWLOG") != NULL; full = getenv("TOMO_WW_FULL") != NULL; }      /* TEST ONLY: the scan's cost; the old full scan */
     LONG64 w0 = wwlog ? pf_now() : 0;
-    if (full || g_wwc_n >= (1u << 13)) {
-        for (int r = 0; r < g_wwr_n; r++) { ww_ask(g_wwr_base[r], g_wwr_size[r], pages, &stamp, &wpages); wcalls++; }
+    if (full || n >= (1u << 13)) {
+        for (int r = 0; r < nr; r++) { ww_ask(base[r], size[r], pages, &wpages); wcalls++; }
     } else {
-        if (!g_wwc_sorted) { qsort(g_wwc, (size_t)g_wwc_n, sizeof *g_wwc, u64_cmp); g_wwc_sorted = 1; }
-        for (uint64_t i = 0; i < g_wwc_n;) {      /* runs of chunks less than 64 MB apart, cut to each region: a call costs about
-                                                   * 60 us whatever its size (its reset), 64 MB more about 0.04 ms */
+        qsort(ch, (size_t)n, sizeof *ch, u64_cmp);
+        for (uint64_t i = 0; i < n;) {      /* runs of chunks less than 64 MB apart, cut to each region: a call costs about
+                                             * 60 us whatever its size (its reset), 64 MB more about 0.04 ms */
             uint64_t j = i + 1;
-            while (j < g_wwc_n && g_wwc[j] - g_wwc[j - 1] <= (64u << 20 >> WW_CHUNK_SHIFT)) j++;
-            uint64_t a = g_wwc[i] << WW_CHUNK_SHIFT, b = (g_wwc[j - 1] + 1) << WW_CHUNK_SHIFT;
-            for (int r = 0; r < g_wwr_n; r++) {
-                uint64_t lo = a > g_wwr_base[r] ? a : g_wwr_base[r], hi = b < g_wwr_base[r] + g_wwr_size[r] ? b : g_wwr_base[r] + g_wwr_size[r];
-                if (lo < hi) { ww_ask(lo, hi - lo, pages, &stamp, &wpages); wcalls++; }
+            while (j < n && ch[j] - ch[j - 1] <= (64u << 20 >> WW_CHUNK_SHIFT)) j++;
+            uint64_t a = ch[i] << WW_CHUNK_SHIFT, b = (ch[j - 1] + 1) << WW_CHUNK_SHIFT;
+            for (int r = 0; r < nr; r++) {
+                uint64_t lo = a > base[r] ? a : base[r], hi = b < base[r] + size[r] ? b : base[r] + size[r];
+                if (lo < hi) { ww_ask(lo, hi - lo, pages, &wpages); wcalls++; }
             }
             i = j;
         }
     }
     if (wwlog && (wt += pf_now() - w0, ++wn % 300 == 0)) {
-        uint64_t total = 0; for (int r = 0; r < g_wwr_n; r++) total += g_wwr_size[r];
-        printf("wwlog: %d regions, %.1f MB watched, %llu chunks of 2 MB asked for; %.3f ms, %.1f calls and %.0f written pages per scan (last 300)%c", g_wwr_n, (double)total / 1048576.0,
-               (unsigned long long)g_wwc_n, (double)wt / 1e4 / 300.0, (double)wcalls / 300.0, (double)wpages / 300.0, 10);
+        uint64_t total = 0; for (int r = 0; r < nr; r++) total += size[r];
+        printf("wwlog: %d regions, %.1f MB watched, %llu chunks of 2 MB asked for; %.3f ms, %.1f calls and %.0f written pages per scan (last 300)%c", nr, (double)total / 1048576.0,
+               (unsigned long long)n, (double)wt / 1e4 / 300.0, (double)wcalls / 300.0, (double)wpages / 300.0, 10);
         wt = 0; wpages = 0; wcalls = 0;
     }
+}
+static DWORD WINAPI ww_scan_thread(LPVOID arg) {
+    (void)arg;
+    for (;;) {
+        WaitForSingleObject(g_wws_ev, INFINITE);
+        for (LONG64 want; (want = g_wws_asked) > g_wws_done;) { ww_scan_once(); InterlockedExchange64(&g_wws_done, want); SetEvent(g_wws_done_ev); }
+    }
+    return 0;
+}
+static uint64_t ww_scan_request(void) {             /* game thread, at a submission: 0 = the render thread scans itself */
+    if (g_wws_sync < 0) g_wws_sync = getenv("TOMO_WW_SYNC") != NULL || getenv("SSBU_NO_WRITEWATCH") != NULL;
+    if (g_wws_sync) return 0;
+    if (InterlockedCompareExchange(&g_wws_started, 1, 0) == 0) {
+        g_wws_done_ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+        g_wws_ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+        CreateThread(NULL, 0, ww_scan_thread, NULL, 0, NULL);
+        InterlockedExchange(&g_wws_started, 2);
+    }
+    while (g_wws_started != 2) SwitchToThread();
+    uint64_t seq = (uint64_t)InterlockedIncrement64(&g_wws_asked);
+    SetEvent(g_wws_ev);
+    return seq;
+}
+static void ww_scan_apply(uint64_t seq) {           /* render thread, at the start of a batch */
+    ww_newest(NULL, 0);                              /* (the table) */
+    if (g_ww_off) { g_wwr_n = 0; return; }
+    AcquireSRWLockShared(&g_wwl_lock);
+    g_wwr_n = g_wwl_n;
+    memcpy(g_wwr_base, g_wwl_base, sizeof g_wwr_base); memcpy(g_wwr_size, g_wwl_size, sizeof g_wwr_size);
+    ReleaseSRWLockShared(&g_wwl_lock);
+    if (!seq) ww_scan_once();
+    else while (g_wws_done < (LONG64)seq) WaitForSingleObject(g_wws_done_ev, 1);
+    AcquireSRWLockExclusive(&g_wws_lock);
+    if (g_wws_all) g_ww_floor = ++g_ww_stamp;
+    if (g_wws_n) { uint64_t stamp = ++g_ww_stamp; for (size_t i = 0; i < g_wws_n; i++) *ww_slot(g_wws_pg[i], 1) = stamp; }
+    g_wws_n = 0; g_wws_all = 0;
+    ReleaseSRWLockExclusive(&g_wws_lock);
     if (g_ww_used > WW_SLOTS / 2) { memset(g_ww_tab, 0, WW_SLOTS * sizeof *g_ww_tab); g_ww_used = 0; g_ww_floor = ++g_ww_stamp; }
 }
 static uint64_t ww_range_stamp(uint64_t addr, uint64_t size) {      /* newest stamp of the range's pages; 0 = not write-watched */
@@ -1788,11 +1850,21 @@ static int rb_stage(uint64_t size) {               /* a free staging buffer of a
     g_rbs[k].cap = cap;
     return k;
 }
-static void rb_land(int wait) {                    /* land the read-backs the GPU has finished (all of them, waiting, when wait) */
+/* TEST ONLY: the render thread's waits for the GPU, by source line (the stall line with "one frame in flight") */
+static struct { int line; LONG64 ticks, n; } g_stall[32];
+static void stall_add(int line, LONG64 t0) {
+    int k = 0;
+    while (k < 31 && g_stall[k].line && g_stall[k].line != line) k++;
+    g_stall[k].line = line; g_stall[k].ticks += pf_now() - t0; g_stall[k].n++;
+}
+#define rb_land(w) rb_land_at(w, __LINE__)
+static void rb_land_at(int wait, int line) {        /* land the read-backs the GPU has finished (all of them, waiting, when wait) */
     int i, landed = 0;
     for (i = 0; i < g_rbp_n; i++) {
         RbPend *q = &g_rbp[i];
+        LONG64 w0 = pf_now();
         GLenum r = glClientWaitSync(q->fence, wait ? 1 : 0, wait ? 0xFFFFFFFFFFFFFFFFull : 0);
+        if (wait && r != 0x911A) stall_add(line, w0);
         if (r == 0x911B /* TIMEOUT_EXPIRED */) break;        /* the later ones are not done either (the GPU finishes in order) */
         gpu_merge(P(q->addr), g_rbs[q->slot].map, q->snap, (size_t)q->size);
         ww_note(q->addr, q->size);
@@ -2270,7 +2342,30 @@ static volatile LONG64 g_shp_total, g_shp_done, g_shp_t0;      /* shader prepara
 /* Worker: one pair job. stage 2 = named by the two text hashes (data: vh, fh, vl, fl); stage 3 = the machine code of a
  * program's vertex stage (code_len, cdata_size) and fragment stage (key[0], key[1]; 0 = none: depth-only); stage 4 = the
  * same for a variation of the shader store (shader preparation), key[2] = the vertex stage's integer inputs. */
-static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
+/* 2026-10-30: the driver does not keep the pairs' first-draw work for good (a full re-warm found 3,095 of 8,243 pairs cold
+ * a day after they were warmed; the 2026-10-29 session stalled at 651 of 850 first draws, 26 ms each). Re-warming the
+ * whole list at each start costs 15 s, so: the first PW_SAMPLE listed pairs (the title's and the island's) are warmed at
+ * every start, 0.2 s when the driver has them; when more than PW_SAMPLE_COLD of them are cold the cache was purged, and
+ * the rest of the list is warmed before the game starts (30 s, once). TOMO_PAIR_REWARM=1: the whole list, every start. */
+#define PW_SAMPLE 64
+#define PW_SAMPLE_COLD 10
+typedef struct { uint64_t vh, fh; uint32_t vl, fl, mask; } PwPair;
+static PwPair *g_pw_rest;
+static int g_pw_rest_n, g_pw_rest_cap;
+static volatile LONG g_pw_sample_n, g_pw_sample_done, g_pw_sample_cold, g_pw_sample_decided;
+static void pw_queue_named(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, uint32_t mask, int sample);
+static void pw_sample_note(int cold) {              /* worker: a sampled pair is done */
+    if (cold) InterlockedIncrement(&g_pw_sample_cold);
+    if (InterlockedIncrement(&g_pw_sample_done) != g_pw_sample_n || InterlockedExchange(&g_pw_sample_decided, 1)) return;
+    if (g_pw_sample_cold > PW_SAMPLE_COLD) {
+        printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache was purged, the other %d listed pairs are warmed before the game starts%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
+        for (int i = 0; i < g_pw_rest_n; i++) pw_queue_named(g_pw_rest[i].vh, g_pw_rest[i].vl, g_pw_rest[i].fh, g_pw_rest[i].fl, g_pw_rest[i].mask, 0);
+    } else printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache holds them, the other %d listed pairs are not warmed again%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
+    fflush(stdout);
+    free(g_pw_rest); g_pw_rest = NULL; g_pw_rest_n = g_pw_rest_cap = 0;
+}
+static int pw_job_inner(ShJob *j, GLuint pipe, GLuint empty_fs) {      /* 1 = the pair's warm draw was cold (20 ms or more) */
+    int cold = 0;
     uint64_t vh = 0, fh = 0;
     uint32_t vl = 0, fl = 0, mask = 0;             /* mask: the vertex arrays that are enabled for the warm draw */
     char *vt = NULL, *ft = NULL;
@@ -2281,12 +2376,12 @@ static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
         mask &= 0xffff;
         if (j->key[0]) ft = pw_translate(1, fc, (int)j->key[0], fd, j->key[1], NULL, 0);
         if (j->stage == 4 && !j->key[2] && (mask >> 6 & 1)) shp_variant(j, 0x40);      /* attribute 6 as integers too (skinning's bone indices) */
-        if (!vt || (j->key[0] && !ft)) { free(vt); free(ft); InterlockedIncrement64(&g_pw_missing); return; }
+        if (!vt || (j->key[0] && !ft)) { free(vt); free(ft); InterlockedIncrement64(&g_pw_missing); return cold; }
         vl = (uint32_t)strlen(vt); vh = sh_hash(0x9E3779B97F4A7C15ULL ^ 0, vt, vl);
         if (ft) { fl = (uint32_t)strlen(ft); fh = sh_hash(0x9E3779B97F4A7C15ULL ^ 1, ft, fl); }
     }
-    if (pw_seen(vh, vl, fh, fl, mask)) { free(vt); free(ft); InterlockedIncrement64(&g_pw_dup); pw_prog_known(j); return; }
-    if (j->stage == 4 && shp_warmed(vh, vl, fh, fl, mask, 0)) { free(vt); free(ft); return; }      /* a preparation before this one did it */
+    if (pw_seen(vh, vl, fh, fl, mask)) { free(vt); free(ft); InterlockedIncrement64(&g_pw_dup); pw_prog_known(j); return cold; }
+    if (j->stage == 4 && shp_warmed(vh, vl, fh, fl, mask, 0)) { free(vt); free(ft); return cold; }      /* a preparation before this one did it */
     if (mask & 0x10000) {                          /* a compute program: one work group with no buffer and no image bound (reads give 0, writes go nowhere) */
         GLuint cs = pw_load(5, vh, vl, NULL);
         if (cs) {
@@ -2299,12 +2394,13 @@ static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
             LONG64 dt = pf_now() - t0;
             InterlockedExchangeAdd64(&g_pw_ticks, dt); InterlockedIncrement64(&g_pw_warmed);
             if (dt * 125 > freq) { InterlockedIncrement64(&g_pw_cold_n); InterlockedExchange(&g_pw_cold, 1); }
+        cold = dt * 50 > freq;
             if (g_fdlog) printf("fd-warm: %016llx %x %016llx %x mask %x kind %d %.1f ms frame %lld%c", (unsigned long long)vh, vl, 0ull, 0u, mask, j->stage, (double)dt * 1000.0 / (double)freq, (long long)g_st.frames, 10);
             glUseProgramStages(pipe, 0x20, 0);
             glDeleteProgram(cs);
         } else InterlockedIncrement64(&g_pw_missing);
         while (glGetError()) {}
-        return;
+        return cold;
     }
     GLuint vs = pw_load(0, vh, vl, vt), fs = fl ? pw_load(1, fh, fl, ft) : empty_fs;
     free(vt); free(ft);
@@ -2320,6 +2416,7 @@ static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
         if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; }
         InterlockedExchangeAdd64(&g_pw_ticks, dt); InterlockedIncrement64(&g_pw_warmed);
         if (dt * 125 > freq) { InterlockedIncrement64(&g_pw_cold_n); InterlockedExchange(&g_pw_cold, 1); }
+        cold = dt * 50 > freq;
         if (g_fdlog) printf("fd-warm: %016llx %x %016llx %x mask %x kind %d %.1f ms frame %lld%c", (unsigned long long)vh, vl, (unsigned long long)fh, fl, mask, j->stage, (double)dt * 1000.0 / (double)freq, (long long)g_st.frames, 10);
         glUseProgramStages(pipe, 1, 0);
         glUseProgramStages(pipe, 2, 0);
@@ -2337,6 +2434,11 @@ static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
     if (vs) glDeleteProgram(vs);
     if (fs && fs != empty_fs) glDeleteProgram(fs);
     while (glGetError()) {}
+    return cold;
+}
+static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
+    int c = pw_job_inner(j, pipe, empty_fs);
+    if (j->stage == 2 && j->key[3]) pw_sample_note(c);
 }
 static void pw_enqueue(ShJob *j) {
     j->next = NULL;
@@ -2348,10 +2450,10 @@ static void pw_enqueue(ShJob *j) {
     ReleaseSemaphore(g_shw_sem, 1, NULL);
 }
 /* Start-up (prec_load): a pair that a draw used in an earlier run. */
-static void pw_queue_named(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, uint32_t mask) {
+static void pw_queue_named(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, uint32_t mask, int sample) {
     if (!pw_mode() || g_shd_mode <= 0 || !g_shw_n) return;
     ShJob *j = calloc(1, sizeof *j + 28);
-    j->stage = 2;
+    j->stage = 2; j->key[3] = (uint32_t)sample;
     memcpy(j->data, &vh, 8); memcpy(j->data + 8, &fh, 8); memcpy(j->data + 16, &vl, 4); memcpy(j->data + 20, &fl, 4); memcpy(j->data + 24, &mask, 4);
     g_pw_named++;
     pw_enqueue(j);
@@ -2595,7 +2697,10 @@ static void shp_queue(void) {                      /* render thread, start (prec
                           ubo_on(), rs_on(), wide_k() != 1.0f ? 1 + g_wide_camera : 0, (unsigned long long)g_shd_drv, mx_bl_misslog() ? " blmiss" : "");
         g_shp_key = sh_hash(sh_hash(0x5348505245ULL, txt, n), key, (size_t)kl);
         snprintf(g_shp_mark, sizeof g_shp_mark, "%s/prepared_%s.txt", g_shd_dir, base);
-        snprintf(g_shp_wpath, sizeof g_shp_wpath, "%s/warmed_%s.txt", g_shd_dir, base);
+        /* 2026-10-30: by driver too. The driver's own cache of the pairs' first-draw work is per driver version: after a driver
+         * update every pair is cold again, and this file said they were warm (the 2026-10-29 session: 651 first draws of
+         * 850 pairs stalled, 26 ms on average, nothing re-warmed). */
+        snprintf(g_shp_wpath, sizeof g_shp_wpath, "%s/warmed_%s_%08x.txt", g_shd_dir, base, (unsigned)(g_shd_drv >> 32 ^ g_shd_drv));
     }
     {   size_t ml = 0;
         char *m = shp_read(g_shp_mark, &ml);
@@ -3003,7 +3108,14 @@ static void prec_load(void) {                      /* render thread, once (shd_i
             /* With the shader store in use its preparation had the driver do every pair's work, which the driver keeps on
              * disk: warming the listed pairs again at each start (14 s of driver time, the start waited for it) changed
              * nothing measurable in play (first draws: 2 over 4 ms instead of 1, 17 ms in all; 2026-10-25). */
-            if (!g_shp_store) pw_queue_named(vh, vl, fh, fl, mask);
+            {   static int rewarm = -1;      /* TOMO_PAIR_REWARM=1: the whole list at every start (see PW_SAMPLE) */
+                if (rewarm < 0) rewarm = getenv("TOMO_PAIR_REWARM") != NULL;
+                if (!g_shp_store || rewarm) pw_queue_named(vh, vl, fh, fl, mask, 0);
+                else if (g_pw_sample_n < PW_SAMPLE) { pw_queue_named(vh, vl, fh, fl, mask, 1); g_pw_sample_n++; }
+                else {
+                    if (g_pw_rest_n == g_pw_rest_cap) { g_pw_rest_cap = g_pw_rest_cap ? g_pw_rest_cap * 2 : 1024; g_pw_rest = realloc(g_pw_rest, (size_t)g_pw_rest_cap * sizeof *g_pw_rest); }
+                    PwPair *q = &g_pw_rest[g_pw_rest_n++]; q->vh = vh; q->fh = fh; q->vl = vl; q->fl = fl; q->mask = mask;
+                } }
             if (!(mask & 0x10000)) { pre_add(0, vh, vl); pre_add(1, fh, fl); }
         }
     }
@@ -4559,6 +4671,7 @@ static void compute_flush_at(int line) {
             LONG64 pf0 = pf_now();
             if (cap < b->size) { cap = (size_t)b->size; tmp = realloc(tmp, cap); }
             HS_IN("compute read-back (glGetNamedBufferSubData)", 0); glGetNamedBufferSubData(b->buf, 0, (ptrdiff_t)b->size, tmp); HS_OUT();
+            stall_add(100000 + line, pf0);
             gpu_merge(P(b->addr), tmp, b->snap, (size_t)b->size);
             ww_note(b->addr, b->size);
             pf_add(PF_CFLUSH, pf0); g_pf_cflush_bytes += (LONG64)b->size; g_st.compute_bytes += (LONG64)b->size; any = 1;
@@ -5170,37 +5283,44 @@ static void hitch_draw(LONG64 t0) {
 const char *nvn_front_cur_op(void) { return g_cur_op ? g_cur_op : "-"; }      /* hostrt.c: the crash report */
 static LONG64 g_optime[OP_COUNT], g_opn[OP_COUNT];       /* render thread: time and count per command type (nvn_perf) */
 static void gputime_note(const Cmd *m);
-/* TEST ONLY, TOMO_GPUPROF=1: GPU time by kind of command. A timestamp before each draw, dispatch, clear and copy; at each
- * present the intervals are charged to the command that began them; every 300 frames the 24 costliest kinds (ms a frame). */
+/* TEST ONLY, TOMO_GPUPROF=1: GPU time by kind of command. A timestamp before each draw, dispatch, clear and copy; a frame's
+ * timestamps are read GP_SLOTS frames later (no stall: the GPU is long done with them), the intervals charged to the
+ * command that began them; every 300 frames the 24 costliest kinds (ms a frame). Gaps where the GPU waited for us are
+ * charged too, so the numbers mean GPU time only while the GPU is the bottleneck. */
 #define GP_Q 16384
-static GLuint g_gp_q[GP_Q];
-static char g_gp_key[GP_Q][40];
-static int g_gp_n, g_gp_on = -1, g_gp_frames, g_gp_tn;
+#define GP_SLOTS 4
+static GLuint g_gp_q[GP_SLOTS][GP_Q];
+static char g_gp_key[GP_SLOTS][GP_Q][40];
+static int g_gp_cnt[GP_SLOTS], g_gp_slot, g_gp_n, g_gp_on = -1, g_gp_frames, g_gp_tn;
 static struct { char key[40]; double ms; long long n; } g_gp_tab[1024];
 static void gpuprof_mark(const char *key) {
     if (g_gp_on < 0) g_gp_on = getenv("TOMO_GPUPROF") != NULL;
     if (!g_gp_on || g_gp_n >= GP_Q) return;
-    if (!g_gp_q[0]) glGenQueries(GP_Q, g_gp_q);
-    glQueryCounter(g_gp_q[g_gp_n], 0x8E28 /* TIMESTAMP */);
-    snprintf(g_gp_key[g_gp_n++], sizeof g_gp_key[0], "%s", key);
+    if (!g_gp_q[0][0]) for (int k = 0; k < GP_SLOTS; k++) glGenQueries(GP_Q, g_gp_q[k]);
+    glQueryCounter(g_gp_q[g_gp_slot][g_gp_n], 0x8E28 /* TIMESTAMP */);
+    snprintf(g_gp_key[g_gp_slot][g_gp_n++], sizeof g_gp_key[0][0], "%s", key);
 }
 static int gp_cmp(const void *x, const void *y) { double a = ((const typeof(g_gp_tab[0]) *)x)->ms, b = ((const typeof(g_gp_tab[0]) *)y)->ms; return a < b ? 1 : a > b ? -1 : 0; }
 static void gpuprof_frame(void) {
     if (g_gp_on <= 0) return;
     gpuprof_mark("(end)");
+    g_gp_cnt[g_gp_slot] = g_gp_n;
+    g_gp_slot = (g_gp_slot + 1) % GP_SLOTS;          /* the oldest frame's timestamps: read now, then the slot is reused */
+    const int slot = g_gp_slot, n = g_gp_cnt[slot];
+    g_gp_n = 0; g_gp_cnt[slot] = 0;
+    if (!n) return;
     uint64_t prev = 0;
-    for (int i = 0; i < g_gp_n; i++) {
+    for (int i = 0; i < n; i++) {
         uint64_t t = 0;
-        glGetQueryObjectui64v(g_gp_q[i], 0x8866 /* QUERY_RESULT */, &t);
+        glGetQueryObjectui64v(g_gp_q[slot][i], 0x8866 /* QUERY_RESULT */, &t);
         if (i) {
             int k = 0;
-            while (k < g_gp_tn && strcmp(g_gp_tab[k].key, g_gp_key[i - 1])) k++;
-            if (k == g_gp_tn && g_gp_tn < 1024) { memset(&g_gp_tab[k], 0, sizeof g_gp_tab[k]); snprintf(g_gp_tab[g_gp_tn++].key, sizeof g_gp_tab[0].key, "%s", g_gp_key[i - 1]); }
+            while (k < g_gp_tn && strcmp(g_gp_tab[k].key, g_gp_key[slot][i - 1])) k++;
+            if (k == g_gp_tn && g_gp_tn < 1024) { memset(&g_gp_tab[k], 0, sizeof g_gp_tab[k]); snprintf(g_gp_tab[g_gp_tn++].key, sizeof g_gp_tab[0].key, "%s", g_gp_key[slot][i - 1]); }
             if (k < 1024) { g_gp_tab[k].ms += (double)(t - prev) / 1e6; g_gp_tab[k].n++; }
         }
         prev = t;
     }
-    g_gp_n = 0;
     if (++g_gp_frames % 300) return;
     qsort(g_gp_tab, (size_t)g_gp_tn, sizeof g_gp_tab[0], gp_cmp);
     double all = 0; for (int k = 0; k < g_gp_tn; k++) all += g_gp_tab[k].ms;
@@ -6156,7 +6276,7 @@ static void job_submit(void *arg) {
     }
     g_serial++;
     g_arena_gen++;                               /* guest memory may have changed since the last batch */
-    ww_scan_regions();                           /* which: the arena keeps what nobody wrote */
+    ww_scan_apply(j->ww_seq);                     /* which: the arena keeps what nobody wrote */
     bl_update();
     dec_land();
     LONG64 pf0 = pf_now();
@@ -6375,6 +6495,7 @@ static void pf_frame_mark(LONG64 frame) {
 }
 
 static void job_present(void *arg);
+static void present_fence(long long frame);
 static void job_fence(void *arg);
 static void job_sync_wait(void *arg);
 static void job_flush(void *arg);
@@ -6390,6 +6511,20 @@ static void joblog(void (*fn)(void *), LONG64 t) {
 }
 #ifdef _WIN32
 #include "nvn_gl_menu.c"                           /* the in-game settings menu (menu.cpp builds it) */
+/* PRESENT AT THE TICK (2026-10-30, as the Vulkan renderer does since session 14, display.c): the finished frame's picture is
+ * blitted into the back buffer at once and the flip (SwapBuffers) waits for the tick of the refresh clock, posted by the
+ * vsync thread (nvn_front_post_present_flush -> job_gl_swap_flush). Before, the flip came when the render thread was done,
+ * so a frame landed on whichever vblank followed, and on a 240 Hz monitor (4 refreshes a game frame) frames stayed on
+ * screen 3, 4 or 5 refreshes as the render time varied. A late frame (queued after its tick) is flipped at once, as before.
+ * SSBU_PACE_HOLD=0 or latency = lowest: flipped at once always. */
+static volatile LONG g_gl_swap_pending;
+static void gl_swap_now(void) {
+    LONG64 pf1 = pf_now();
+    HS_IN("SwapBuffers", 0); SwapBuffers(g_dc); HS_OUT(); pf_add(PF_SWAP, pf1);
+    if (InterlockedExchange(&g_gl_swap_pending, 0)) { InterlockedExchange(&g_display_holding, 0); display_present_flushed(); }
+    display_present_done(0);
+}
+static void job_gl_swap_flush(void *arg) { (void)arg; if (g_gl_swap_pending) gl_swap_now(); }
 #endif
 static void job_present(void *arg) {
     if (g_rbp_n) rb_land(0);
@@ -6401,6 +6536,9 @@ static void job_present(void *arg) {
     Tex *t = j->win && j->index >= 0 && j->index < j->win->count ? j->win->tex[j->index] : NULL;
     RECT r;
     LONG64 frame = g_st.frames + 1;
+#ifdef _WIN32
+    if (InterlockedExchange(&g_gl_swap_pending, 0)) { InterlockedExchange(&g_display_holding, 0); display_present_flushed(); }      /* a frame kept for its tick is replaced by this newer one */
+#endif
     LONG64 pf0 = pf_now();
     drawsig_frame(frame);
     if (shot == -2) { shot = getenv("SSBU_SHOT") ? atoi(getenv("SSBU_SHOT")) : -1; every = getenv("SSBU_SHOT_EVERY") ? atoi(getenv("SSBU_SHOT_EVERY")) : 0; shot_from = getenv("SSBU_SHOT_FROM") ? atoi(getenv("SSBU_SHOT_FROM")) : 0; shot_to = getenv("SSBU_SHOT_TO") ? atoi(getenv("SSBU_SHOT_TO")) : 0x7fffffff; }
@@ -6556,7 +6694,15 @@ static void job_present(void *arg) {
 #ifdef _WIN32
     menu_gl_draw((int)r.right, (int)r.bottom);      /* the in-game settings menu over the picture (nvn_gl_menu.c) */
     fbo_detach(g_fbo_read);
-    { LONG64 pf1 = pf_now(); HS_IN("SwapBuffers", 0); SwapBuffers(g_dc); HS_OUT(); pf_add(PF_SWAP, pf1); }
+    present_fence(frame);
+    if (!j->shot_fight && display_present_defer()) {      /* kept in the back buffer for its tick (see gl_swap_now) */
+        glFlush();
+        InterlockedExchange(&g_display_holding, 1);
+        InterlockedExchange(&g_gl_swap_pending, 1);
+        if (display_present_due()) gl_swap_now();          /* the tick came meanwhile */
+    } else gl_swap_now();
+#else
+    present_fence(frame);
 #endif
     pf_add(PF_PRESENT, pf0);
     pf_frame_mark(frame);
@@ -6901,8 +7047,13 @@ static int pw_queue_prog(Prog *p) {
     int m = pw_mode();
     Stage *v = &p->st[0], *f = &p->st[1];
     if (!m || g_shd_mode <= 0 || !g_shw_n || g_shw_ctx_failed || (m < 2 && g_st.frames < 300) || GetCurrentThreadId() == g_render_tid) return 0;
-    if (!(v->code && v->code_len > 0 && v->glsl_state == 0) || p->st[2].state || p->st[3].state || p->st[4].state) return 0;
-    int has_f = f->code && f->code_len > 0 && f->glsl_state == 0;
+    /* 2026-10-30: with the shader store every stage is translated already (glsl_state != 0), and this returned 0: no pair was
+     * warmed at play ("0 programs handed over" in the 2026-10-29 session, where 651 of 850 pairs then stalled their first
+     * draw, 26 ms on average, 16.8 s in all: the driver's disk cache no longer held the pairs the preparation had warmed).
+     * Now a program handed over is warmed whatever the state of its stages: with a warm driver cache that is 2 ms per
+     * pair on a worker, and when the cache is cold the work is loading time instead of a stall mid-frame. */
+    if (!(v->code && v->code_len > 0) || p->st[2].state || p->st[3].state || p->st[4].state) return 0;
+    int has_f = f->code && f->code_len > 0;
     if (f->state && !has_f) return 0;
     uint32_t vc = v->cdata_copy ? v->ctl[3] : 0, fc = has_f && f->cdata_copy ? f->ctl[3] : 0;
     size_t need = (size_t)v->code_len + vc + (has_f ? (size_t)f->code_len + fc : 0);
@@ -7641,7 +7792,7 @@ void nvn_front_racechk(const uint64_t *handles, int count, int phase) {      /* 
 /* ---- queue and window */
 static void l1_pipe_after_submit(void); static int l1_pipe_wait(void);
 static void queue_submit(Ctx *c) {                      /* (queue, count, handles) */
-    SubmitJob j = {(int)A1, P(A2)};
+    SubmitJob j = {(int)A1, P(A2), 0};
     L1T("SUBMIT %d lists: %llx %llx %llx %llx", (int)A1, A2 && A1 > 0 ? (unsigned long long)rd64(A2) : 0ull, A2 && A1 > 1 ? (unsigned long long)rd64(A2 + 8) : 0ull, A2 && A1 > 2 ? (unsigned long long)rd64(A2 + 16) : 0ull, A2 && A1 > 3 ? (unsigned long long)rd64(A2 + 24) : 0ull);
     { void display_l1_submit(void); display_l1_submit(); }      /* L1: submits between the game's wait for the window texture and its present */
     if (j.count > 0 && A2 && racechk_env()) racechk_submit(j.handles, j.count);
@@ -7670,6 +7821,7 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
     int r1_ra_quiet(void);
     if (j.count > 0 && A2 && r1_ra_quiet()) { static LONG64 n; n++; }      /* R1 round 5, run-ahead: the real pass's submission = the lists the speculative pass already ran on the GPU: not run again */
     else if (j.count > 0 && A2) {
+        if (g_rb == &rb_gl) j.ww_seq = ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now */
         if (gl_async_on() && j.count <= 4096) {
             size_t size = sizeof j + (size_t)j.count * 8;
             SubmitJob *copy = malloc(size);
@@ -7745,7 +7897,12 @@ unsigned long nvn_front_present_tid(void) { return g_pf_main_tid; }      /* the 
 /* Session 14 (display.c, the vsync thread at a tick): the present the Vulkan back end kept for this tick, as a job of the
  * render thread (in order with the other jobs; nobody waits for it). */
 void nvn_vk_present_flush_job(void *arg);              /* nvn_vk_draw.c */
-void nvn_front_post_present_flush(void) { if (g_vk) gl_post(nvn_vk_present_flush_job, NULL, 0); }
+void nvn_front_post_present_flush(void) {
+#ifdef _WIN32
+    if (!g_vk) { gl_post(job_gl_swap_flush, NULL, 0); return; }
+#endif
+    if (g_vk) gl_post(nvn_vk_present_flush_job, NULL, 0);
+}
 /* osk.c, the on-screen keyboard: drawn by the Vulkan renderer only (the OpenGL path keeps the old text dialog) */
 void nvn_vk_osk_redraw_job(void *arg);                 /* nvn_vk_draw.c */
 long long nvn_vk_presents(void);                       /* nvn_vk_draw.c */
@@ -7940,9 +8097,43 @@ static void queue_fence_sync(Ctx *c) {                  /* (queue, sync, conditi
     SyncJob j = {o, (int)A3, 0, 0};
     if (o) { if (gl_async_on()) gl_post(g_rb->fence, &j, sizeof j); else gl_run(g_rb->fence, &j); }
 }
+/* ONE FRAME IN FLIGHT. The game waits, every frame, for the fence of the frame before (synclog: 6-9 ms at 4K): on the
+ * console that frees the memory the GPU read. Here the render thread has already copied all of it (arena, uploads) when it
+ * reaches the wait, so the GPU only has to be done with what the game reads back (the buffers the GPU wrote, ~30 KB a
+ * frame on the island, landed through their own fences right after the batch that wrote them). So the wait lands those,
+ * then waits for the frame before the fenced one: the GPU works on one frame while the game builds the next instead of
+ * idling between them (GPU busy 75 % at 4K). TOMO_EARLY_FENCE=0: the full wait. */
+#define PF_RING 8
+static void *g_pfence[PF_RING];                             /* a fence at the end of each presented frame (job_present) */
+static long long g_pf_frame[PF_RING];
+static int g_early_fence = -1;
+static LONG64 g_early_n, g_full_n;
+static void present_fence(long long frame) {
+    if (g_early_fence < 0) g_early_fence = !(getenv("TOMO_EARLY_FENCE") && getenv("TOMO_EARLY_FENCE")[0] == '0');
+    if (frame % 600 == 0) {
+        static LARGE_INTEGER fq; if (!fq.QuadPart) QueryPerformanceFrequency(&fq);
+        printf("nvn_gl: render-thread waits for the GPU, ms a frame by line (1000xx = compute read-back):");
+        for (int k = 0; k < 32 && g_stall[k].line; k++) printf(" %d: %.2f (%.1f)", g_stall[k].line, (double)g_stall[k].ticks * 1000.0 / (double)fq.QuadPart / 600.0, (double)g_stall[k].n / 600.0);
+        printf("%c", 10); memset(g_stall, 0, sizeof g_stall); }
+    if (!g_early_fence) return;
+    int k = (int)(frame % PF_RING);
+    if (g_pfence[k]) glDeleteSync(g_pfence[k]);
+    g_pfence[k] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0);
+    g_pf_frame[k] = frame;
+    if (frame % 600 == 0) { static LONG64 cb0; printf("nvn_gl: one frame in flight: %lld early waits, %lld of them landed read-backs first; %.2f MB a frame read back from GPU-written buffers%c", (long long)g_early_n, (long long)g_full_n, (double)(g_st.compute_bytes - cb0) / 600.0 / 1048576.0, 10); cb0 = g_st.compute_bytes; }
+}
 static void job_sync_wait(void *arg) {
     SyncJob *j = arg;
     if (!j->o->s) { j->result = 3; return; }            /* never fenced: NVN_SYNC_WAIT_RESULT_FAILED */
+    if (g_early_fence > 0 && j->timeout && j->o->fence_frame >= (long long)g_st.frames) {
+        long long f = j->o->fence_frame - 1;            /* the frame presented before the fenced one */
+        if (g_rbp_n) { rb_land(1); g_full_n++; }         /* what the GPU wrote for the game lands first */
+        int k = (int)(f % PF_RING);
+        if (f > 0 && g_pfence[k] && g_pf_frame[k] == f) {
+            GLenum r = glClientWaitSync(g_pfence[k], 1, j->timeout);
+            if (r == 0x911A || r == 0x911C) { j->result = 1; g_early_n++; return; }
+        }
+    }
     GLenum r = glClientWaitSync(j->o->s, 1 /* SYNC_FLUSH_COMMANDS_BIT */, j->timeout);
     j->result = r == 0x911A ? 0 : r == 0x911C ? 1 : r == 0x911B ? 2 : 3;       /* already signaled, condition satisfied, timeout expired, failed */
     if (g_rbp_n && j->result < 2) rb_land(0);           /* the game may now read what the GPU wrote before its fence */
