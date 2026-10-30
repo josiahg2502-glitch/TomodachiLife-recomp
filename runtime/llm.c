@@ -36,6 +36,7 @@ struct Llm {
     float *x, *xb, *q, *k, *v, *ao, *g, *u, *att, *rowbuf;
     int rowmax, avx2;
     int nt; HANDLE th[LLM_MAXT], go[LLM_MAXT], done[LLM_MAXT]; volatile LONG stop;
+    volatile int nt_active, nt_run;                   /* threads to use now (set between evaluations, 1..nt); this run's */
     LlmJob job; void *job_ctx;
 };
 
@@ -136,15 +137,16 @@ static DWORD WINAPI llm_worker(void *p) {
     for (;;) {
         WaitForSingleObject(w.m->go[w.t], INFINITE);
         if (w.m->stop) return 0;
-        w.m->job(w.m, w.m->job_ctx, w.t, w.m->nt);
+        w.m->job(w.m, w.m->job_ctx, w.t, w.m->nt_run);
         SetEvent(w.m->done[w.t]);
     }
 }
 static void llm_run(Llm *m, LlmJob fn, void *ctx) {
-    m->job = fn; m->job_ctx = ctx;
-    for (int t = 1; t < m->nt; t++) SetEvent(m->go[t]);
-    fn(m, ctx, 0, m->nt);
-    if (m->nt > 1) WaitForMultipleObjects((DWORD)(m->nt - 1), m->done + 1, TRUE, INFINITE);
+    int nt = m->nt_active < 1 || m->nt_active > m->nt ? m->nt : m->nt_active;
+    m->job = fn; m->job_ctx = ctx; m->nt_run = nt;
+    for (int t = 1; t < nt; t++) SetEvent(m->go[t]);
+    fn(m, ctx, 0, nt);
+    if (nt > 1) WaitForMultipleObjects((DWORD)(nt - 1), m->done + 1, TRUE, INFINITE);
 }
 /* out[b][r] = W[r] . x[b] for B inputs; rows split across the workers. */
 typedef struct { float *out; const LlmT *w; const float *x; int B, n_in, n_out; } LlmMm;

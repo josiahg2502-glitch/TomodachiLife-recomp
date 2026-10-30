@@ -35,8 +35,23 @@ int main(int argc, char **argv) {
     printf("self-test: %s\n", chatter_selftest() ? "ok" : "FAILED");
     cm_learn();
     kb_load_file();
+    if (getenv("CHATTER_SARC")) {                       /* a decompressed message archive (romfs/Mals/USen.Product.100.sarc), as if in the game's memory */
+        FILE *f = fopen(getenv("CHATTER_SARC"), "rb");
+        static uint8_t *sarc; long sz = 0;
+        if (f && !fseek(f, 0, SEEK_END) && (sz = ftell(f)) > 0x100 && !fseek(f, 0, SEEK_SET) && (sarc = malloc((size_t)sz)) && fread(sarc, 1, (size_t)sz, f) == (size_t)sz) kb_from_game((uint64_t)(uintptr_t)(sarc + 0x100));
+        if (f) fclose(f);
+    }
     printf("island \"%s\", %d known Miis, %d words, %d facts about the game\n", g_cm.island, g_cm.nmii, g_cm.nword, g_nkb);
-    for (int i = 0; i < g_cm.nmii; i++) printf("  mii %-12s first %d left %d\n", g_cm.mii[i].name, g_cm.mii[i].first, g_cm.mii[i].left);
+    for (int i = 0; i < g_cm.nmii; i++) {
+        char who[400]; ai_person(g_cm.mii[i].name, who, sizeof who);
+        printf("  mii %-12s first %d left %d, category %d:%s\n", g_cm.mii[i].name, g_cm.mii[i].first, g_cm.mii[i].left, cm_cat_of(g_cm.mii[i].name), who);
+    }
+    for (int i = 0; i < g_cm.nmii; i++)
+        for (int j = 0; j < g_cm.nmii; j++) {
+            int si = cm_slot(g_cm.mii[i].name), sj = cm_slot(g_cm.mii[j].name), c = i != j && si >= 0 && sj >= 0 ? g_cm.rel[cm_pair(si, sj)] : 0;
+            if (c & 0x7f) printf("  tie: %s is %s's %s\n", g_cm.mii[j].name, g_cm.mii[i].name, cm_rel_what(c));
+        }
+    {   static AiFacts f; int c = ai_want_cat(); ai_facts(&f, 2, c); printf("a thought's facts (category %d):\n  %s\n", c, f.text); }
     for (int i = 0; i < g_cm.nword; i++) printf("  word %s\n", g_cm.word[i]);
     for (int kind = 1; kind <= 2; kind++) {
         printf("%s, speaker unknown:\n", kind == 1 ? "touch talk" : "thoughts");
@@ -78,9 +93,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < lines; i++) {
         char raw[300], line[300]; const char *why = "";
         DWORD a = GetTickCount();
-        char about[100]; int ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, about, &why);
+        char about[100]; int cat = i % 2 ? ai_want_cat() : -1, ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, about, &cat, &why);
         good += ok;
-        printf("  %s %5lu ms  %-60s -> %s\n", i % 2 ? "think" : "say  ", GetTickCount() - a, raw, ok ? line : why);
+        if (ok) ai_push(1 + i % 2, line, about, cat);           /* (so the next thought goes to another personality) */
+        printf("  %s %5lu ms %-6s %-60s -> %s\n", i % 2 ? "think" : "say  ", GetTickCount() - a, cat >= 0 ? k_pcat_key[cat] : "", raw, ok ? line : why);
     }
     printf("%d of %d lines usable, %.1f s a line\n", good, lines, (GetTickCount() - all) / 1000.0 / (lines ? lines : 1));
     static const char *const var[][2] = {{"BringAndJumpWait", "Won't someone do aerobics with me?"}, {"TalkAboutOthersHouse", "This is some prime real estate."},

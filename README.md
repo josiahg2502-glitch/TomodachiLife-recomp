@@ -104,7 +104,10 @@ their own voice and way of talking, while the game's own lines stay most of what
 
 It learns your island as you play: who lives there, who just moved in (a new Mii is learned once the game saves), who
 moved away, and the words you taught the Miis. It knows which Mii is speaking, so a thought can be about another resident
-by name, never about the one thinking it. Everything it learns and writes is kept in `build\userdata`
+by name, never about the one thinking it. It also knows each Mii as the game does: their personality (worked out from
+their personality sliders the way the game does, with the game's own names and descriptions), their pronouns, their
+birthday and who they are to each other (partners, family, friends), so thoughts and chats fit who is talking, birthdays
+coming up get mentioned and Miis gossip about the island's couples and families. Everything it learns and writes is kept in `build\userdata`
 (`chatter_memory.txt`, `chatter_lines.txt`, `chatter_knowledge.txt`); delete those files to make it forget. The library of
 new lines keeps growing as you play, and lines that were said often make way for new ones. English text and game
 version 1.0.4 only.
