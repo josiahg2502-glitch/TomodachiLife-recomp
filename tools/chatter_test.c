@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < lines; i++) {
         char raw[300], line[300]; const char *why = "";
         DWORD a = GetTickCount();
-        int ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, &why);
+        char about[100]; int ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, about, &why);
         good += ok;
         printf("  %s %5lu ms  %-60s -> %s\n", i % 2 ? "think" : "say  ", GetTickCount() - a, raw, ok ? line : why);
     }

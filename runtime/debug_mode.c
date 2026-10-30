@@ -178,6 +178,19 @@ static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
     if (InterlockedIncrement(&shown) <= 160) {
         char line[1200]; int n = snprintf(line, sizeof line, "debug watch: %s %llx (reg %d) now %016llx by thread %lu, guest stack:", g_dw_rw ? "access to" : "write to", (unsigned long long)addr, which, (unsigned long long)*(uint64_t *)(uintptr_t)(addr & ~7ull), GetCurrentThreadId());
         CONTEXT c2 = *cx; uint64_t last = 0;
+        {   /* host frames as exe offsets (look them up in the .map beside the exe) */
+            CONTEXT h = *cx; uint64_t base = (uint64_t)(uintptr_t)GetModuleHandleA(NULL);
+            n += snprintf(line + n, sizeof line - n, " host:");
+            for (int d = 0; d < 8 && h.Rip; d++) {
+                if (h.Rip >= base && h.Rip < base + 0x4000000) n += snprintf(line + n, sizeof line - n, " exe+%llx", (unsigned long long)(h.Rip - base));
+                else n += snprintf(line + n, sizeof line - n, " %llx", (unsigned long long)h.Rip);
+                DWORD64 ib2; RUNTIME_FUNCTION *rf2 = RtlLookupFunctionEntry(h.Rip, &ib2, NULL);
+                if (!rf2) break;
+                void *hd2; DWORD64 est2;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib2, h.Rip, rf2, &h, &hd2, &est2, NULL);
+            }
+            n += snprintf(line + n, sizeof line - n, " |");
+        }
         for (int depth = 0, sh = 0; depth < 400 && sh < 14; depth++) {
             uint64_t g = guest_function_of(c2.Rip);
             if (g && g != last) { n += snprintf(line + n, sizeof line - n, " f_%llx", (unsigned long long)g); sh++; last = g; }

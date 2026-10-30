@@ -44,6 +44,7 @@ static int chatter_encode(const char *s, uint16_t *o, int n) {
             case 'w': at = chatter_tag(o, n, at, 6, 5, p_wait, 4); break;
             case 'n': at = chatter_tag(o, n, at, 0, 4, NULL, 0); break;
             case 'h': at = chatter_tag(o, n, at, 300, 2, p_close, 2); break;
+            case 's': { static const uint8_t p_self[4] = {0x00, 0x02, 0x00, 0x0d}; at = chatter_tag(o, n, at, 200, 0, p_self, 4); } break;   /* the speaker's own name */
             }
             s += 3;
             continue;
@@ -74,6 +75,7 @@ static struct {
     char island[100];
     char word[300][100]; int nword;                         /* the words you taught the Miis (not kept: the save has them) */
     char heard[8][160]; int nheard, heardi;                 /* what Miis said lately (the game's own lines; for the AI) */
+    char slotname[70][100]; uint32_t ids[70][6];            /* by save place: the name, and per-Mii values that tell Miis apart */
     int loaded, dirty;
     LONG64 sav_t;                                           /* the save files' write times last read */
     DWORD checked;
@@ -157,6 +159,18 @@ static void cm_learn(void) {
     uint8_t *md = cm_read("Mii.sav", &mn), *pd = cm_read("Player.sav", &pn);
     static char names[70][100];
     int nn = md ? sav_strings(md, mn, 0x2499bfda, names, 70) : -1;                /* the residents' names (70 places) */
+    if (md) {                                       /* by place: names and the per-Mii values (4 random-looking, 2 times) */
+        static const uint32_t idh[6] = {0x5409455d, 0x21eea734, 0x5c7cd87a, 0x400e8774, 0x34190cdf, 0x2b881856};
+        const uint8_t *na = sav_field(md, mn, 0x2499bfda);
+        memset(g_cm.slotname, 0, sizeof g_cm.slotname); memset(g_cm.ids, 0, sizeof g_cm.ids);
+        for (int i = 0; na && i < 70 && (size_t)(na - md) + 4 + (size_t)(i + 1) * 64 <= mn; i++) sav_utf8(na + 4 + i * 64, g_cm.slotname[i]);
+        for (int k = 0; k < 6; k++) {
+            const uint8_t *a = sav_field(md, mn, idh[k]);
+            int es = k < 4 ? 4 : 8;
+            if (a && *(const uint32_t *)a == 70 && (size_t)(a - md) + 4 + 70 * (size_t)es <= mn)
+                for (int i = 0; i < 70; i++) memcpy(&g_cm.ids[i][k], a + 4 + i * es, 4);
+        }
+    }
     if (pd) g_cm.nword = sav_strings(pd, pn, 0xaa7a1eac, g_cm.word, 300);           /* the words you taught */
     char island[100] = "";
     const uint8_t *is = sav_field(pd, pn, 0xd46df986);                              /* the island's name */
@@ -359,6 +373,7 @@ static struct {
     volatile LONG state;                         /* 0 not started, 1 loading, 2 writing, -1 none / failed */
     HANDLE thread, wake;
     char pool[3][8][260]; int n[3];              /* ready lines per kind (1 talk, 2 thought), in the markup */
+    char about[3][8][100];                       /* the resident a line is about ("" = nobody) */
     char model[MAX_PATH];
     LONG64 made, dropped;
 } g_ai;
@@ -429,10 +444,19 @@ static int ai_clean(const char *in, int kind, const char *const *names, int nnam
         for (int j = 0; j < nok; j++) allowed |= !_stricmp(ok_names[j], banned[k]);
         if (!allowed && ai_word(plain, banned[k], 0)) { *why = "talks about the game or itself"; return 0; }
     }
-    for (int k = 0; k < nnames; k++) if (ai_word(plain, names[k], 0)) { *why = "names a resident (the speaker is unknown)"; return 0; }
+    for (int k = 0; k < nnames; k++) {                    /* residents: only the one the line was written about */
+        int allowed = 0;
+        for (int j = 0; j < nok; j++) allowed |= !strcmp(ok_names[j], names[k]);
+        if (!allowed && ai_word(plain, names[k], 0)) { *why = "names a resident it was not about"; return 0; }
+    }
     if (kind == 2 && (ai_word(plain, "you", 0) || ai_word(plain, "your", 0) || ai_word(plain, "yours", 0) || ai_word(plain, "yourself", 0))) { *why = "a thought that talks to someone"; return 0; }
     if (kind == 2) for (const char *p = s; (p = strstr(p, "{player}")); p += 8)        /* "..., {player}!" calls to you: not a thought */
         if ((p == s && p[8] == ',') || (p >= s + 2 && p[-2] == ',' && (!p[8] || strchr(".!?,", p[8])))) { *why = "a thought that talks to someone"; return 0; }
+    for (int k = 0; k < nwords; k++) {                     /* nor what they are: a small model makes up facts about real people */
+        static const char *const claim[] = {"he's", "she's", "he is", "she is", "he was", "she was", "is a", "was a", "is an", "was an"};
+        if (!words[k][0] || !strstr(plain, words[k])) continue;
+        for (int j = 0; j < (int)(sizeof claim / sizeof claim[0]); j++) if (ai_word(plain, claim[j], 0)) { *why = "states facts about a taught word"; return 0; }
+    }
     for (int k = 0; k < nwords; k++) {                     /* the taught words are things Miis heard of, not who they are */
         char me[2][120];
         snprintf(me[0], sizeof me[0], "I'm %s", words[k]); snprintf(me[1], sizeof me[1], "I am %s", words[k]);
@@ -460,17 +484,25 @@ static int ai_clean(const char *in, int kind, const char *const *names, int nnam
     snprintf(out, n, "%s%s<e>%s%s", kind == 1 ? "<o>" : "", body, s[e] ? s + e : ".", kind == 1 ? "<h>" : "");
     return 1;
 }
-static void ai_push(int kind, const char *line) {
+static void ai_push(int kind, const char *line, const char *about) {
     AcquireSRWLockExclusive(&g_ai_lk);
-    if (g_ai.n[kind] < 8) snprintf(g_ai.pool[kind][g_ai.n[kind]++], sizeof g_ai.pool[0][0], "%s", line);
+    if (g_ai.n[kind] < 8) {
+        snprintf(g_ai.about[kind][g_ai.n[kind]], sizeof g_ai.about[0][0], "%s", about ? about : "");
+        snprintf(g_ai.pool[kind][g_ai.n[kind]++], sizeof g_ai.pool[0][0], "%s", line);
+    }
     ReleaseSRWLockExclusive(&g_ai_lk);
 }
-static int ai_take(int kind, char *out, size_t n) {
+/* The oldest ready line this speaker may say: one about nobody, or (speaker known) about someone else. */
+static int ai_take(int kind, const char *speaker, char *out, size_t n) {
     int got = 0;
     AcquireSRWLockExclusive(&g_ai_lk);
-    if (kind >= 1 && kind <= 2 && g_ai.n[kind]) {
-        snprintf(out, n, "%s", g_ai.pool[kind][0]);
-        memmove(g_ai.pool[kind][0], g_ai.pool[kind][1], sizeof g_ai.pool[0][0] * (size_t)(--g_ai.n[kind]));
+    for (int i = 0; kind >= 1 && kind <= 2 && i < g_ai.n[kind] && !got; i++) {
+        const char *a = g_ai.about[kind][i];
+        if (a[0] && (!speaker || !strcmp(a, speaker))) continue;
+        snprintf(out, n, "%s", g_ai.pool[kind][i]);
+        memmove(g_ai.pool[kind][i], g_ai.pool[kind][i + 1], sizeof g_ai.pool[0][0] * (size_t)(g_ai.n[kind] - i - 1));
+        memmove(g_ai.about[kind][i], g_ai.about[kind][i + 1], sizeof g_ai.about[0][0] * (size_t)(g_ai.n[kind] - i - 1));
+        g_ai.n[kind]--;
         got = 1;
     }
     ReleaseSRWLockExclusive(&g_ai_lk);
@@ -479,7 +511,7 @@ static int ai_take(int kind, char *out, size_t n) {
 }
 static int ai_room(int kind) { AcquireSRWLockShared(&g_ai_lk); int r = g_ai.n[kind] < 6; ReleaseSRWLockShared(&g_ai_lk); return r; }
 /* What the model is told this time (the user turn), from the memory; names it may use go to ok[]. */
-typedef struct { char text[1200]; char names[CM_MAX][100]; int nnames; char ok[8][100]; int nok; char words[300][100]; int nwords; } AiFacts;
+typedef struct { char text[1200]; char names[CM_MAX][100]; int nnames; char ok[8][100]; int nok; char words[300][100]; int nwords; char about[100]; } AiFacts;
 static void ai_facts(AiFacts *f, int kind) {
     static const char *const season[] = {"a winter", "a winter", "a spring", "a spring", "a spring", "a summer", "a summer", "a summer", "an autumn", "an autumn", "an autumn", "a winter"};
     static const char *const topics[] = {"food", "a dream", "a hobby", "the weather", "the island", "the player", "music", "the sea", "a silly worry",
@@ -490,9 +522,14 @@ static void ai_facts(AiFacts *f, int kind) {
     int o = 0, live = 0;
     memset(f, 0, sizeof *f);
     AcquireSRWLockShared(&g_cm_lk);
-    const char *gone = NULL;
+    const char *gone = NULL, *who = NULL;
+    int fresh = 0, today = cm_today();
     for (int i = 0; i < g_cm.nmii; i++) {
-        if (!g_cm.mii[i].left) { live++; if (f->nnames < CM_MAX) snprintf(f->names[f->nnames++], 100, "%s", g_cm.mii[i].name); }
+        if (!g_cm.mii[i].left) {
+            live++;
+            if (f->nnames < CM_MAX) snprintf(f->names[f->nnames++], 100, "%s", g_cm.mii[i].name);
+            if (!who || chatter_rand() % (unsigned)live == 0) { who = g_cm.mii[i].name; fresh = g_cm.mii[i].first && today - g_cm.mii[i].first <= 3; }
+        }
         else if (!gone || chatter_rand() % 2) gone = g_cm.mii[i].name;
     }
     if (gone) snprintf(f->ok[f->nok++], 100, "%s", gone);
@@ -501,18 +538,25 @@ static void ai_facts(AiFacts *f, int kind) {
     const char *heard = g_cm.nheard ? g_cm.heard[chatter_rand() % (unsigned)g_cm.nheard] : NULL;
     const char *w1 = f->nwords ? f->words[chatter_rand() % (unsigned)f->nwords] : NULL;
     /* One thing at a time (the model works every fact it is given into the line): a taught word 3 in 10, someone who moved
-     * away 2 in 10, something a Mii said 2 in 10, else only a topic. */
+     * away 2 in 10, something a Mii said 2 in 10, another resident 2 in 10 (thoughts only: there the speaker is known, and
+     * a line about a resident is never given to that resident), else only a topic. */
     uint32_t r = chatter_rand() % 10;
-    int use_word = w1 && r < 3, use_gone = gone && r >= 3 && r < 5, use_heard = heard && r >= 5 && r < 7;
+    int use_word = w1 && r < 3, use_gone = gone && r >= 3 && r < 5, use_heard = heard && r >= 5 && r < 7, use_who = kind == 2 && who && live >= 2 && r >= 7 && r < 9;
     o += snprintf(f->text + o, sizeof f->text - (size_t)o, "Facts: It is %s %s.", season[st.wMonth >= 1 && st.wMonth <= 12 ? st.wMonth - 1 : 0], part);
     if (live >= 2) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " %d Miis live on {island}.", live);
     if (use_gone) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii named %s moved away from {island}.", gone);
     if (use_word) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " The player taught the Miis the word \"%s\".", w1);
     if (use_heard) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii said lately: \"%s\"", heard);
+    if (use_who) {
+        o += snprintf(f->text + o, sizeof f->text - (size_t)o, fresh ? " A Mii named %s moved to {island} recently." : " A Mii named %s also lives on {island}.", who);
+        snprintf(f->about, sizeof f->about, "%s", who);
+        if (f->nok < 8) snprintf(f->ok[f->nok++], 100, "%s", who);
+    }
     ReleaseSRWLockShared(&g_cm_lk);
     if (use_word) snprintf(topic, sizeof topic, "the word \"%s\"", w1);
     else if (use_gone) snprintf(topic, sizeof topic, "missing %s", gone);
     else if (use_heard) snprintf(topic, sizeof topic, "what that Mii said");
+    else if (use_who) snprintf(topic, sizeof topic, "%s", f->about);
     else snprintf(topic, sizeof topic, "%s", topics[chatter_rand() % (sizeof topics / sizeof topics[0])]);
     snprintf(f->text + o, sizeof f->text - (size_t)o, " Topic: %s.\n%s", topic, kind == 1 ? "A Mii says a line to the player." : "A Mii thinks to itself while walking around.");
 }
@@ -545,7 +589,7 @@ static int ai_turn(Llm *m, int32_t *t, int max, const char *text, int open_assis
     return o;
 }
 /* One line: the facts as the user turn, then up to 40 tokens until the end of the turn or of the line. */
-static int ai_write(Llm *m, int prefix, int kind, uint32_t *rng, char *raw, size_t rn, char *line, size_t ln, const char **why) {
+static int ai_write(Llm *m, int prefix, int kind, uint32_t *rng, char *raw, size_t rn, char *line, size_t ln, char *about, const char **why) {
     static AiFacts f;
     int32_t t[700];
     ai_facts(&f, kind);
@@ -571,6 +615,7 @@ static int ai_write(Llm *m, int prefix, int kind, uint32_t *rng, char *raw, size
     const char *names[CM_MAX], *ok[8];
     for (int i = 0; i < f.nnames; i++) names[i] = f.names[i];
     for (int i = 0; i < f.nok; i++) ok[i] = f.ok[i];
+    snprintf(about, 100, "%s", f.about);
     return ai_clean(raw, kind, names, f.nnames, ok, f.nok, (const char (*)[100])f.words, f.nwords, line, ln, why);
 }
 static int ai_prefix(Llm *m) {
@@ -612,12 +657,12 @@ static DWORD WINAPI ai_main(void *arg) {
         int kind = ai_room(1) ? 1 : ai_room(2) ? 2 : 0;
         if (!kind) { WaitForSingleObject(g_ai.wake, 60000); continue; }
         ai_wait_calm();
-        char raw[300], line[300];
+        char raw[300], line[300], about[100];
         const char *why = "";
         DWORD a = GetTickCount();
-        if (ai_write(m, prefix, kind, &rng, raw, sizeof raw, line, sizeof line, &why)) {
-            ai_push(kind, line);
-            if (g_ai.made++ < 30) printf("chatter: AI wrote a %s in %lu ms: %s%c", kind == 1 ? "line" : "thought", GetTickCount() - a, line, 10);
+        if (ai_write(m, prefix, kind, &rng, raw, sizeof raw, line, sizeof line, about, &why)) {
+            ai_push(kind, line, about);
+            if (g_ai.made++ < 30) printf("chatter: AI wrote a %s in %lu ms%s%s: %s%c", kind == 1 ? "line" : "thought", GetTickCount() - a, about[0] ? " about " : "", about, line, 10);
         } else if (g_ai.dropped++ < 30) printf("chatter: AI line dropped (%s): %s%c", why, raw, 10);
     }
 }
@@ -665,7 +710,7 @@ static int chatter_readable(uint64_t p, size_t n) {         /* (TEST probe only;
 /* TEST: where does a resident's name sit around the pick (up to three pointer steps from depth 0)? */
 static int g_probe_hits;
 static void chatter_probe(const char *path, uint64_t p, int depth) {
-    if (g_probe_hits >= 24 || !chatter_readable(p, 0x200)) return;
+    if (g_probe_hits >= 60 || !chatter_readable(p, 0x200)) return;
     const uint16_t *h = (const uint16_t *)(uintptr_t)p;
     for (int off = 0; off < 0x100; off++)
         for (int i = 0; i < g_cm.nmii && h[off] && h[off] < 0x80; i++) {
@@ -673,13 +718,40 @@ static void chatter_probe(const char *path, uint64_t p, int depth) {
             if ((uint8_t)nm[0] != h[off]) continue;
             int k = 1;
             while (nm[k] && off + k < 0x100 && h[off + k] == (uint8_t)nm[k]) k++;
-            if (!nm[k] && k >= 2 && off + k < 0x100 && !h[off + k] && g_probe_hits++ < 24) printf("chatter: probe %s+0x%x = \"%s\"%c", path, off * 2, nm, 10);
+            if (!nm[k] && k >= 2 && off + k < 0x100 && !h[off + k] && g_probe_hits++ < 60) printf("chatter: probe %s+0x%x = \"%s\"%c", path, off * 2, nm, 10);
         }
     if (depth < 3)
         for (int off = 0; off < 0x200; off += 8) {
             char sub[128]; snprintf(sub, sizeof sub, "%s+0x%x>", path, off);
             chatter_probe(sub, rd64(p + off), depth + 1);
         }
+}
+/* Who is speaking: for a walk-around thought the game's request (0x71004b9b04) keeps the thinking Mii's object (+0x20;
+ * per Mii, 0x1C2000 apart), whose +0x488 is that Mii's data, holding the same random per-Mii values as the save (Mii.sav
+ * 0x5409455d at +0x1a18, 0x21eea734 at +0x19c0; found 2026-10-30 by probing the owner for the save values). The request's x19 is saved by
+ * 0x71004b9d8c at its x29 + 0x38, the frame that returns to 0x71004b9cd4. Its place in the memory, -1 unknown. Called under
+ * g_cm_lk (chatter_readable keeps one region). */
+static int chatter_speaker(Ctx *c) {
+    uint64_t fp = c->x[29], sp = c->x[31];
+    for (int d = 0; d < 12 && fp > sp && fp - sp < 0x40000 && chatter_readable(fp, 0x40); d++) {
+        if (rd64(fp + 8) == 0x71004b9cd4ull) {
+            uint64_t req = rd64(fp + 0x38), P, M;
+            if (!chatter_readable(req + 0x20, 8)) return -1;
+            P = rd64(req + 0x20) & ~(uint64_t)3;
+            if (!chatter_readable(P + 0x488, 8)) return -1;
+            M = rd64(P + 0x488) & ~(uint64_t)3;
+            if (!chatter_readable(M + 0x19c0, 0x60)) return -1;
+            uint32_t a = rd32(M + 0x1a18), b = rd32(M + 0x19c0);
+            for (int i = 0; i < 70; i++)
+                if (g_cm.slotname[i][0] && g_cm.ids[i][0] == a && g_cm.ids[i][1] == b)
+                    for (int j = 0; j < g_cm.nmii; j++) if (!g_cm.mii[j].left && !strcmp(g_cm.mii[j].name, g_cm.slotname[i])) return j;
+            return -1;
+        }
+        uint64_t up = rd64(fp);
+        if (up <= fp) break;
+        fp = up;
+    }
+    return -1;
 }
 /* A game line as plain text, for the AI to hear: style tags dropped, a new balloon is a space; a line with a slot the game
  * fills in (a name, a word) is skipped. */
@@ -701,6 +773,59 @@ static int chatter_plain(uint64_t text, int len, char *out, size_t n) {
     }
     out[o] = 0;
     return o > 3;
+}
+/* TEST: where around the pick sits one of the per-Mii values (who is it about)? From each start: its 8 KB, the 8 KB
+ * behind each of its pointers, and 1 KB behind each pointer in the first 1 KB of those. */
+static uint32_t g_idv[300]; static int g_id_slot[300], g_id_k[300], g_nid; static uint16_t g_idht[1024];
+static void chatter_ids_build(void) {
+    memset(g_idht, 0, sizeof g_idht); g_nid = 0;
+    for (int i = 0; i < 70; i++) for (int k = 0; k < 6 && g_cm.slotname[i][0]; k++) {
+        uint32_t v = g_cm.ids[i][k], h = (v * 2654435761u) >> 22;
+        if (v <= 0xffff || g_nid >= 300) continue;
+        while (g_idht[h]) h = (h + 1) & 1023;
+        g_idht[h] = (uint16_t)(g_nid + 1); g_idv[g_nid] = v; g_id_slot[g_nid] = i; g_id_k[g_nid] = k; g_nid++;
+    }
+}
+static void chatter_probe_ids(const char *path, uint64_t p, int depth) {
+    int win = depth < 3 ? 0x2000 : 0x400;
+    if (g_probe_hits >= 120 || p < 0x10000) return;
+    if (!chatter_readable(p, (size_t)win)) { win = 0x400; if (!chatter_readable(p, 0x400)) return; }
+    for (int off = 0; off < win; off += 4) {
+        uint32_t v = rd32(p + (uint64_t)off);
+        for (uint32_t h = (v * 2654435761u) >> 22; v > 0xffff && g_idht[h]; h = (h + 1) & 1023)
+            if (g_idv[g_idht[h] - 1] == v) {
+                if (g_probe_hits++ < 120) printf("chatter: probe-id %s+0x%x = %s (value %d)%c", path, off, g_cm.slotname[g_id_slot[g_idht[h] - 1]], g_id_k[g_idht[h] - 1], 10);
+                break;
+            }
+    }
+    if (depth < 3)
+        for (int off = 0; off < (depth == 1 ? win : 0x400); off += 8) {
+            char sub[160]; snprintf(sub, sizeof sub, "%s+0x%x>", path, off);
+            chatter_probe_ids(sub, rd64(p + (uint64_t)off), depth + 1);
+        }
+}
+/* TEST: Mii objects (a resident's name at +0x148 or +0x1e0, as in the room scene) up to four pointer steps from a start,
+ * following the first 32 pointers of each object. */
+static int chatter_name_at(uint64_t q, char *out) {
+    if (!chatter_readable(q, 0x40)) return 0;
+    const uint16_t *w = (const uint16_t *)(uintptr_t)q;
+    for (int i = 0; i < 70; i++) {
+        const char *nm = g_cm.slotname[i];
+        int k = 0;
+        if (!nm[0]) continue;
+        while (nm[k] && w[k] == (uint8_t)nm[k]) k++;
+        if (!nm[k] && !w[k] && k >= 2) { strcpy(out, nm); return 1; }
+    }
+    return 0;
+}
+static void chatter_probe_mii(const char *path, uint64_t p, int depth) {
+    p &= ~(uint64_t)3;                                      /* (tagged pointers: the game keeps flags in the low bits) */
+    if (g_probe_hits >= 40 || p < 0x10000 || !chatter_readable(p, 0x200)) return;
+    char nm[100];
+    if (chatter_name_at(p + 0x148, nm) && g_probe_hits++ < 40) printf("chatter: probe-mii %s +0x148 = %s%c", path, nm, 10);
+    if (chatter_name_at(p + 0x1e0, nm) && g_probe_hits++ < 40) printf("chatter: probe-mii %s +0x1e0 = %s%c", path, nm, 10);
+    if (depth < 4)
+        for (int off = 0; off < 0x100; off += 8) { char sub[160]; snprintf(sub, sizeof sub, "%s+0x%x>", path, off); chatter_probe_mii(sub, rd64(p + (uint64_t)off), depth + 1); }
 }
 static void chatter_pick(Ctx *c, void *user) {
     uint64_t res = c->x[8], mfile = c->x[0], arg[4] = {c->x[2], c->x[3], c->x[4], c->x[5]};
@@ -728,7 +853,20 @@ static void chatter_pick(Ctx *c, void *user) {
         a[o] = 0;
         printf("chatter: pick %lld %s (kind %d) args %llx %llx %llx: %s%c", (long long)g_chatter_picks, label, kind,
                (unsigned long long)arg[0], (unsigned long long)arg[1], (unsigned long long)arg[2], a, 10);
-        if (g_chatter_picks < 6) for (int r = 19; r <= 28; r++) { char nm[8]; snprintf(nm, sizeof nm, "x%d", r); g_probe_hits = 0; chatter_probe(nm, c->x[r], 1); }   /* the caller's saved registers, two steps */
+        if (g_chatter_picks < 60 && getenv("TOMO_CHATTER_PROBE")) {   /* the caller's stack: names on it, and up to two pointer steps from it */
+            uint64_t sp = c->x[31], fp = c->x[29];
+            char fr[400]; int fo = 0;
+            for (int k = 0; k < 10 && fp > sp && fp - sp < 0x10000 && chatter_readable(fp, 16); k++) {   /* the frames: offset from sp, return address */
+                fo += snprintf(fr + fo, sizeof fr - (size_t)fo, " sp+0x%llx:%llx", (unsigned long long)(fp - sp), (unsigned long long)rd64(fp + 8));
+                fp = rd64(fp);
+            }
+            printf("chatter: frames%s%c", fr, 10);
+            g_probe_hits = 0;
+            int span = chatter_readable(sp, 0x4000) ? 0x4000 : chatter_readable(sp, 0x1000) ? 0x1000 : 0;
+            (void)span;
+            for (int i = 0; i < 3; i++) { char nm[8]; snprintf(nm, sizeof nm, "x%d", i + 2); chatter_probe_mii(nm, arg[i], 0); }
+            for (int off = 0; off < 0x4000 && g_probe_hits < 40 && chatter_readable(sp + (uint64_t)off, 8); off += 8) { char nm[32]; snprintf(nm, sizeof nm, "[sp+0x%x]", off); chatter_probe_mii(nm, rd64(sp + (uint64_t)off), 2); }
+        }
     }
     g_chatter_picks++;
     /* The game can pick the same line twice for one balloon (the greeting did): the same line gets the same answer. */
@@ -760,8 +898,9 @@ static void chatter_pick(Ctx *c, void *user) {
         static int slot;
         char l8[600];
         line16 = ring[slot++ & 63];
-        int ai = ai_take(kind, l8, sizeof l8);     /* the AI's line when one is ready, else a template */
-        if (!ai) chatter_line(l8, sizeof l8, -1, kind);   /* (the speaker: not found yet, so no lines about other residents) */
+        int spk = chatter_speaker(c);              /* (-1: not found; then no line names a resident) */
+        int ai = ai_take(kind, spk >= 0 ? g_cm.mii[spk].name : NULL, l8, sizeof l8);     /* the AI's line when one is ready, else a template */
+        if (!ai) chatter_line(l8, sizeof l8, spk, kind);
         /* Half the time the Mii says its own line first and adds the new one in a second balloon ({0.4}), with the
          * closing {300.2} only at the very end as in the game's own two-balloon lines. */
         int olen = (int)rd32(res + 8), at = 0;
@@ -782,7 +921,7 @@ static void chatter_pick(Ctx *c, void *user) {
         wr64(res, (uint64_t)(uintptr_t)line16);
         wr32(res + 8, (uint32_t)len);
         g_chatter_lines++;
-        {   static int nlog; if (nlog++ < 40) printf("chatter: a Mii %s%s: %s%c", kind == 2 ? "thinks" : at ? "says after its own line" : "says", ai ? " (AI)" : "", l8, 10); }
+        {   static int nlog; if (nlog++ < 40) printf("chatter: %s %s%s: %s%c", spk >= 0 ? g_cm.mii[spk].name : "a Mii", kind == 2 ? "thinks" : at ? "says after its own line" : "says", ai ? " (AI)" : "", l8, 10); }
     }
     memo[nmemo & 15].key = key; memo[nmemo & 15].t = now ? now : 1; memo[nmemo & 15].line = line16; memo[nmemo & 15].len = len; nmemo++;
     ReleaseSRWLockExclusive(&g_cm_lk);
@@ -819,6 +958,7 @@ static int chatter_selftest(void) {
     if (!ai_clean("Shell hunting on {island} is fun", 2, names, 1, NULL, 0, words, 2, out, sizeof out, &why) || strcmp(out, "Shell hunting on <i> is fun<e>.")) return 0;
     if (!ai_clean("I want Damn Good Pizza!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
     if (ai_clean("I love Melissa so much!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
+    if (!ai_clean("I wonder what Melissa is up to...", 2, names, 1, names, 1, words, 2, out, sizeof out, &why) || strcmp(out, "I wonder what Melissa is up to<e>...")) return 0;
     if (ai_clean("What the hell is that?", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
     if (ai_clean("Pip was here, {player}!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
     if (ai_clean("Hey {name}, look!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;

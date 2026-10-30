@@ -97,7 +97,8 @@ work here: the game's code is translated ahead of time.
 **Mii chatter** (off by default; PC Settings, **Mii chatter (mod)**) gives the Miis new things to say, in their own voice
 and way of talking. Miis walking around now and then think a new thought, and when a Mii talks to you it may say a new
 line instead of one of its usual ones, or add one after it. It learns your island as you play: who lives there, who moved
-away, and the words you taught the Miis, and works them into what the Miis say. What it learned is kept in
+away, and the words you taught the Miis, and works them into what the Miis say. It knows which Mii is thinking, so a
+thought can be about another resident by name (never about the one thinking it). What it learned is kept in
 `build\userdata\chatter_memory.txt`; delete that file to make it forget. English text and game version 1.0.4 only.
 
 **Free AI for the Miis (optional):** put a language model file in `build\ai` and the new lines are written by it, on your
