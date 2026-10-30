@@ -1,6 +1,8 @@
 /* chatter_test.c <userdata folder>: the Mii chatter mod (runtime/mii_chatter.c) without the game: its self-test, what it
  * learns from the save in <userdata>\save, and sample lines of both kinds. Point it at a COPY of a userdata folder (it
- * writes chatter_memory.txt there). Build: clang -O1 -w -I runtime -o chatter_test.exe tools/chatter_test.c */
+ * writes chatter_memory.txt there). With a model (.gguf) as the second argument: its sanity check (a one-word answer), the
+ * tokenizer, the speed, and lines the AI writes (TOMO_LLM_THREADS, CHATTER_LINES = how many).
+ * Build: clang -O2 -w -I runtime -o chatter_test.exe tools/chatter_test.c */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -40,5 +42,45 @@ int main(int argc, char **argv) {
     }
     printf("touch talk, speaker = the first resident (lines about the others):\n");
     for (int i = 0; i < 8; i++) { char l[600]; chatter_line(l, sizeof l, 0, 1); show(l); }
+    if (argc < 3) return 0;
+    char err[160];
+    DWORD t0 = GetTickCount();
+    Llm *m = llm_open(argv[2], getenv("TOMO_LLM_THREADS") ? atoi(getenv("TOMO_LLM_THREADS")) : 4, 1024, err, sizeof err);
+    if (!m) { printf("model: %s\n", err); return 1; }
+    printf("model: %d layers, width %d, %d heads (%d for keys), feed-forward %d, vocabulary %d, %s, %d threads%s, opened in %lu ms\n",
+           m->n_layer, m->n_embd, m->n_head, m->n_kv, m->n_ff, m->n_vocab, m->neox ? "qwen2" : "llama", m->nt, m->avx2 ? ", AVX2" : "", GetTickCount() - t0);
+    int32_t t[256];
+    int n = llm_tok(m, "Hello world, I'm a Mii!", t, 256);
+    printf("tokens of \"Hello world, I'm a Mii!\":");
+    for (int i = 0; i < n; i++) { char pc[64]; llm_piece(m, t[i], pc, sizeof pc); printf(" %d[%s]", t[i], pc); }
+    printf("\n");
+    n = ai_turn(m, t, 256, "user\nWhat is the capital of France? Answer in one word.", 0);
+    n += ai_turn(m, t + n, 256 - n, "assistant\n", 1);
+    t0 = GetTickCount();
+    llm_rewind(m, 0);
+    llm_eval(m, t, n);
+    printf("sanity (greedy): ");
+    uint32_t rng = 12345;
+    for (int i = 0; i < 8; i++) {
+        int tok = llm_sample(m, 0, 1, 1, 1, NULL, 0, &rng);
+        if (tok == m->im_end || tok == m->endoftext || tok == m->eos) break;
+        char pc[64]; llm_piece(m, tok, pc, sizeof pc); printf("%s", pc);
+        llm_eval(m, &tok, 1);
+    }
+    printf("   (%d prompt tokens, %lu ms)\n", n, GetTickCount() - t0);
+    t0 = GetTickCount();
+    int prefix = ai_prefix(m);
+    printf("fixed prompt: %d tokens in %lu ms\n", prefix, GetTickCount() - t0);
+    int lines = getenv("CHATTER_LINES") ? atoi(getenv("CHATTER_LINES")) : 12, good = 0;
+    DWORD all = GetTickCount();
+    for (int i = 0; i < lines; i++) {
+        char raw[300], line[300]; const char *why = "";
+        DWORD a = GetTickCount();
+        int ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, &why);
+        good += ok;
+        printf("  %s %5lu ms  %-60s -> %s\n", i % 2 ? "think" : "say  ", GetTickCount() - a, raw, ok ? line : why);
+    }
+    printf("%d of %d lines usable, %.1f s a line\n", good, lines, (GetTickCount() - all) / 1000.0 / (lines ? lines : 1));
+    llm_close(m);
     return 0;
 }

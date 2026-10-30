@@ -73,6 +73,7 @@ static struct {
     CmMii mii[CM_MAX]; int nmii;
     char island[100];
     char word[300][100]; int nword;                         /* the words you taught the Miis (not kept: the save has them) */
+    char heard[8][160]; int nheard, heardi;                 /* what Miis said lately (the game's own lines; for the AI) */
     int loaded, dirty;
     LONG64 sav_t;                                           /* the save files' write times last read */
     DWORD checked;
@@ -347,6 +348,248 @@ static void chatter_line(char *out, size_t n, int speaker, int kind) {
     memcpy(out + o, kind == 2 ? "" : "<h>", kind == 2 ? 1 : 4);   /* {300.2}, as the game ends most of its spoken lines */
 }
 
+/* ---- the AI writer: a local language model (llm.c) keeps a few lines ready ----
+ * Free and offline: the first build\ai\*.gguf (TOMO_LLM_MODEL=<file> for tests). A thread at the lowest priority loads
+ * it, keeps a fixed prompt (what Miis are like, a few examples) in the model's cache and writes lines from what the mod
+ * learned (the time and season, how many live here, who moved away, the words you taught, what Miis said lately, a
+ * topic), rewinding to the fixed part each time. Each line is checked (ai_clean) before it may be used; the pick takes
+ * one when there is one, otherwise a template line. Lines naming a resident are dropped while the speaker is unknown. */
+#include "llm.c"
+static struct {
+    volatile LONG state;                         /* 0 not started, 1 loading, 2 writing, -1 none / failed */
+    HANDLE thread, wake;
+    char pool[3][8][260]; int n[3];              /* ready lines per kind (1 talk, 2 thought), in the markup */
+    char model[MAX_PATH];
+    LONG64 made, dropped;
+} g_ai;
+static SRWLOCK g_ai_lk = SRWLOCK_INIT;
+static int ai_find_model(char *out, size_t n) {
+    const char *e = getenv("TOMO_LLM_MODEL");
+    if (e && *e) { snprintf(out, n, "%s", e); return GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES; }
+    char dir[MAX_PATH], pat[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, dir, MAX_PATH) || !strrchr(dir, '\\')) return 0;
+    *strrchr(dir, '\\') = 0;                                         /* build\work */
+    snprintf(pat, sizeof pat, "%s\\..\\ai\\*.gguf", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    snprintf(out, n, "%s\\..\\ai\\%s", dir, fd.cFileName);
+    FindClose(h);
+    return 1;
+}
+/* Does the line hold this word (whole word, any case; stem = any ending)? */
+static int ai_word(const char *s, const char *w, int stem) {
+    size_t n = strlen(w);
+    for (const char *p = s; *p; p++) {
+        if (_strnicmp(p, w, n) || (p > s && isalpha((uint8_t)p[-1]))) continue;
+        if (stem || !isalpha((uint8_t)p[n])) return 1;
+    }
+    return 0;
+}
+/* A model's line made safe for the game: one line of plain ASCII (curly quotes, dashes and ellipses straightened), no
+ * markup, stage directions or other names, nothing rude (your taught words excepted); then the game's markup:
+ * <o>..<e>.<h> said to you, ..<e>. thought. 0 and why when it cannot be used. */
+static int ai_clean(const char *in, int kind, const char *const *names, int nnames, const char *const *ok_names, int nok,
+                    const char (*words)[100], int nwords, char *out, size_t n, const char **why) {
+    static const char *const banned[] = {"assistant", "language model", "as an ai", "nintendo", "tomodachi", "video game", "chatgpt", "qwen", "player", "Pip"};
+    static const char *const rude_stem[] = {"fuck", "shit", "bitch", "bastard", "nigg", "fag", "retard", "slut", "whore", "cunt", "pussy", "porn"};
+    static const char *const rude_word[] = {"hell", "damn", "crap", "sex", "sexy", "kill", "die", "dead", "death", "stupid", "idiot", "hate", "dick", "drunk", "drugs", "beer", "gun", "guns", "blood"};
+    char a[400]; size_t o = 0;
+    for (const uint8_t *u = (const uint8_t *)in; *u && o < sizeof a - 4; ) {      /* straighten typographic punctuation */
+        if (*u == '\n' || *u == '\r') break;
+        if (u[0] == 0xE2 && u[1] == 0x80 && (u[2] == 0x98 || u[2] == 0x99)) { a[o++] = '\''; u += 3; continue; }
+        if (u[0] == 0xE2 && u[1] == 0x80 && (u[2] == 0x9C || u[2] == 0x9D)) { a[o++] = '"'; u += 3; continue; }
+        if (u[0] == 0xE2 && u[1] == 0x80 && u[2] == 0xA6) { memcpy(a + o, "...", 3); o += 3; u += 3; continue; }
+        if (u[0] == 0xE2 && u[1] == 0x80 && (u[2] == 0x93 || u[2] == 0x94)) { memcpy(a + o, " - ", 3); o += 3; u += 3; continue; }
+        if (*u >= 0x80 || *u < 0x20) { *why = "not plain English"; return 0; }
+        a[o++] = (char)*u++;
+    }
+    a[o] = 0;
+    char *s = a;
+    while (*s == ' ') s++;
+    for (size_t l = strlen(s); l && s[l - 1] == ' '; l--) s[l - 1] = 0;
+    static const char *const lead[] = {"Mii:", "Line:", "Thought:", "Assistant:"};
+    for (int k = 0; k < 4; k++) if (!_strnicmp(s, lead[k], strlen(lead[k]))) { s += strlen(lead[k]); while (*s == ' ') s++; }
+    size_t l = strlen(s);
+    if (l >= 2 && s[0] == '"' && s[l - 1] == '"') { s[l - 1] = 0; s++; l -= 2; }
+    if (l < 6 || l > 110) { *why = "too short or too long"; return 0; }
+    if (strpbrk(s, "<>[]*#_\\|~^@`()=+/%\"")) { *why = "markup or odd characters"; return 0; }
+    for (const char *p = s; (p = strchr(p, '{')); p++) if (strncmp(p, "{player}", 8) && strncmp(p, "{island}", 8)) { *why = "an unknown {placeholder}"; return 0; }
+    for (const char *p = s; (p = strchr(p, '}')); p++) if (p < s + 7 || (strncmp(p - 7, "{player}", 8) && strncmp(p - 7, "{island}", 8))) { *why = "an unknown {placeholder}"; return 0; }
+    char plain[400];                                       /* the line without its placeholders, for the word checks */
+    snprintf(plain, sizeof plain, "%s", s);
+    for (char *p; (p = strstr(plain, "{player}")) || (p = strstr(plain, "{island}")); ) memset(p, ' ', 8);
+    for (int k = 0; k < (int)(sizeof banned / sizeof banned[0]); k++) {
+        int allowed = 0;
+        for (int j = 0; j < nok; j++) allowed |= !_stricmp(ok_names[j], banned[k]);
+        if (!allowed && ai_word(plain, banned[k], 0)) { *why = "talks about the game or itself"; return 0; }
+    }
+    for (int k = 0; k < nnames; k++) if (ai_word(plain, names[k], 0)) { *why = "names a resident (the speaker is unknown)"; return 0; }
+    char kind_words[400];                                  /* rude words, but your taught words are yours */
+    snprintf(kind_words, sizeof kind_words, "%s", plain);
+    for (int k = 0; k < nwords; k++) {
+        size_t wl = strlen(words[k]);
+        for (char *p = kind_words; wl && (p = strstr(p, words[k])); p += wl) memset(p, ' ', wl);
+    }
+    for (int k = 0; k < (int)(sizeof rude_stem / sizeof rude_stem[0]); k++) if (ai_word(kind_words, rude_stem[k], 1)) { *why = "rude"; return 0; }
+    for (int k = 0; k < (int)(sizeof rude_word / sizeof rude_word[0]); k++) if (ai_word(kind_words, rude_word[k], 0)) { *why = "rude"; return 0; }
+    size_t e = strlen(s);                                  /* the sentence ending goes before the last punctuation */
+    while (e && strchr(".!?", s[e - 1])) e--;
+    if (e == 0) { *why = "no words"; return 0; }
+    char body[300];
+    size_t bo = 0;
+    for (size_t i = 0; i < e && bo < sizeof body - 4; ) {
+        if (!strncmp(s + i, "{player}", 8)) { memcpy(body + bo, "<p>", 3); bo += 3; i += 8; }
+        else if (!strncmp(s + i, "{island}", 8)) { memcpy(body + bo, "<i>", 3); bo += 3; i += 8; }
+        else body[bo++] = s[i++];
+    }
+    body[bo] = 0;
+    snprintf(out, n, "%s%s<e>%s%s", kind == 1 ? "<o>" : "", body, s[e] ? s + e : ".", kind == 1 ? "<h>" : "");
+    return 1;
+}
+static void ai_push(int kind, const char *line) {
+    AcquireSRWLockExclusive(&g_ai_lk);
+    if (g_ai.n[kind] < 8) snprintf(g_ai.pool[kind][g_ai.n[kind]++], sizeof g_ai.pool[0][0], "%s", line);
+    ReleaseSRWLockExclusive(&g_ai_lk);
+}
+static int ai_take(int kind, char *out, size_t n) {
+    int got = 0;
+    AcquireSRWLockExclusive(&g_ai_lk);
+    if (kind >= 1 && kind <= 2 && g_ai.n[kind]) {
+        snprintf(out, n, "%s", g_ai.pool[kind][0]);
+        memmove(g_ai.pool[kind][0], g_ai.pool[kind][1], sizeof g_ai.pool[0][0] * (size_t)(--g_ai.n[kind]));
+        got = 1;
+    }
+    ReleaseSRWLockExclusive(&g_ai_lk);
+    if (got && g_ai.wake) SetEvent(g_ai.wake);
+    return got;
+}
+static int ai_room(int kind) { AcquireSRWLockShared(&g_ai_lk); int r = g_ai.n[kind] < 6; ReleaseSRWLockShared(&g_ai_lk); return r; }
+/* What the model is told this time (the user turn), from the memory; names it may use go to ok[]. */
+typedef struct { char text[1200]; char names[CM_MAX][100]; int nnames; char ok[8][100]; int nok; char words[300][100]; int nwords; } AiFacts;
+static void ai_facts(AiFacts *f, int kind) {
+    static const char *const season[] = {"winter", "winter", "spring", "spring", "spring", "summer", "summer", "summer", "autumn", "autumn", "autumn", "winter"};
+    static const char *const topics[] = {"food", "a dream", "a hobby", "the weather", "the island", "the player", "music", "the sea", "a silly worry",
+        "a plan for later", "a snack", "a nap", "clothes", "friendship", "a funny thought", "the stars", "a game they made up"};
+    SYSTEMTIME st; GetLocalTime(&st);
+    const char *part = st.wHour < 5 ? "night" : st.wHour < 12 ? "morning" : st.wHour < 17 ? "afternoon" : st.wHour < 21 ? "evening" : "night";
+    char topic[160];
+    int o = 0, live = 0;
+    memset(f, 0, sizeof *f);
+    AcquireSRWLockShared(&g_cm_lk);
+    const char *gone = NULL;
+    for (int i = 0; i < g_cm.nmii; i++) {
+        if (!g_cm.mii[i].left) { live++; if (f->nnames < CM_MAX) snprintf(f->names[f->nnames++], 100, "%s", g_cm.mii[i].name); }
+        else if (!gone || chatter_rand() % 2) gone = g_cm.mii[i].name;
+    }
+    if (gone) snprintf(f->ok[f->nok++], 100, "%s", gone);
+    f->nwords = g_cm.nword;
+    memcpy(f->words, g_cm.word, sizeof f->words[0] * (size_t)g_cm.nword);
+    const char *heard = g_cm.nheard ? g_cm.heard[chatter_rand() % (unsigned)g_cm.nheard] : NULL;
+    const char *w1 = f->nwords ? f->words[chatter_rand() % (unsigned)f->nwords] : NULL, *w2 = f->nwords > 1 ? f->words[chatter_rand() % (unsigned)f->nwords] : NULL;
+    o += snprintf(f->text + o, sizeof f->text - (size_t)o, "Facts: It is a %s %s.", season[st.wMonth >= 1 && st.wMonth <= 12 ? st.wMonth - 1 : 0], part);
+    if (live >= 2) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " %d Miis live on {island}.", live);
+    if (gone) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii named %s moved away from {island}.", gone);
+    if (w1) o += snprintf(f->text + o, sizeof f->text - (size_t)o, w2 && w2 != w1 ? " The player taught the Miis the words \"%s\" and \"%s\"." : " The player taught the Miis the word \"%s\".", w1, w2);
+    if (heard && chatter_rand() % 2) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii said lately: \"%s\"", heard);
+    ReleaseSRWLockShared(&g_cm_lk);
+    uint32_t r = chatter_rand() % 10;
+    if (w1 && r < 4) snprintf(topic, sizeof topic, "the word \"%s\"", r < 2 || !w2 ? w1 : w2);
+    else if (gone && r < 6) snprintf(topic, sizeof topic, "missing %s", gone);
+    else snprintf(topic, sizeof topic, "%s", topics[chatter_rand() % (sizeof topics / sizeof topics[0])]);
+    snprintf(f->text + o, sizeof f->text - (size_t)o, " Topic: %s.\n%s", topic, kind == 1 ? "A Mii says a line to the player." : "A Mii thinks to itself while walking around.");
+}
+/* The fixed part of the prompt (ChatML): what Miis are like and three examples (with a made-up name, Pip, that lines may
+ * not copy). */
+static const char *const k_ai_turns[] = {
+    "system\nYou write lines for Miis, the funny little people who live on an island in a life simulation game. Each line is one "
+    "or two short sentences, under 90 characters, in simple English. Miis are cheerful, silly, curious and kind. They love food, "
+    "naps, hobbies, their island and the player. Never be mean, rude, scary or sad for long. Write {player} for the player's name "
+    "and {island} for the island's name. Use no other names unless the facts give them. Write only the line.",
+    "user\nFacts: It is a summer morning. 7 Miis live on {island}. Topic: a dream.\nA Mii says a line to the player.",
+    "assistant\nGood morning, {player}! I dreamt I was a pancake. A really fluffy one!",
+    "user\nFacts: It is an autumn evening. The player taught the Miis the word \"kites\". Topic: the word \"kites\".\nA Mii thinks to itself while walking around.",
+    "assistant\nKites... I wonder if they ever get lonely up there.",
+    "user\nFacts: It is a winter night. A Mii named Pip moved away from {island}. Topic: missing Pip.\nA Mii says a line to the player.",
+    "assistant\nI still save a seat for Pip at lunch. Is that silly, {player}?",
+};
+static int ai_turn(Llm *m, int32_t *t, int max, const char *text, int open_assistant) {
+    int o = 0;
+    if (o < max) t[o++] = m->im_start;
+    o += llm_tok(m, text, t + o, max - o);
+    if (!open_assistant) { if (o < max) t[o++] = m->im_end; o += llm_tok(m, "\n", t + o, max - o); }
+    return o;
+}
+/* One line: the facts as the user turn, then up to 40 tokens until the end of the turn or of the line. */
+static int ai_write(Llm *m, int prefix, int kind, uint32_t *rng, char *raw, size_t rn, char *line, size_t ln, const char **why) {
+    static AiFacts f;
+    int32_t t[700];
+    ai_facts(&f, kind);
+    int n = ai_turn(m, t, 600, f.text, 0);
+    n += ai_turn(m, t + n, 700 - n, "assistant\n", 1);
+    llm_rewind(m, prefix);
+    if (llm_eval(m, t, n)) { *why = "the prompt does not fit"; return 0; }
+    int32_t out[48]; int no = 0, ended = 0;
+    size_t ro = 0;
+    raw[0] = 0;
+    while (no < 40) {
+        int tok = llm_sample(m, 0.9f, 40, 0.92f, 1.15f, out, no, rng);
+        if (tok == m->im_end || tok == m->endoftext || tok == m->eos) { ended = 1; break; }
+        char piece[64];
+        int pl = llm_piece(m, tok, piece, sizeof piece);
+        if (memchr(piece, '\n', (size_t)pl)) { ended = 1; break; }
+        if (ro + (size_t)pl + 1 < rn) { memcpy(raw + ro, piece, (size_t)pl); ro += (size_t)pl; raw[ro] = 0; }
+        out[no++] = tok;
+        if (llm_eval(m, &tok, 1)) break;
+    }
+    llm_rewind(m, prefix);
+    if (!ended) { *why = "did not finish"; return 0; }
+    const char *names[CM_MAX], *ok[8];
+    for (int i = 0; i < f.nnames; i++) names[i] = f.names[i];
+    for (int i = 0; i < f.nok; i++) ok[i] = f.ok[i];
+    return ai_clean(raw, kind, names, f.nnames, ok, f.nok, (const char (*)[100])f.words, f.nwords, line, ln, why);
+}
+static int ai_prefix(Llm *m) {
+    static int32_t t[1200];
+    int n = 0;
+    for (int i = 0; i < (int)(sizeof k_ai_turns / sizeof k_ai_turns[0]); i++) n += ai_turn(m, t + n, 1200 - n, k_ai_turns[i], 0);
+    llm_rewind(m, 0);
+    return llm_eval(m, t, n) ? -1 : m->n_past;
+}
+static DWORD WINAPI ai_main(void *arg) {
+    (void)arg;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    int nt = getenv("TOMO_LLM_THREADS") ? atoi(getenv("TOMO_LLM_THREADS")) : (int)si.dwNumberOfProcessors - 6;
+    nt = nt < 1 ? 1 : nt > 4 && !getenv("TOMO_LLM_THREADS") ? 4 : nt;
+    char err[160];
+    DWORD t0 = GetTickCount();
+    Llm *m = llm_open(g_ai.model, nt, 1024, err, sizeof err);
+    int prefix = m ? ai_prefix(m) : -1;
+    if (!m || prefix < 0) { printf("chatter: the AI model could not be used (%s): template lines only%c", m ? "the prompt does not fit" : err, 10); llm_close(m); g_ai.state = -1; return 0; }
+    printf("chatter: AI model ready in %lu ms (%s, %d threads%s, prompt %d tokens)%c", GetTickCount() - t0, g_ai.model, m->nt, m->avx2 ? ", AVX2" : "", prefix, 10);
+    g_ai.state = 2;
+    uint32_t rng = GetTickCount() | 1;
+    for (;;) {
+        int kind = ai_room(1) ? 1 : ai_room(2) ? 2 : 0;
+        if (!kind) { WaitForSingleObject(g_ai.wake, 60000); continue; }
+        char raw[300], line[300];
+        const char *why = "";
+        DWORD a = GetTickCount();
+        if (ai_write(m, prefix, kind, &rng, raw, sizeof raw, line, sizeof line, &why)) {
+            ai_push(kind, line);
+            if (g_ai.made++ < 30) printf("chatter: AI wrote a %s in %lu ms: %s%c", kind == 1 ? "line" : "thought", GetTickCount() - a, line, 10);
+        } else if (g_ai.dropped++ < 30) printf("chatter: AI line dropped (%s): %s%c", why, raw, 10);
+    }
+}
+static void ai_start(void) {
+    if (InterlockedCompareExchange(&g_ai.state, 1, 0) != 0) return;
+    if (!ai_find_model(g_ai.model, sizeof g_ai.model)) { printf("chatter: no AI model in build\\ai: template lines only%c", 10); g_ai.state = -1; return; }
+    g_ai.wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    g_ai.thread = CreateThread(NULL, 0, ai_main, NULL, 0, NULL);
+    if (!g_ai.thread) g_ai.state = -1;
+}
+
 /* ---- the hook ---- */
 /* The label of the picked line (the game's message file: +0 its LMS message: +0x18 the section table, 0x18 bytes an
  * entry, +0 the data; +0x20 the LBL1 index; LBL1 = bucket count, {count, offset} per bucket, then {length, the label,
@@ -399,6 +642,27 @@ static void chatter_probe(const char *path, uint64_t p, int depth) {
             chatter_probe(sub, rd64(p + off), depth + 1);
         }
 }
+/* A game line as plain text, for the AI to hear: style tags dropped, a new balloon is a space; a line with a slot the game
+ * fills in (a name, a word) is skipped. */
+static int chatter_plain(uint64_t text, int len, char *out, size_t n) {
+    size_t o = 0;
+    for (int k = 0; k < len && k < 300 && o + 2 < n; k++) {
+        uint16_t ch = rd16(text + (uint64_t)k * 2);
+        if (!ch) break;
+        if (ch == 0x0E) {
+            uint16_t g = rd16(text + (uint64_t)(k + 1) * 2), t = rd16(text + (uint64_t)(k + 2) * 2);
+            if (g == 0 && t == 4) out[o++] = ' ';
+            else if (!(g == 6 || g == 300 || (g == 200 && (t == 8 || t == 9)))) return 0;
+            k += 3 + rd16(text + (uint64_t)(k + 3) * 2) / 2;
+            continue;
+        }
+        if (ch == 0x0F) { k += 2; continue; }
+        if (ch >= 0x80) return 0;
+        out[o++] = (char)ch;
+    }
+    out[o] = 0;
+    return o > 3;
+}
 static void chatter_pick(Ctx *c, void *user) {
     uint64_t res = c->x[8], mfile = c->x[0], arg[4] = {c->x[2], c->x[3], c->x[4], c->x[5]};
     (void)user;
@@ -408,6 +672,7 @@ static void chatter_pick(Ctx *c, void *user) {
     if (!pct || !res || !mfile) return;
     uint64_t text = rd64(res);
     if (!text) return;
+    if (!g_ai.state) ai_start();
     char label[80] = "";
     chatter_label(mfile, (uint32_t)rd64(res + 0x10), label, sizeof label);
     int kind = !strncmp(label, "TTPOneDirection", 15) ? 1 : !strncmp(label, "InsertActionShort", 17) ? 2 : 0;   /* touch talk, walk-around thought */
@@ -446,13 +711,18 @@ static void chatter_pick(Ctx *c, void *user) {
         if (ch == 0x0E) { k += 3 + rd16(text + (uint64_t)(k + 3) * 2) / 2; continue; }
         if (ch >= 0x80) { english = 0; break; }
     }
+    if (kind && english) {                                     /* the AI hears what Miis say */
+        char heard[160];
+        if (chatter_plain(text, (int)rd32(res + 8), heard, sizeof heard)) { snprintf(g_cm.heard[g_cm.heardi++ & 7], sizeof g_cm.heard[0], "%s", heard); if (g_cm.nheard < 8) g_cm.nheard++; }
+    }
     if (g_chatter_pct == 100 && !kind) kind = 1;              /* (TEST: every line, as touch talk) */
     if (kind && english && (int)(chatter_rand() % 100) < (kind == 2 ? pct / 2 : pct)) {
         static uint16_t ring[64][320];             /* the game may keep showing a line while others are picked */
         static int slot;
         char l8[600];
         line16 = ring[slot++ & 63];
-        chatter_line(l8, sizeof l8, -1, kind);     /* (the speaker: not found yet, so no lines about other residents) */
+        int ai = ai_take(kind, l8, sizeof l8);     /* the AI's line when one is ready, else a template */
+        if (!ai) chatter_line(l8, sizeof l8, -1, kind);   /* (the speaker: not found yet, so no lines about other residents) */
         /* Half the time the Mii says its own line first and adds the new one in a second balloon ({0.4}), with the
          * closing {300.2} only at the very end as in the game's own two-balloon lines. */
         int olen = (int)rd32(res + 8), at = 0;
@@ -473,7 +743,7 @@ static void chatter_pick(Ctx *c, void *user) {
         wr64(res, (uint64_t)(uintptr_t)line16);
         wr32(res + 8, (uint32_t)len);
         g_chatter_lines++;
-        {   static int nlog; if (nlog++ < 40) printf("chatter: a Mii %s: %s%c", kind == 2 ? "thinks" : at ? "says after its own line" : "says", l8, 10); }
+        {   static int nlog; if (nlog++ < 40) printf("chatter: a Mii %s%s: %s%c", kind == 2 ? "thinks" : at ? "says after its own line" : "says", ai ? " (AI)" : "", l8, 10); }
     }
     memo[nmemo & 15].key = key; memo[nmemo & 15].t = now ? now : 1; memo[nmemo & 15].line = line16; memo[nmemo & 15].len = len; nmemo++;
     ReleaseSRWLockExclusive(&g_cm_lk);
@@ -494,6 +764,25 @@ static int chatter_selftest(void) {
         if (ends != 1) return 0;
     }
     for (int j = 0; j < 6; j++) g_recent[j] = -1;
+    static const char *const pre[][2] = {{"Hello world", "Hello| world"}, {"I'm here", "I|'m| here"}, {"wow...!", "wow|...!"}, {"a  b", "a| | b"},
+        {"a\n\nb", "a|\n\n|b"}, {"x 42", "x| |4|2"}, {"end.", "end|."}};
+    for (int i = 0; i < (int)(sizeof pre / sizeof pre[0]); i++) {
+        char got[64]; int o = 0, n = (int)strlen(pre[i][0]);
+        for (int k = 0; k < n; ) { int l = llm_piece_len(pre[i][0], n, k, 0); if (o) got[o++] = '|'; memcpy(got + o, pre[i][0] + k, (size_t)l); o += l; k += l; }
+        got[o] = 0;
+        if (strcmp(got, pre[i][1])) return 0;
+    }
+    static const char words[2][100] = {"Damn Good Pizza", "Bananas"};
+    const char *names[1] = {"Melissa"}, *why = "";
+    char out[300];
+    if (!ai_clean("Hello there, {player}!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why) || strcmp(out, "<o>Hello there, <p><e>!<h>")) return 0;
+    if (!ai_clean("\"Is it nap time yet?\"", 2, names, 1, NULL, 0, words, 2, out, sizeof out, &why) || strcmp(out, "Is it nap time yet<e>?")) return 0;
+    if (!ai_clean("Shell hunting on {island} is fun", 2, names, 1, NULL, 0, words, 2, out, sizeof out, &why) || strcmp(out, "Shell hunting on <i> is fun<e>.")) return 0;
+    if (!ai_clean("I want Damn Good Pizza!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
+    if (ai_clean("I love Melissa so much!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
+    if (ai_clean("What the hell is that?", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
+    if (ai_clean("Pip was here, {player}!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
+    if (ai_clean("Hey {name}, look!", 1, names, 1, NULL, 0, words, 2, out, sizeof out, &why)) return 0;
     return 1;
 }
 static void chatter_install(void) {
@@ -501,5 +790,5 @@ static void chatter_install(void) {
     if (g_main.text_size != 0x256d250) { printf("chatter: Mii chatter is for game version 1.0.4 only so far%c", 10); return; }      /* (1.0.0: its pick is still to be found) */
     printf("chatter: Mii chatter hook %s (graphics.ini mii_chatter = %s)%c", hook_install(0x71004bbb20ull, chatter_pick, NULL, &g_chatter_pick) ? "installed" : "NOT installed",
            gfx_mii_chatter() ? "on" : "off", 10);
-    if (gfx_mii_chatter() || getenv("TOMO_CHATTER")) { AcquireSRWLockExclusive(&g_cm_lk); cm_learn(); ReleaseSRWLockExclusive(&g_cm_lk); }
+    if (gfx_mii_chatter() || getenv("TOMO_CHATTER")) { AcquireSRWLockExclusive(&g_cm_lk); cm_learn(); ReleaseSRWLockExclusive(&g_cm_lk); ai_start(); }
 }

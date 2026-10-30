@@ -171,6 +171,7 @@ static const char *const k_default_ini =
 "; mii_chatter = off | on\r\n"
 ";   on: the Mii chatter mod. Miis now and then say or think new lines about your island (who lives there, who moved\r\n"
 ";   away, the words you taught them), in their own voice. What it learns is kept in userdata\\chatter_memory.txt.\r\n"
+";   With a language model file (*.gguf) in the ai folder next to work, it writes the lines (free, offline).\r\n"
 "mii_chatter = off\r\n"
 "\r\n"
 "; widescreen = auto | off | 21:9 | 32:9 | <width:height>\r\n"

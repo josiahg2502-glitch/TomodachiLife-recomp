@@ -100,6 +100,12 @@ line instead of one of its usual ones, or add one after it. It learns your islan
 away, and the words you taught the Miis, and works them into what the Miis say. What it learned is kept in
 `build\userdata\chatter_memory.txt`; delete that file to make it forget. English text and game version 1.0.4 only.
 
+**Free AI for the Miis (optional):** put a language model file in `build\ai` and the new lines are written by it, on your
+PC and offline, from what the mod learned about your island. It was made for Qwen2.5 1.5B Instruct
+(`qwen2.5-1.5b-instruct-q4_k_m.gguf`, 1.12 GB, Apache 2.0, from huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF). It runs on
+a few low-priority CPU threads and keeps some lines ready, so the game never waits for it. Every line is checked before a
+Mii may say it. Without a model file the mod writes from its own templates.
+
 ## Local Play (Mii exchange)
 
 The game shares Miis through Local Play. Here Local Play runs over the network: in the launcher's SETTINGS, **LOCAL PLAY
