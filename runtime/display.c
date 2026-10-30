@@ -454,7 +454,13 @@ int display_mouse(float *x, float *y, int *buttons) {
 }
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (la_wndproc(h, m, w)) return 0;
-    if (m == WM_SETCURSOR && LOWORD(l) == HTCLIENT && GetTickCount() - (DWORD)g_mouse_hand_tick < 300) { SetCursor(NULL); return TRUE; }
+    /* the pointer over the picture: hidden while the mouse moves the hand, and after 2 s without moving (mouse controls are off
+     * by default, so it stayed in view, 2026-10-30) unless PC Settings is open; a timer looks again twice a second */
+    {   static DWORD moved; int menu_is_open(void);
+        if (m == WM_MOUSEMOVE) moved = GetTickCount();
+        if (m == WM_TIMER && w == 0x7A11) { POINT p; if (GetCursorPos(&p) && WindowFromPoint(p) == h) SendMessageA(h, WM_SETCURSOR, (WPARAM)h, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)); return 0; }
+        if (m == WM_SETCURSOR && LOWORD(l) == HTCLIENT && (GetTickCount() - (DWORD)g_mouse_hand_tick < 300 || (GetTickCount() - moved > 2000 && !menu_is_open()))) { SetCursor(NULL); return TRUE; }
+    }
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
         { static LONG once; if (!InterlockedExchange(&once, 1)) CloseHandle(CreateThread(NULL, 0, close_watchdog, NULL, 0, NULL)); }
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
@@ -564,6 +570,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     }
     g_hwnd_menu = g_hwnd; g_topmost = go->window_mode == 2;      /* U1 (settings menu) */
     la_start(g_hwnd, visible);                                   /* U3: the loading animation (loading_anim.c) */
+    SetTimer(g_hwnd, 0x7A11, 500, NULL);                         /* the idle pointer (wndproc) */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
