@@ -19,6 +19,7 @@ static inline void wr32(uint64_t a, uint32_t v) { memcpy((void *)(uintptr_t)a, &
 static struct { uint64_t text_size; } g_main = {0x256d250};
 static int hook_install(uint64_t a, void (*r)(Ctx *, void *), void *u, ImportFn *o) { (void)a; (void)r; (void)u; (void)o; return 1; }
 int gfx_mii_chatter(void) { return 1; }
+int gfx_mii_chat_english(void) { return 1; }
 static char g_root[MAX_PATH];
 const char *fs_user_root(void) { return g_root; }
 #include "mii_chatter.c"
@@ -33,7 +34,8 @@ int main(int argc, char **argv) {
     snprintf(g_root, sizeof g_root, "%s", argc > 1 ? argv[1] : ".");
     printf("self-test: %s\n", chatter_selftest() ? "ok" : "FAILED");
     cm_learn();
-    printf("island \"%s\", %d known Miis, %d words\n", g_cm.island, g_cm.nmii, g_cm.nword);
+    kb_load_file();
+    printf("island \"%s\", %d known Miis, %d words, %d facts about the game\n", g_cm.island, g_cm.nmii, g_cm.nword, g_nkb);
     for (int i = 0; i < g_cm.nmii; i++) printf("  mii %-12s first %d left %d\n", g_cm.mii[i].name, g_cm.mii[i].first, g_cm.mii[i].left);
     for (int i = 0; i < g_cm.nword; i++) printf("  word %s\n", g_cm.word[i]);
     for (int kind = 1; kind <= 2; kind++) {
@@ -45,7 +47,7 @@ int main(int argc, char **argv) {
     if (argc < 3) return 0;
     char err[160];
     DWORD t0 = GetTickCount();
-    Llm *m = llm_open(argv[2], getenv("TOMO_LLM_THREADS") ? atoi(getenv("TOMO_LLM_THREADS")) : 4, 1024, err, sizeof err);
+    Llm *m = llm_open(argv[2], getenv("TOMO_LLM_THREADS") ? atoi(getenv("TOMO_LLM_THREADS")) : 4, 1536, err, sizeof err);
     if (!m) { printf("model: %s\n", err); return 1; }
     printf("model: %d layers, width %d, %d heads (%d for keys), feed-forward %d, vocabulary %d, %s, %d threads%s, opened in %lu ms\n",
            m->n_layer, m->n_embd, m->n_head, m->n_kv, m->n_ff, m->n_vocab, m->neox ? "qwen2" : "llama", m->nt, m->avx2 ? ", AVX2" : "", GetTickCount() - t0);
@@ -81,6 +83,25 @@ int main(int argc, char **argv) {
         printf("  %s %5lu ms  %-60s -> %s\n", i % 2 ? "think" : "say  ", GetTickCount() - a, raw, ok ? line : why);
     }
     printf("%d of %d lines usable, %.1f s a line\n", good, lines, (GetTickCount() - all) / 1000.0 / (lines ? lines : 1));
+    static const char *const var[][2] = {{"BringAndJumpWait", "Won't someone do aerobics with me?"}, {"TalkAboutOthersHouse", "This is some prime real estate."},
+        {"FeelingWaitGood", "Teehee..."}, {"Stretch_0_0", "Deep breath!"}, {"Knitting_Work", "Is this a plain stitch?"}, {"LookClockTower", "What time is it?"}};
+    int nvar = getenv("CHATTER_VARS") ? atoi(getenv("CHATTER_VARS")) : 6, nchat = getenv("CHATTER_CHATS") ? atoi(getenv("CHATTER_CHATS")) : 4;
+    for (int i = 0; i < nvar; i++) {
+        char raw[300], line[300]; const char *why = "";
+        DWORD a = GetTickCount();
+        int ok = ai_write_var(m, prefix, var[i % 6][0], var[i % 6][1], &rng, raw, sizeof raw, line, sizeof line, &why);
+        printf("  vary  %5lu ms  %-22s %-40s -> %s\n", GetTickCount() - a, var[i % 6][0], raw, ok ? line : why);
+    }
+    for (int i = 0; i < nchat && g_cm.nmii >= 2; i++) {
+        int x = (int)(chatter_rand() % (unsigned)g_cm.nmii), y = (x + 1 + (int)(chatter_rand() % (unsigned)(g_cm.nmii - 1))) % g_cm.nmii;
+        char raw[700], lines[4][300]; int nl = 0; const char *why = "";
+        DWORD a = GetTickCount();
+        int ok = ai_write_chat(m, prefix, g_cm.mii[x].name, g_cm.mii[y].name, &rng, raw, sizeof raw, lines, &nl, &why);
+        for (char *q = raw; *q; q++) if (*q == 10) *q = '|';
+        printf("  chat  %5lu ms  %s / %s: %s\n", GetTickCount() - a, g_cm.mii[x].name, g_cm.mii[y].name, raw);
+        if (ok) for (int k = 0; k < nl; k++) printf("          %s: %s\n", k & 1 ? g_cm.mii[y].name : g_cm.mii[x].name, lines[k]);
+        else printf("          -> %s\n", why);
+    }
     llm_close(m);
     return 0;
 }

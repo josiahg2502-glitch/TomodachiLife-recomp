@@ -94,19 +94,29 @@ work here: the game's code is translated ahead of time.
 
 ## Mii chatter (mod)
 
-**Mii chatter** (off by default; PC Settings, **Mii chatter (mod)**) gives the Miis new things to say, in their own voice
-and way of talking. Miis walking around now and then think a new thought, and when a Mii talks to you it may say a new
-line instead of one of its usual ones, or add one after it. It learns your island as you play: who lives there, who moved
-away, and the words you taught the Miis, and works them into what the Miis say. It knows which Mii is thinking, so a
-thought can be about another resident by name (never about the one thinking it). What it learned is kept in
-`build\userdata\chatter_memory.txt`; delete that file to make it forget. English text and game version 1.0.4 only.
+**Mii chatter** (PC Settings, **Mii chatter (mod)**: Off, Some or Lots; off by default) gives the Miis more to say, in
+their own voice and way of talking, while the game's own lines stay most of what they say:
+
+- When a Mii talks to you, it says its usual line and may add a new one in a second balloon.
+- Miis walking around sometimes think a new thought, and what they say while busy (stretching, aerobics, painting...)
+  sometimes comes in a new version.
+- When two Miis chat (**English Mii chats (mod)**, on by default), some conversations are in English instead of Mii-speak.
+
+It learns your island as you play: who lives there, who just moved in (a new Mii is learned once the game saves), who
+moved away, and the words you taught the Miis. It knows which Mii is speaking, so a thought can be about another resident
+by name, never about the one thinking it. Everything it learns and writes is kept in `build\userdata`
+(`chatter_memory.txt`, `chatter_lines.txt`, `chatter_knowledge.txt`); delete those files to make it forget. The library of
+new lines keeps growing as you play, and lines that were said often make way for new ones. English text and game
+version 1.0.4 only.
 
 **Free AI for the Miis (optional):** put a language model file in `build\ai` and the new lines are written by it, on your
-PC and offline, from what the mod learned about your island. It was made for Qwen2.5 1.5B Instruct
-(`qwen2.5-1.5b-instruct-q4_k_m.gguf`, 1.12 GB, Apache 2.0, from huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF). It runs on
-a few low-priority CPU threads, only while the CPU has room to spare (it waits while the game loads), and keeps some lines
-ready, so the game never waits for it. Every line is checked before a Mii may say it. Without a model file the mod writes
-from its own templates.
+PC and offline. It was made for Qwen2.5 1.5B Instruct (`qwen2.5-1.5b-instruct-q4_k_m.gguf`, 1.12 GB, Apache 2.0, from
+huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF). It knows Tomodachi Life from the game's own catalogues (its foods,
+facilities, goods, quirks and trips, read from your game files), the real calendar (the weekday, holidays coming up) and
+the real world, and it writes from what the mod learned about your island. It runs on a few low-priority CPU threads,
+only while the CPU has room to spare (it waits while the game loads), and keeps lines ready, so the game never waits for
+it. Every line is checked before a Mii may say it. Without a model file the mod writes from its own templates, and Miis
+chat in Mii-speak as usual.
 
 ## Local Play (Mii exchange)
 
