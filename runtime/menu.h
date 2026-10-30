@@ -1,5 +1,5 @@
 /* U1: the in-game settings menu (Dear ImGui over the game's picture, plan\phases\U1_settings_menu.md).
- * menu.cpp holds the interface and the settings; nvn_vk_menu.c (included by nvn_vk_draw.c) draws what it built.
+ * menu.cpp holds the interface and the settings; nvn_vk_menu.c (Vulkan) or nvn_gl_menu.c (OpenGL) draws what it built.
  * Off unless SSBU_MENU=1 or graphics.ini `menu = on` (SSBU_MENU=0 wins over the file). */
 #ifndef MENU_H
 #define MENU_H

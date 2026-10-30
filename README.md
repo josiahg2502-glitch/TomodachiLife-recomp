@@ -57,6 +57,11 @@ The **first start** prepares every shader of the game ("preparing shaders"): a f
 - **SAVE DATA**: back up and restore your save, or import a save dumped from your Switch (`Map.sav`, `Mii.sav`, `Player.sav`).
 - **CONTROLS**: the controller it sees and the keyboard keys (`build\config\controllers.ini`).
 
+**In the game**, **PC Settings** opens with **F1**, the controller's **HOME** / Guide button, or by holding **-** and **+**
+together for a second (Steam Deck): screen, window size, resolution, widescreen, frame rate, vsync, volume, language and
+Quit to desktop, on a page in the game's own style and with its own fonts. Played like the game's menus (d-pad or arrow
+keys, A / Enter, B / Esc); the mouse works too.
+
 Your save lives in `build\userdata` (or the install location you chose). **Playing 1.0.4 upgrades a 1.0.0 save; 1.0.0 cannot
 read it afterwards.** Back it up first (SAVE DATA) if you may go back.
 
@@ -92,7 +97,6 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 
 ## Known issues
 
-- The F1 settings menu does not open with the OpenGL renderer (the default); use the launcher's SETTINGS.
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and
   send `build\work\play_*.log` of that session.
 - Local Play over the internet worked on a simulated link (lag and lost packets) but not yet between two real home routers;

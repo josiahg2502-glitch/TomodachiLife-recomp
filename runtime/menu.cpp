@@ -1,4 +1,7 @@
-/* U1: the in-game settings menu, in the style of Ship of Harkinian (the Ocarina of Time PC port): Dear ImGui (MIT,
+/* Tomodachi Life: what F1 / HOME opens is PC Settings, a page in the game's own style (draw_tomo, below); the Dear ImGui
+ * pages this file was written for stay behind SSBU_MENU_CLASSIC=1 (and the old test switches).
+ *
+ * U1: the in-game settings menu, in the style of Ship of Harkinian (the Ocarina of Time PC port): Dear ImGui (MIT,
  * reference\upstream\imgui-1.91.9b) drawn over the game's picture. Design, keys, proofs: plan\phases\U1_settings_menu.md.
  *
  * Open / close: F1 on the keyboard; on a controller the Home / Guide button (like the Switch's HOME menu), or the
@@ -355,9 +358,9 @@ static const char *const k_prepare[] = {"first_run", "background", "off"};
 static const char *const k_load[] = {"start", "loading"};
 static const char *const k_console[] = {"docked", "handheld"};
 static const char *const k_onoff[] = {"off", "on"};
-static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
+static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl"};
 static const char *const k_lang_name[] = {"auto (Windows display language)", "Japanese", "English (US)", "English (UK)", "French", "French (Canada)", "German", "Italian",
-                                          "Spanish (Spain)", "Spanish (Latin America)", "Chinese (simplified)", "Chinese (traditional)", "Korean", "Dutch", "Russian"};
+                                          "Spanish (Spain)", "Spanish (Latin America)", "Chinese (simplified)", "Chinese (traditional)", "Korean", "Dutch"};
 static const int k_sizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
 static const char *const k_size_name[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -463,6 +466,8 @@ static void dlc_save(void) {
 
 /* ------------------------------------------------------------------ the ImGui side */
 static int g_im_ready, g_section, g_section_req = -1, g_capture = -1;
+static ImFont *g_ft_title, *g_ft_row, *g_ft_small;      /* the game-styled screen (draw_tomo) */
+static int g_have_keys;
 static float g_base_h;
 static unsigned char *g_font_px;
 static int g_font_w, g_font_h;
@@ -532,6 +537,32 @@ static void im_init(int h) {
 #endif
     if (!f) { ImFontConfig c; c.SizePixels = px; io.Fonts->AddFontDefault(&c); }
     st.ScaleAllSizes(px / 15.0f);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;      /* both passes draw with a base vertex: lists over 64K vertices */
+    {   /* the game-styled screen's fonts: the game's own (scripts/launcher_art.py writes them to ui\ beside the exe), else
+         * Windows' Arial Rounded; the button glyphs (A, B ...) of the game's key font are merged in */
+        static const ImWchar keys[] = {0xE0E0, 0xE0F0, 0};
+        static const char *const names[3] = {"seurat_eb.otf", "seurat_b.otf", "seurat_b.otf"};
+        static const float sizes[3] = {54, 38, 30};
+        ImFont **out[3] = {&g_ft_title, &g_ft_row, &g_ft_small};
+        float u = (float)h / 1080.0f;
+#ifdef _WIN32
+        if (GetSystemMetrics(SM_CYSCREEN) > h) u = (float)GetSystemMetrics(SM_CYSCREEN) / 1080.0f;      /* baked for the screen: sharp in full screen too */
+        char dir[MAX_PATH], path[MAX_PATH + 32], keyf[MAX_PATH + 32];
+        GetModuleFileNameA(NULL, dir, MAX_PATH);
+        if (strrchr(dir, '\\')) *strrchr(dir, '\\') = 0;
+        snprintf(keyf, sizeof keyf, "%s\\ui\\keys.ttf", dir);
+        g_have_keys = GetFileAttributesA(keyf) != INVALID_FILE_ATTRIBUTES;
+        for (int i = 0; i < 3; i++) {
+            snprintf(path, sizeof path, "%s\\ui\\%s", dir, names[i]);
+            if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) { UINT n = GetWindowsDirectoryA(path, MAX_PATH); snprintf(path + n, sizeof path - n, "\\Fonts\\ARLRDBD.TTF"); }
+            *out[i] = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(path, sizes[i] * u) : NULL;
+            if (*out[i] && g_have_keys) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(keyf, sizes[i] * u, &m, keys); }
+            if (i == 1) printf("menu: game-styled screen: font %s, button glyphs %s\n", *out[i] ? path : "(none)", g_have_keys ? "the game's" : "drawn");
+        }
+#endif
+        for (int i = 0; i < 3; i++) if (!*out[i]) *out[i] = io.Fonts->Fonts[0];
+        (void)u;
+    }
     int bpp = 0;
     io.Fonts->GetTexDataAsRGBA32(&g_font_px, &g_font_w, &g_font_h, &bpp);
     io.Fonts->SetTexID((ImTextureID)1);
@@ -1587,9 +1618,255 @@ static void draw_menu(int cw, int ch) {
     ImGui::End();
 }
 
+/* ------------------------------------------------------------------ the in-game settings screen in the game's own style
+ * (its Settings screens: the yellow page, the wavy band at the bottom, white rounded cards, the chosen one yellow with
+ * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
+ * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
+ * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_QUIT, T_N };
+enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
+static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
+static double g_t_open_t;
+static const float k_res[] = {1.0f, 1.5f, 2.0f, 3.0f};
+static const char *const k_res_name[] = {"1080p", "1620p", "4K", "Above 4K (3240p)"};
+static const char *const k_wide[] = {"auto", "off", "21:9", "32:9"};
+static const char *const k_wide_name[] = {"Fit the screen", "Off (16:9)", "21:9", "32:9"};
+static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
+static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
+static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Quit to desktop"};
+static const uint32_t NAVY = 0x022240;
+
+static int classic(void) {
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("SSBU_MENU_CLASSIC"); c = (e && atoi(e) > 0) || getenv("SSBU_MENU_TEST") || getenv("SSBU_MENU_ROOMS_TEST"); }
+    return c;
+}
+static void t_init(void) {
+    float w = gfx_widescreen();
+    g_t_wide0 = g_t_wide = w < 0 ? 0 : w == 0 ? 1 : w < 3.0f ? 2 : 3;
+    g_t_fps0 = g_t_fps = gfx_frame_rate();
+}
+static int t_res_idx(void) { int b = 0; for (int i = 1; i < N(k_res); i++) if (fabsf(k_res[i] - S.scale) < fabsf(k_res[b] - S.scale)) b = i; return b; }
+static int t_changed(int r) {                  /* a setting read at start, changed since: it applies at the next start */
+    switch (r) {
+    case T_RES: return fabsf(S.scale - S0.scale) > 0.001f;
+    case T_WIDE: return g_t_wide != g_t_wide0;
+    case T_FPS: return g_t_fps != g_t_fps0;
+    case T_VSYNC: return S.vsync != S0.vsync;
+    case T_LANG: return S.lang != S0.lang;
+    }
+    return 0;
+}
+static void t_value(int r, char *v, int n) {
+    int wm = display_window_mode();
+    switch (r) {
+    case T_SCREEN: snprintf(v, (size_t)n, "%s", k_window_name[wm >= 0 && wm < 3 ? wm : 0]); break;
+    case T_SIZE: snprintf(v, (size_t)n, "%s", S.size < 0 ? "Custom" : k_size_name[S.size]); break;
+    case T_RES: snprintf(v, (size_t)n, "%s", k_res_name[t_res_idx()]); break;
+    case T_WIDE: snprintf(v, (size_t)n, "%s", k_wide_name[g_t_wide]); break;
+    case T_FPS: snprintf(v, (size_t)n, "%d fps", g_t_fps); break;
+    case T_VSYNC: snprintf(v, (size_t)n, "%s", k_vsync_name[S.vsync]); break;
+    case T_VOLUME: snprintf(v, (size_t)n, "%d", S.volume < 0 ? 100 : S.volume); break;
+    case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
+    default: v[0] = 0;
+    }
+}
+static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A cycles forward */
+    char v[16];
+    switch (r) {
+    case T_SCREEN: S.window = (display_window_mode() + dir + 3) % 3; display_set_window_mode(S.window); ini("window", k_window[S.window]); break;
+    case T_SIZE: S.size = ((S.size < 0 ? 0 : S.size) + dir + N(k_sizes)) % N(k_sizes); display_set_client_size(k_sizes[S.size][0], k_sizes[S.size][1]);
+        snprintf(v, sizeof v, "%d", k_sizes[S.size][0]); ini("width", v); snprintf(v, sizeof v, "%d", k_sizes[S.size][1]); ini("height", v); break;
+    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, "%.2f", S.scale); ini("resolution_scale", v); break;
+    case T_WIDE: g_t_wide = (g_t_wide + dir + N(k_wide)) % N(k_wide); ini("widescreen", k_wide[g_t_wide]); break;
+    case T_FPS: g_t_fps = g_t_fps == 60 ? 30 : 60; snprintf(v, sizeof v, "%d", g_t_fps); ini("frame_rate", v); break;
+    case T_VSYNC: { int k = 0; for (int i = 0; i < N(k_vsync_order); i++) if (k_vsync_order[i] == S.vsync) k = i;
+        S.vsync = k_vsync_order[(k + dir + N(k_vsync_order)) % N(k_vsync_order)]; ini("vsync", k_vsync[S.vsync]); break; }
+    case T_VOLUME: S.volume = (S.volume < 0 ? 100 : S.volume) + dir * 10; S.volume = S.volume < 0 ? 0 : S.volume > 100 ? 100 : S.volume;
+        nnaudio_set_volume(S.volume); snprintf(v, sizeof v, "%d", S.volume); ini("volume", v); break;
+    case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
+    }
+    char now[64]; t_value(r, now, sizeof now);
+    printf("menu: %s = %s%s\n", k_tlabel[r], now, t_changed(r) ? " (at the next start)" : ""); fflush(stdout);
+}
+static void t_act(int a) {
+    if (g_t_dlg) {                             /* "Quit Tomodachi Life?": Quit | Cancel */
+        if (a == A_LEFT || a == A_RIGHT || a == A_UP || a == A_DOWN) g_t_dlg_sel ^= 1;
+        else if (a == A_OK && g_t_dlg_sel == 0) exit_game();
+        else g_t_dlg = 0;
+        return;
+    }
+    switch (a) {
+    case A_UP: g_t_sel = (g_t_sel + T_N - 1) % T_N; break;
+    case A_DOWN: g_t_sel = (g_t_sel + 1) % T_N; break;
+    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
+    case A_OK: if (g_t_sel == T_QUIT) { g_t_dlg = 1; g_t_dlg_sel = 1; }
+        else if (g_t_sel == T_VOLUME && (S.volume < 0 || S.volume >= 100)) { S.volume = 0; t_change(T_VOLUME, 0); }
+        else t_change(g_t_sel, 1);
+        break;
+    case A_BACK: menu_request_toggle(); break;
+    }
+}
+static int t_key_act(int vk) {                 /* a key press -> an action, -1 = not ours */
+    switch (vk) {
+    case VK_UP: return A_UP; case VK_DOWN: return A_DOWN; case VK_LEFT: return A_LEFT; case VK_RIGHT: return A_RIGHT;
+    case VK_RETURN: case VK_SPACE: return A_OK; case VK_ESCAPE: case VK_BACK: return A_BACK;
+    }
+    return -1;
+}
+static void t_pad(uint64_t b, uint64_t down) {  /* the pads: A / B, and the d-pad with the game's repeat when held */
+    static ULONGLONG t0, next;
+    static const int dirs[4][2] = {{B_UP, A_UP}, {B_DOWN, A_DOWN}, {B_LEFT, A_LEFT}, {B_RIGHT, A_RIGHT}};
+    ULONGLONG now = GetTickCount64();
+    if (down & BIT(B_A)) t_act(A_OK);
+    if (down & BIT(B_B)) t_act(A_BACK);
+    for (int i = 0; i < 4; i++) {
+        if (down & BIT(dirs[i][0])) { t_act(dirs[i][1]); t0 = now; next = now + 400; }
+        else if ((b & BIT(dirs[i][0])) && now >= next && t0) { t_act(dirs[i][1]); next = now + 110; }
+    }
+    if (!(b & (BIT(B_UP) | BIT(B_DOWN) | BIT(B_LEFT) | BIT(B_RIGHT)))) t0 = 0;
+}
+
+static ImU32 t_col(uint32_t rgb, float a) { return IM_COL32(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, (int)(a * 255.0f + 0.5f)); }
+static void t_band(ImDrawList *dl, float x0, float x1, float y, float bottom, float amp, float len, float phase, ImU32 c) {
+    const float step = 6.0f;
+    for (float x = x0; x < x1; x += step) {
+        float ya = y + amp * sinf((x + phase) * 6.2832f / len), yb = y + amp * sinf((x + step + phase) * 6.2832f / len);
+        dl->AddQuadFilled(ImVec2(x, ya), ImVec2(x + step + 0.5f, yb), ImVec2(x + step + 0.5f, bottom), ImVec2(x, bottom), c);
+    }
+}
+static void t_stripes(ImDrawList *dl, ImVec2 a, ImVec2 b, float u, float phase, ImU32 c) {      /* the chosen card's wavy stripes */
+    for (float y = a.y - 40.0f * u; y < b.y + 60.0f * u; y += 36.0f * u) {
+        ImVec2 pts[50];
+        int n = 0;
+        for (int k = 0; k < 50; k++) {
+            float x = a.x + (b.x - a.x) * (float)k / 49.0f;
+            pts[n++] = ImVec2(x, y - (x - a.x) * 0.10f + 7.0f * u * sinf((x - a.x + phase) * 6.2832f / (70.0f * u)));
+        }
+        dl->AddPolyline(pts, n, c, 0, 10.0f * u);
+    }
+}
+static void t_card(ImDrawList *dl, ImVec2 a, ImVec2 b, float u, int chosen, float in, double t) {
+    float r = (b.y - a.y) * 0.42f;
+    dl->AddRectFilled(ImVec2(a.x, a.y + 6.0f * u), ImVec2(b.x, b.y + 6.0f * u), t_col(0xE0A800, 0.45f * in), r);      /* the card's edge below */
+    dl->AddRectFilled(a, b, t_col(chosen ? 0xFFE353 : 0xFFFFFF, in), r);
+    if (!chosen) return;
+    dl->PushClipRect(ImVec2(a.x + r * 0.6f, a.y + 4.0f * u), ImVec2(b.x - r * 0.6f, b.y - 4.0f * u), true);
+    t_stripes(dl, a, b, u, (float)t * 30.0f * u, t_col(0xFFF1A8, in));
+    dl->PopClipRect();
+    dl->AddRect(a, b, t_col(0xFED219, in), r, 0, 3.0f * u);
+}
+static void t_glyph(ImDrawList *dl, ImVec2 p, float sz, int which, ImU32 c) {      /* a button of the game's key font (0 A, 1 B) */
+    if (g_have_keys) {
+        unsigned cp = 0xE0E0u + (unsigned)which;
+        char s[4] = {(char)(0xE0 | cp >> 12), (char)(0x80 | (cp >> 6 & 63)), (char)(0x80 | (cp & 63)), 0};
+        dl->AddText(g_ft_row, sz, p, c, s);
+    } else {
+        dl->AddCircleFilled(ImVec2(p.x + sz * 0.5f, p.y + sz * 0.55f), sz * 0.42f, c);
+        dl->AddText(g_ft_small, sz * 0.6f, ImVec2(p.x + sz * 0.32f, p.y + sz * 0.25f), IM_COL32_WHITE, which ? "B" : "A");
+    }
+}
+static void t_text(ImDrawList *dl, ImFont *f, float sz, float x, float cy, float align, ImU32 c, const char *s) {      /* align 0 left, 0.5 centre, 1 right */
+    ImVec2 ts = f->CalcTextSizeA(sz, FLT_MAX, 0.0f, s);
+    dl->AddText(f, sz, ImVec2(x - ts.x * align, cy - ts.y * 0.5f), c, s);
+}
+static void draw_tomo(void) {
+    ImGuiIO &io = ImGui::GetIO();
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    float bw = W, bh = W * 9.0f / 16.0f;
+    if (bh > H) { bh = H; bw = H * 16.0f / 9.0f; }
+    const float bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f, u = bh / 1080.0f;      /* the 16:9 page in the middle; the yellow fills the rest */
+    const double t = ImGui::GetTime();
+    if (g_t_opened) { g_t_open_t = t; g_t_opened = 0; }
+    float in = (float)((t - g_t_open_t) / 0.15);
+    in = in > 1.0f ? 1.0f : in;
+    const float rise = (1.0f - in) * 30.0f * u;
+    const ImVec2 m = io.MousePos;
+    const bool moved = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f, click = ImGui::IsMouseClicked(0);
+    if (io.MouseWheel != 0.0f) t_act(io.MouseWheel > 0 ? A_UP : A_DOWN);
+    if (ImGui::IsMouseClicked(1)) t_act(A_BACK);
+
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), t_col(0xFFC100, in));
+    t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFD05A, in));
+    t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), "PC Settings");
+
+    const float rw = 1180.0f * u, rh = 74.0f * u, gap = 12.0f * u, rx = bx + (bw - rw) * 0.5f, ry0 = by + 168.0f * u + rise;
+    int pending = 0;
+    for (int r = 0; r < T_N; r++) {
+        ImVec2 a(rx, ry0 + (float)r * (rh + gap)), b(rx + rw, ry0 + (float)r * (rh + gap) + rh);
+        const bool over = !g_t_dlg && m.x >= a.x && m.x < b.x && m.y >= a.y && m.y < b.y;
+        if (over && moved) g_t_sel = r;
+        const int chosen = r == g_t_sel && !g_t_dlg;
+        t_card(dl, a, b, u, chosen, in, t);
+        const float cy = (a.y + b.y) * 0.5f;
+        t_text(dl, g_ft_row, 38.0f * u, a.x + 44.0f * u, cy, 0.0f, t_col(NAVY, in), k_tlabel[r]);
+        if (r == T_QUIT) { if (over && click) t_act(A_OK); continue; }
+        char v[64];
+        t_value(r, v, sizeof v);
+        if (t_changed(r)) { strcat(v, " *"); pending = 1; }
+        const float vx = b.x - 90.0f * u, vw = g_ft_row->CalcTextSizeA(38.0f * u, FLT_MAX, 0.0f, v).x;
+        t_text(dl, g_ft_row, 38.0f * u, vx, cy, 1.0f, t_col(NAVY, in), v);
+        if (chosen) {                          /* the game's arrows either side of a value that changes */
+            const float s = 13.0f * u, lx = vx - vw - 34.0f * u, rx2 = vx + 34.0f * u;
+            dl->AddTriangleFilled(ImVec2(lx - s, cy), ImVec2(lx + s * 0.8f, cy - s), ImVec2(lx + s * 0.8f, cy + s), t_col(NAVY, in));
+            dl->AddTriangleFilled(ImVec2(rx2 + s, cy), ImVec2(rx2 - s * 0.8f, cy - s), ImVec2(rx2 - s * 0.8f, cy + s), t_col(NAVY, in));
+        }
+        if (over && click) t_change(r, m.x < vx - vw - 10.0f * u && m.x > vx - vw - 70.0f * u ? -1 : 1);      /* the left arrow goes back, the rest forward */
+    }
+    const float fy = by + 1010.0f * u;
+    t_glyph(dl, ImVec2(bx + 40.0f * u, fy - 26.0f * u), 52.0f * u, 1, t_col(NAVY, in));
+    t_text(dl, g_ft_small, 30.0f * u, bx + 100.0f * u, fy, 0.0f, t_col(NAVY, in), "Back");
+    t_glyph(dl, ImVec2(bx + bw - 250.0f * u, fy - 26.0f * u), 52.0f * u, 0, t_col(NAVY, in));
+    t_text(dl, g_ft_small, 30.0f * u, bx + bw - 190.0f * u, fy, 0.0f, t_col(NAVY, in), "Change");
+    if (pending) t_text(dl, g_ft_small, 28.0f * u, bx + bw * 0.5f, fy, 0.5f, t_col(NAVY, 0.8f * in), "* Takes effect the next time you start the game.");
+
+    if (g_t_dlg) {                             /* the game's dialog: a white box, two choices */
+        dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), IM_COL32(0, 0, 0, 90));
+        const ImVec2 a(bx + bw * 0.5f - 470.0f * u, by + 330.0f * u), b(bx + bw * 0.5f + 470.0f * u, by + 750.0f * u);
+        dl->AddRectFilled(ImVec2(a.x, a.y + 8.0f * u), ImVec2(b.x, b.y + 8.0f * u), IM_COL32(0, 0, 0, 50), 48.0f * u);
+        dl->AddRectFilled(a, b, IM_COL32_WHITE, 48.0f * u);
+        t_text(dl, g_ft_title, 46.0f * u, bx + bw * 0.5f, a.y + 95.0f * u, 0.5f, t_col(NAVY, 1), "Quit Tomodachi Life?");
+        t_text(dl, g_ft_small, 30.0f * u, bx + bw * 0.5f, a.y + 170.0f * u, 0.5f, t_col(NAVY, 1), "Anything you haven't saved will be lost.");
+        for (int k = 0; k < 2; k++) {
+            ImVec2 p(bx + bw * 0.5f + (k ? 30.0f : -330.0f) * u, a.y + 250.0f * u), q(p.x + 300.0f * u, p.y + 90.0f * u);
+            const bool over = m.x >= p.x && m.x < q.x && m.y >= p.y && m.y < q.y;
+            if (over && moved) g_t_dlg_sel = k;
+            t_card(dl, p, q, u, g_t_dlg_sel == k, 1.0f, t);
+            if (g_t_dlg_sel != k) dl->AddRect(p, q, t_col(0xD8D8D8, 1), (q.y - p.y) * 0.42f, 0, 3.0f * u);
+            t_text(dl, g_ft_row, 38.0f * u, (p.x + q.x) * 0.5f, (p.y + q.y) * 0.5f, 0.5f, t_col(NAVY, 1), k ? "Cancel" : "Quit");
+            if (over && click) { g_t_dlg_sel = k; t_act(A_OK); }
+        }
+    }
+}
+
+/* for a few seconds after the game's first picture, a card in the top-left corner says where PC Settings are */
+static float t_hint(void) {
+    static ULONGLONG t0;
+    if (classic()) return 0.0f;
+    if (!t0) t0 = GetTickCount64();
+    float e = (float)(GetTickCount64() - t0) / 1000.0f, a = e < 3.0f ? 0.0f : e < 3.3f ? (e - 3.0f) / 0.3f : e < 10.0f ? 1.0f : e < 10.3f ? (10.3f - e) / 0.3f : 0.0f;
+    return a;
+}
+static void draw_hint(float a) {
+    ImGuiIO &io = ImGui::GetIO();
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    float bw = io.DisplaySize.x, bh = bw * 9.0f / 16.0f;
+    if (bh > io.DisplaySize.y) { bh = io.DisplaySize.y; bw = bh * 16.0f / 9.0f; }
+    const float bx = (io.DisplaySize.x - bw) * 0.5f, by = (io.DisplaySize.y - bh) * 0.5f, u = bh / 1080.0f;
+    const char *s = "PC Settings: F1 or the HOME button";
+    const float tw = g_ft_small->CalcTextSizeA(30.0f * u, FLT_MAX, 0.0f, s).x;
+    const ImVec2 p(bx + 40.0f * u, by + 40.0f * u), q(p.x + tw + 64.0f * u, p.y + 68.0f * u);      /* top left: the game's speech bubbles are at the bottom */
+    dl->AddRectFilled(ImVec2(p.x, p.y + 6.0f * u), ImVec2(q.x, q.y + 6.0f * u), t_col(0xE0A800, 0.6f * a), 34.0f * u);
+    dl->AddRectFilled(p, q, t_col(0xFFFFFF, a), 34.0f * u);
+    t_text(dl, g_ft_small, 30.0f * u, p.x + 32.0f * u, (p.y + q.y) * 0.5f, 0.0f, t_col(NAVY, a), s);
+}
+
 static void set_open(int on) {
     if (on == (g_open != 0)) return;
     if (on) {
+        g_t_sel = 0; g_t_dlg = 0; g_t_opened = 1;
         InterlockedExchange(&g_open, 1);
         InterlockedExchange(&g_guard, 1);
         g_section_req = g_section;
@@ -1715,6 +1992,29 @@ static void rooms_test_tick(void) {
     } else if (step == 4 && t - t0 >= 1500) { set_open(0); printf("menu: rooms test: over\n"); step = 5; }
     fflush(stdout);
 }
+/* TEST SWITCH TOMO_MENU_TEST=<presented frame>: the game-styled screen opens there; pictures (SSBU_SHOT_DIR/menu_test_tomo_*.bmp)
+ * of the page, of the page after Resolution was changed (right), and of the quit dialog; then Resolution goes back and the
+ * screen closes. It writes graphics.ini: point SSBU_GRAPHICS_CONFIG at a copy. */
+static void tomo_test_tick(void) {
+    static long long at = -2, step_at;
+    static int step;
+    static int hint_shot;
+    if (at == -2) { const char *e = getenv("TOMO_MENU_TEST"); at = e && e[0] ? atoll(e) : -1; }
+    if (at >= 0 && !hint_shot && t_hint() >= 1.0f) { test_shot("tomo_hint"); hint_shot = 1; }
+    if (at < 0 || g_frame < at || step < 0) return;
+    long long t = g_frame - at;
+    switch (step) {
+    case 0: set_open(1); step = 1; step_at = t; break;
+    case 1: if (t - step_at >= 20) { test_shot("tomo_page"); step = 2; } break;
+    case 3: t_act(A_DOWN); t_act(A_DOWN); t_act(A_RIGHT); step = 4; step_at = t; break;
+    case 4: if (t - step_at >= 10) { test_shot("tomo_changed"); step = 5; } break;
+    case 6: t_act(A_UP); t_act(A_UP); t_act(A_UP); t_act(A_OK); step = 7; step_at = t; break;      /* Resolution -> up past the top -> Quit */
+    case 7: if (t - step_at >= 10) { test_shot("tomo_quit"); step = 8; } break;
+    case 9: t_act(A_BACK); g_t_sel = T_RES; t_act(A_LEFT); t_act(A_BACK);
+        printf("menu: test: tomo: dialog closed, resolution back, screen closing\n"); fflush(stdout); step = -1; break;
+    case 2: case 5: case 8: if (!g_shot_req) step++; break;
+    }
+}
 extern "C" int menu_shot_wanted(char *path, int n) {
     if (!g_shot_req) return 0;
     g_shot_req = 0;
@@ -1737,9 +2037,10 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         if (!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf);
         if (fresh && g_last_t.QuadPart) { g_ft[g_ft_pos] = (float)((double)(now.QuadPart - g_last_t.QuadPart) * 1000.0 / (double)g_qpf.QuadPart); g_ft_pos = (g_ft_pos + 1) % 120; }
         if (fresh) g_last_t = now; }
-    if (!g_sections_inited) { settings_init(width, height); g_sections_inited = 1; CreateThread(NULL, 0, redraw_thread, NULL, 0, NULL); }
+    if (!g_sections_inited) { settings_init(width, height); t_init(); g_sections_inited = 1; CreateThread(NULL, 0, redraw_thread, NULL, 0, NULL); }
     test_tick();
     rooms_test_tick();
+    tomo_test_tick();
     uint64_t b = nnhid_menu_buttons(), down = b & ~g_pad_prev;
     g_pad_prev = b;
     {   /* U2: - and + held together for 1 s open the menu too: a controller whose Home / Guide button is taken (the Steam
@@ -1765,7 +2066,8 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    const float hint = g_open ? 0.0f : t_hint();
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && hint <= 0.0f) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1793,6 +2095,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         case EV_CHAR: io.AddInputCharacter((unsigned int)e.a); break;      /* a code point (SDL's text is UTF-8) */
 #endif
         case EV_KEY:
+            if (!classic()) { if (e.b && t_key_act(e.a) >= 0) t_act(t_key_act(e.a)); break; }      /* the game-styled screen takes the keys itself */
             if (e.a == VK_ESCAPE && e.b && !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(NULL, ImGuiPopupFlags_AnyPopupId)) { menu_request_toggle(); break; }
             if (e.a == VK_CONTROL) io.AddKeyEvent(ImGuiMod_Ctrl, e.b != 0);
             if (e.a == VK_SHIFT) io.AddKeyEvent(ImGuiMod_Shift, e.b != 0);
@@ -1802,8 +2105,9 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         }
     }
     pad_feed(io, g_open && !capturing() && !osk_active() ? b : 0);
-    if (g_open && !capturing() && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
-    if (g_open && !capturing() && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
+    if (g_open && !classic() && !osk_active()) t_pad(b, down);
+    if (g_open && classic() && !capturing() && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
+    if (g_open && classic() && !capturing() && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
     io.MouseDrawCursor = false;
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();
@@ -1839,7 +2143,8 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::PopStyleColor();
         if (!InterlockedExchange(&g_popup_drawn, 1)) { printf("menu: online popup drawn (presented frame %lld): %s: %s\n", g_frame, title, text); fflush(stdout); }
     }
-    if (g_open && !osk_active()) draw_menu(width, height);
+    if (g_open && !osk_active()) { if (classic()) draw_menu(width, height); else draw_tomo(); }
+    else if (hint > 0.0f) draw_hint(hint);
     ImGui::Render();
 #ifndef _WIN32
     InterlockedExchange(&g_text_want, g_open && io.WantTextInput ? 1 : 0);      /* a text box is active: SDL's text input on (window thread) */

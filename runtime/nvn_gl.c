@@ -6388,6 +6388,9 @@ static void joblog(void (*fn)(void *), LONG64 t) {
            fn == job_finish ? "Finish" : fn == job_submit_async ? "SubmitCommands (posted)" : fn == job_read_texels ? "ReadTexels" : fn == job_write_texels ? "WriteTexels" :
            fn == job_nop ? "barrier" : fn == job_housekeeping ? "housekeeping" : fn == job_server_wait ? "QueueWaitSync" : fn == job_rb_land_range ? "rb_land_range" : "other", 10);
 }
+#ifdef _WIN32
+#include "nvn_gl_menu.c"                           /* the in-game settings menu (menu.cpp builds it) */
+#endif
 static void job_present(void *arg) {
     if (g_rbp_n) rb_land(0);
     g_dec_spent = 0;
@@ -6551,6 +6554,7 @@ static void job_present(void *arg) {
         glClear(GL_COLOR_BUFFER_BIT);
     }
 #ifdef _WIN32
+    menu_gl_draw((int)r.right, (int)r.bottom);      /* the in-game settings menu over the picture (nvn_gl_menu.c) */
     fbo_detach(g_fbo_read);
     { LONG64 pf1 = pf_now(); HS_IN("SwapBuffers", 0); SwapBuffers(g_dc); HS_OUT(); pf_add(PF_SWAP, pf1); }
 #endif
@@ -7747,7 +7751,7 @@ void nvn_vk_osk_redraw_job(void *arg);                 /* nvn_vk_draw.c */
 long long nvn_vk_presents(void);                       /* nvn_vk_draw.c */
 int nvn_front_osk_ready(void) { return g_vk != 0; }
 void nvn_front_osk_redraw(void) { if (g_vk) gl_post(nvn_vk_osk_redraw_job, NULL, 0); }
-long long nvn_front_presents(void) { return g_vk ? nvn_vk_presents() : 0; }
+long long nvn_front_presents(void) { return g_vk ? nvn_vk_presents() : g_st.frames; }
 /* ---- Track L1 (input latency), early present. The game submits the commands of a frame's picture BEFORE it waits for the
  * window texture (nvnSyncWait on the acquire sync = display_wait_refresh), then reads the pad, runs that frame's logic and
  * only then calls nvnQueuePresentTexture for the picture it had finished before the wait (measured: tests\logs\vk13_l1t_*,
