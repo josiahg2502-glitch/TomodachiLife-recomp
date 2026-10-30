@@ -391,7 +391,7 @@ static int ai_word(const char *s, const char *w, int stem) {
  * <o>..<e>.<h> said to you, ..<e>. thought. 0 and why when it cannot be used. */
 static int ai_clean(const char *in, int kind, const char *const *names, int nnames, const char *const *ok_names, int nok,
                     const char (*words)[100], int nwords, char *out, size_t n, const char **why) {
-    static const char *const banned[] = {"assistant", "language model", "as an ai", "nintendo", "tomodachi", "video game", "chatgpt", "qwen", "player", "Pip"};
+    static const char *const banned[] = {"assistant", "language model", "as an ai", "nintendo", "tomodachi", "video game", "chatgpt", "qwen", "player", "Pip", "Captain Zoom"};
     static const char *const rude_stem[] = {"fuck", "shit", "bitch", "bastard", "nigg", "fag", "retard", "slut", "whore", "cunt", "pussy", "porn"};
     static const char *const rude_word[] = {"hell", "damn", "crap", "sex", "sexy", "kill", "die", "dead", "death", "stupid", "idiot", "hate", "dick", "drunk", "drugs", "beer", "gun", "guns", "blood"};
     char a[400]; size_t o = 0;
@@ -410,9 +410,14 @@ static int ai_clean(const char *in, int kind, const char *const *names, int nnam
     for (size_t l = strlen(s); l && s[l - 1] == ' '; l--) s[l - 1] = 0;
     static const char *const lead[] = {"Mii:", "Line:", "Thought:", "Assistant:"};
     for (int k = 0; k < 4; k++) if (!_strnicmp(s, lead[k], strlen(lead[k]))) { s += strlen(lead[k]); while (*s == ' ') s++; }
-    size_t l = strlen(s);
-    if (l >= 2 && s[0] == '"' && s[l - 1] == '"') { s[l - 1] = 0; s++; l -= 2; }
-    if (l < 6 || l > 110) { *why = "too short or too long"; return 0; }
+    for (char *p = s, *q = s; ; p++) { if (*p != '"') *q++ = *p; if (!*p) break; }      /* quotes add nothing in a balloon */
+    size_t l = strlen(s), lim = kind == 2 ? 70 : 90;
+    if (l > lim) {                                         /* too long: its first sentence(s) that fit */
+        size_t cut = 0;
+        for (size_t i = 12; i < lim; i++) if (strchr(".!?", s[i]) && s[i + 1] == ' ') cut = i + 1;
+        if (cut) { s[cut] = 0; l = cut; }
+    }
+    if (l < 6 || l > lim) { *why = "too short or too long"; return 0; }
     if (strpbrk(s, "<>[]*#_\\|~^@`()=+/%\"")) { *why = "markup or odd characters"; return 0; }
     for (const char *p = s; (p = strchr(p, '{')); p++) if (strncmp(p, "{player}", 8) && strncmp(p, "{island}", 8)) { *why = "an unknown {placeholder}"; return 0; }
     for (const char *p = s; (p = strchr(p, '}')); p++) if (p < s + 7 || (strncmp(p - 7, "{player}", 8) && strncmp(p - 7, "{island}", 8))) { *why = "an unknown {placeholder}"; return 0; }
@@ -425,6 +430,14 @@ static int ai_clean(const char *in, int kind, const char *const *names, int nnam
         if (!allowed && ai_word(plain, banned[k], 0)) { *why = "talks about the game or itself"; return 0; }
     }
     for (int k = 0; k < nnames; k++) if (ai_word(plain, names[k], 0)) { *why = "names a resident (the speaker is unknown)"; return 0; }
+    if (kind == 2 && (ai_word(plain, "you", 0) || ai_word(plain, "your", 0) || ai_word(plain, "yours", 0) || ai_word(plain, "yourself", 0))) { *why = "a thought that talks to someone"; return 0; }
+    if (kind == 2) for (const char *p = s; (p = strstr(p, "{player}")); p += 8)        /* "..., {player}!" calls to you: not a thought */
+        if ((p == s && p[8] == ',') || (p >= s + 2 && p[-2] == ',' && (!p[8] || strchr(".!?,", p[8])))) { *why = "a thought that talks to someone"; return 0; }
+    for (int k = 0; k < nwords; k++) {                     /* the taught words are things Miis heard of, not who they are */
+        char me[2][120];
+        snprintf(me[0], sizeof me[0], "I'm %s", words[k]); snprintf(me[1], sizeof me[1], "I am %s", words[k]);
+        if (words[k][0] && (ai_word(plain, me[0], 0) || ai_word(plain, me[1], 0))) { *why = "pretends to be a taught word"; return 0; }
+    }
     char kind_words[400];                                  /* rude words, but your taught words are yours */
     snprintf(kind_words, sizeof kind_words, "%s", plain);
     for (int k = 0; k < nwords; k++) {
@@ -468,7 +481,7 @@ static int ai_room(int kind) { AcquireSRWLockShared(&g_ai_lk); int r = g_ai.n[ki
 /* What the model is told this time (the user turn), from the memory; names it may use go to ok[]. */
 typedef struct { char text[1200]; char names[CM_MAX][100]; int nnames; char ok[8][100]; int nok; char words[300][100]; int nwords; } AiFacts;
 static void ai_facts(AiFacts *f, int kind) {
-    static const char *const season[] = {"winter", "winter", "spring", "spring", "spring", "summer", "summer", "summer", "autumn", "autumn", "autumn", "winter"};
+    static const char *const season[] = {"a winter", "a winter", "a spring", "a spring", "a spring", "a summer", "a summer", "a summer", "an autumn", "an autumn", "an autumn", "a winter"};
     static const char *const topics[] = {"food", "a dream", "a hobby", "the weather", "the island", "the player", "music", "the sea", "a silly worry",
         "a plan for later", "a snack", "a nap", "clothes", "friendship", "a funny thought", "the stars", "a game they made up"};
     SYSTEMTIME st; GetLocalTime(&st);
@@ -486,32 +499,43 @@ static void ai_facts(AiFacts *f, int kind) {
     f->nwords = g_cm.nword;
     memcpy(f->words, g_cm.word, sizeof f->words[0] * (size_t)g_cm.nword);
     const char *heard = g_cm.nheard ? g_cm.heard[chatter_rand() % (unsigned)g_cm.nheard] : NULL;
-    const char *w1 = f->nwords ? f->words[chatter_rand() % (unsigned)f->nwords] : NULL, *w2 = f->nwords > 1 ? f->words[chatter_rand() % (unsigned)f->nwords] : NULL;
-    o += snprintf(f->text + o, sizeof f->text - (size_t)o, "Facts: It is a %s %s.", season[st.wMonth >= 1 && st.wMonth <= 12 ? st.wMonth - 1 : 0], part);
-    if (live >= 2) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " %d Miis live on {island}.", live);
-    if (gone) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii named %s moved away from {island}.", gone);
-    if (w1) o += snprintf(f->text + o, sizeof f->text - (size_t)o, w2 && w2 != w1 ? " The player taught the Miis the words \"%s\" and \"%s\"." : " The player taught the Miis the word \"%s\".", w1, w2);
-    if (heard && chatter_rand() % 2) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii said lately: \"%s\"", heard);
-    ReleaseSRWLockShared(&g_cm_lk);
+    const char *w1 = f->nwords ? f->words[chatter_rand() % (unsigned)f->nwords] : NULL;
+    /* One thing at a time (the model works every fact it is given into the line): a taught word 3 in 10, someone who moved
+     * away 2 in 10, something a Mii said 2 in 10, else only a topic. */
     uint32_t r = chatter_rand() % 10;
-    if (w1 && r < 4) snprintf(topic, sizeof topic, "the word \"%s\"", r < 2 || !w2 ? w1 : w2);
-    else if (gone && r < 6) snprintf(topic, sizeof topic, "missing %s", gone);
+    int use_word = w1 && r < 3, use_gone = gone && r >= 3 && r < 5, use_heard = heard && r >= 5 && r < 7;
+    o += snprintf(f->text + o, sizeof f->text - (size_t)o, "Facts: It is %s %s.", season[st.wMonth >= 1 && st.wMonth <= 12 ? st.wMonth - 1 : 0], part);
+    if (live >= 2) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " %d Miis live on {island}.", live);
+    if (use_gone) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii named %s moved away from {island}.", gone);
+    if (use_word) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " The player taught the Miis the word \"%s\".", w1);
+    if (use_heard) o += snprintf(f->text + o, sizeof f->text - (size_t)o, " A Mii said lately: \"%s\"", heard);
+    ReleaseSRWLockShared(&g_cm_lk);
+    if (use_word) snprintf(topic, sizeof topic, "the word \"%s\"", w1);
+    else if (use_gone) snprintf(topic, sizeof topic, "missing %s", gone);
+    else if (use_heard) snprintf(topic, sizeof topic, "what that Mii said");
     else snprintf(topic, sizeof topic, "%s", topics[chatter_rand() % (sizeof topics / sizeof topics[0])]);
     snprintf(f->text + o, sizeof f->text - (size_t)o, " Topic: %s.\n%s", topic, kind == 1 ? "A Mii says a line to the player." : "A Mii thinks to itself while walking around.");
 }
 /* The fixed part of the prompt (ChatML): what Miis are like and three examples (with a made-up name, Pip, that lines may
  * not copy). */
 static const char *const k_ai_turns[] = {
-    "system\nYou write lines for Miis, the funny little people who live on an island in a life simulation game. Each line is one "
-    "or two short sentences, under 90 characters, in simple English. Miis are cheerful, silly, curious and kind. They love food, "
-    "naps, hobbies, their island and the player. Never be mean, rude, scary or sad for long. Write {player} for the player's name "
-    "and {island} for the island's name. Use no other names unless the facts give them. Write only the line.",
+    "system\nYou write lines for Miis, the funny little people who live on an island in a life simulation game. A line is one "
+    "or two short sentences in simple English, under 80 characters. Miis are cheerful, silly, curious and kind, a little odd, "
+    "and they love food, naps, hobbies, dreams, their island and the player. The words the player taught are things Miis have "
+    "heard about: they talk about them, but are never them. Miis share feelings, wishes and silly ideas, never facts about "
+    "real people or things. A thought is to itself, never to anyone. Never be mean, rude, "
+    "scary or sad for long. Write {player} for the player's name and {island} for the island's name. Use no other names "
+    "unless the facts give them. Write only the line.",
     "user\nFacts: It is a summer morning. 7 Miis live on {island}. Topic: a dream.\nA Mii says a line to the player.",
     "assistant\nGood morning, {player}! I dreamt I was a pancake. A really fluffy one!",
     "user\nFacts: It is an autumn evening. The player taught the Miis the word \"kites\". Topic: the word \"kites\".\nA Mii thinks to itself while walking around.",
     "assistant\nKites... I wonder if they ever get lonely up there.",
+    "user\nFacts: It is a spring afternoon. The player taught the Miis the words \"bubble tea\" and \"Captain Zoom\". Topic: the word \"Captain Zoom\".\nA Mii says a line to the player.",
+    "assistant\nHave you heard of Captain Zoom, {player}? I want an autograph!",
     "user\nFacts: It is a winter night. A Mii named Pip moved away from {island}. Topic: missing Pip.\nA Mii says a line to the player.",
     "assistant\nI still save a seat for Pip at lunch. Is that silly, {player}?",
+    "user\nFacts: It is a summer night. 5 Miis live on {island}. Topic: a snack.\nA Mii thinks to itself while walking around.",
+    "assistant\nJust one cookie before bed. Or five. Five is fine.",
 };
 static int ai_turn(Llm *m, int32_t *t, int max, const char *text, int open_assistant) {
     int o = 0;
@@ -533,7 +557,7 @@ static int ai_write(Llm *m, int prefix, int kind, uint32_t *rng, char *raw, size
     size_t ro = 0;
     raw[0] = 0;
     while (no < 40) {
-        int tok = llm_sample(m, 0.9f, 40, 0.92f, 1.15f, out, no, rng);
+        int tok = llm_sample(m, 0.8f, 40, 0.9f, 1.15f, out, no, rng);
         if (tok == m->im_end || tok == m->endoftext || tok == m->eos) { ended = 1; break; }
         char piece[64];
         int pl = llm_piece(m, tok, piece, sizeof piece);
@@ -556,6 +580,19 @@ static int ai_prefix(Llm *m) {
     llm_rewind(m, 0);
     return llm_eval(m, t, n) ? -1 : m->n_past;
 }
+/* The AI only works while the CPU has room: before loading and before each line, at least 30 % of it idle over a second
+ * (the game's loads use every core; on the island it leaves most idle). */
+static void ai_wait_calm(void) {
+    for (;;) {
+        FILETIME i0, k0, u0, i1, k1, u1;
+        GetSystemTimes(&i0, &k0, &u0); Sleep(1000); GetSystemTimes(&i1, &k1, &u1);
+        #define FT64(f) (((ULONGLONG)(f).dwHighDateTime << 32) | (f).dwLowDateTime)
+        ULONGLONG idle = FT64(i1) - FT64(i0), all = FT64(k1) - FT64(k0) + FT64(u1) - FT64(u0);   /* (kernel time includes idle) */
+        #undef FT64
+        if (!all || idle * 100 >= all * 30) return;
+        Sleep(2000);
+    }
+}
 static DWORD WINAPI ai_main(void *arg) {
     (void)arg;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
@@ -565,6 +602,7 @@ static DWORD WINAPI ai_main(void *arg) {
     char err[160];
     DWORD t0 = GetTickCount();
     Llm *m = llm_open(g_ai.model, nt, 1024, err, sizeof err);
+    if (m) ai_wait_calm();
     int prefix = m ? ai_prefix(m) : -1;
     if (!m || prefix < 0) { printf("chatter: the AI model could not be used (%s): template lines only%c", m ? "the prompt does not fit" : err, 10); llm_close(m); g_ai.state = -1; return 0; }
     printf("chatter: AI model ready in %lu ms (%s, %d threads%s, prompt %d tokens)%c", GetTickCount() - t0, g_ai.model, m->nt, m->avx2 ? ", AVX2" : "", prefix, 10);
@@ -573,6 +611,7 @@ static DWORD WINAPI ai_main(void *arg) {
     for (;;) {
         int kind = ai_room(1) ? 1 : ai_room(2) ? 2 : 0;
         if (!kind) { WaitForSingleObject(g_ai.wake, 60000); continue; }
+        ai_wait_calm();
         char raw[300], line[300];
         const char *why = "";
         DWORD a = GetTickCount();

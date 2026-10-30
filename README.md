@@ -103,8 +103,9 @@ away, and the words you taught the Miis, and works them into what the Miis say. 
 **Free AI for the Miis (optional):** put a language model file in `build\ai` and the new lines are written by it, on your
 PC and offline, from what the mod learned about your island. It was made for Qwen2.5 1.5B Instruct
 (`qwen2.5-1.5b-instruct-q4_k_m.gguf`, 1.12 GB, Apache 2.0, from huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF). It runs on
-a few low-priority CPU threads and keeps some lines ready, so the game never waits for it. Every line is checked before a
-Mii may say it. Without a model file the mod writes from its own templates.
+a few low-priority CPU threads, only while the CPU has room to spare (it waits while the game loads), and keeps some lines
+ready, so the game never waits for it. Every line is checked before a Mii may say it. Without a model file the mod writes
+from its own templates.
 
 ## Local Play (Mii exchange)
 
