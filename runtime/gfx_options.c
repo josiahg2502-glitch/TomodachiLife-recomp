@@ -16,6 +16,8 @@
 #endif
 static int g_gfx_latency = L1_LATENCY_DEFAULT;      /* track L1: latency = normal 0 | low 1 | lowest 2 (display.c); read with gfx_latency() */
 int gfx_latency(void) { gfx_options(); return g_gfx_latency; }
+static int g_gfx_present_api = 0;                   /* present_api = auto 0 (DXGI, OpenGL when it fails) | dxgi 1 | opengl 2 (nvn_gl_dxgi.c) */
+int gfx_present_api(void) { gfx_options(); return g_gfx_present_api; }
 static int g_gfx_runahead;                           /* track R1 round 5: runahead = off 0 | on 1 (r1_state.c); read with gfx_runahead() */
 int gfx_runahead(void) { gfx_options(); return g_gfx_runahead; }
 static int g_gfx_menu = 1, g_gfx_volume = -1;      /* U1: menu = on (default) | off; volume = auto | 0..100 */
@@ -72,6 +74,13 @@ static const char *const k_default_ini =
 ";   on:      the swapchain's own vertical sync (FIFO) next to the program's clock: two clocks, not recommended.\r\n"
 ";   mailbox: as clock, mailbox or nothing.\r\n"
 "vsync = auto\r\n"
+"\r\n"
+"; present_api = auto | dxgi | opengl      (OpenGL renderer)\r\n"
+";   how the finished picture reaches the screen. auto / dxgi: a DXGI swap chain, as Windows expects of a game: the\r\n"
+";   compositor, overlays and screen recording see every frame (OpenGL's own flip went past them: stale pictures\r\n"
+";   flashed, recordings froze). auto falls back to opengl when this PC cannot share the picture with Direct3D.\r\n"
+";   opengl: OpenGL's own SwapBuffers, as before.\r\n"
+"present_api = auto\r\n"
 "\r\n"
 "; latency = normal | low | lowest      (track L1, input latency; Vulkan)\r\n"
 ";   normal:  the game is let go at the tick. (The game's picture is shown one frame sooner than before 2026-10-14 in\r\n"
@@ -247,6 +256,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
         else if (!_stricmp(key, "frame_rate")) g_gfx_fps = atoi(val) >= 60 ? 60 : 30;
+        else if (!_stricmp(key, "present_api")) g_gfx_present_api = !_stricmp(val, "dxgi") ? 1 : !_stricmp(val, "opengl") ? 2 : 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : strchr(val, ':') && atof(strchr(val, ':') + 1) > 0 ? (float)(atof(val) / atof(strchr(val, ':') + 1)) : (float)atof(val);
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */

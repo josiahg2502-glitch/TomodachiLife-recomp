@@ -32,6 +32,7 @@ static struct {
     int state;                                     /* 0 not tried, 1 ready, -1 failed (the menu stays off) */
     HGLRC rc;
     GLuint prog, vao, vbo, ibo, font;
+    GLuint dxfbo, dxtex;                           /* this context's framebuffer on the DXGI picture (nvn_gl_dxgi.c) */
     int font_w, font_h;
     mg_u4f_t u4f; mg_bindvao_t bind_vao; mg_unit_t unit; mg_dbv_t draw; mg_bfs_t blend;
 } g_mg;
@@ -133,14 +134,20 @@ static void menu_gl_draw(int W, int H) {
     mg_font();
     glNamedBufferData(g_mg.vbo, (ptrdiff_t)d.nvtx * 20, d.vtx, 0x88E0 /* STREAM_DRAW */);
     glNamedBufferData(g_mg.ibo, (ptrdiff_t)d.nidx * 2, d.idx, 0x88E0);
-    glBindFramebuffer(GL_FRAMEBUFFER_, 0);
+    int top_first = g_dx.state == 1 && g_dx.tex;  /* the DXGI picture: rows top first (the window's: bottom first) */
+    if (top_first) {
+        if (!g_mg.dxfbo) glGenFramebuffers(1, &g_mg.dxfbo);
+        glBindFramebuffer(GL_FRAMEBUFFER_, g_mg.dxfbo);
+        if (g_mg.dxtex != g_dx.tex) { glFramebufferTexture(GL_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, g_dx.tex, 0); g_mg.dxtex = g_dx.tex; }
+    } else glBindFramebuffer(GL_FRAMEBUFFER_, 0);
     glViewport(0, 0, W, H);
     glEnable(GL_BLEND);
     g_mg.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glEnable(GL_SCISSOR_TEST);
     glUseProgram(g_mg.prog);
-    g_mg.u4f(g_mg.prog, 0, 2.0f / d.disp_w, -2.0f / d.disp_h, -1.0f, 1.0f);
+    if (top_first) g_mg.u4f(g_mg.prog, 0, 2.0f / d.disp_w, 2.0f / d.disp_h, -1.0f, -1.0f);
+    else g_mg.u4f(g_mg.prog, 0, 2.0f / d.disp_w, -2.0f / d.disp_h, -1.0f, 1.0f);
     g_mg.bind_vao(g_mg.vao);
     g_mg.unit(0, g_mg.font);
     for (int i = 0; i < d.ncmd; i++) {
@@ -148,7 +155,7 @@ static void menu_gl_draw(int W, int H) {
         float x0 = c->clip[0] < 0 ? 0 : c->clip[0], y0 = c->clip[1] < 0 ? 0 : c->clip[1];
         float x1 = c->clip[2] > (float)W ? (float)W : c->clip[2], y1 = c->clip[3] > (float)H ? (float)H : c->clip[3];
         if (x1 <= x0 || y1 <= y0) continue;
-        glScissor((GLint)x0, (GLint)((float)H - y1), (GLsizei)(x1 - x0), (GLsizei)(y1 - y0));
+        glScissor((GLint)x0, (GLint)(top_first ? y0 : (float)H - y1), (GLsizei)(x1 - x0), (GLsizei)(y1 - y0));
         g_mg.draw(GL_TRIANGLES, (GLsizei)c->count, GL_UNSIGNED_SHORT, (const void *)(uintptr_t)(c->idx_off * 2u), (GLint)c->vtx_off);
     }
     mg_shot(W, H);

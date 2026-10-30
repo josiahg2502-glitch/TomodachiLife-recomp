@@ -6548,6 +6548,7 @@ static void joblog(void (*fn)(void *), LONG64 t) {
            fn == job_nop ? "barrier" : fn == job_housekeeping ? "housekeeping" : fn == job_server_wait ? "QueueWaitSync" : fn == job_rb_land_range ? "rb_land_range" : "other", 10);
 }
 #ifdef _WIN32
+#include "nvn_gl_dxgi.c"                           /* the picture to the screen through a DXGI swap chain */
 #include "nvn_gl_menu.c"                           /* the in-game settings menu (menu.cpp builds it) */
 /* PRESENT AT THE TICK (2026-10-30, as the Vulkan renderer does since session 14, display.c): the finished frame's picture is
  * blitted into the back buffer at once and the flip (SwapBuffers) waits for the tick of the refresh clock, posted by the
@@ -6556,9 +6557,10 @@ static void joblog(void (*fn)(void *), LONG64 t) {
  * screen 3, 4 or 5 refreshes as the render time varied. A late frame (queued after its tick) is flipped at once, as before.
  * SSBU_PACE_HOLD=0 or latency = lowest: flipped at once always. */
 static volatile LONG g_gl_swap_pending;
+static int g_swap_si = 1;                         /* the swap interval (vsync = off: 0), for the DXGI swap chain too */
 static void gl_swap_now(void) {
     LONG64 pf1 = pf_now();
-    HS_IN("SwapBuffers", 0); SwapBuffers(g_dc); HS_OUT(); pf_add(PF_SWAP, pf1);
+    HS_IN("SwapBuffers", 0); if (!dx_present(g_swap_si)) SwapBuffers(g_dc); HS_OUT(); pf_add(PF_SWAP, pf1);
     if (InterlockedExchange(&g_gl_swap_pending, 0)) { InterlockedExchange(&g_display_holding, 0); display_present_flushed(); }
     display_present_done(0);
 }
@@ -6607,7 +6609,12 @@ static void job_present(void *arg) {
     GetClientRect(g_hwnd, &r);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_FRAMEBUFFER_SRGB_);
+    int wflip = 1;                               /* the window's rows are bottom first; the DXGI picture's top first */
+#ifdef _WIN32
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, dx_target((int)r.right, (int)r.bottom, &wflip));
+#else
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, 0);
+#endif
     int ff_skip = 0;                             /* fast-forward (display.c): the monitor shows every ff-th frame */
     {   int display_ff(void); static unsigned ffk; int ff = display_ff(); ff_skip = ff > 1 && (++ffk % (unsigned)ff) != 0; }
     if (t && getenv("TOMO_ALIASLOG")) {              /* diagnosis: textures laid over the presented window texture's memory */
@@ -6632,7 +6639,8 @@ static void job_present(void *arg) {
         int d4[4];
         display_fit(sr[2], sr[3], (int)r.right, (int)r.bottom, d4);      /* 16:9, or wider with widescreen */
         if (d4[2] != r.right || d4[3] != r.bottom) { glColorMaski(0, 1, 1, 1, 1); glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT); }      /* the game's next draw restores its own mask */
-        glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], d4[0], r.bottom - d4[1], d4[0] + d4[2], r.bottom - d4[1] - d4[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (wflip) glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], d4[0], r.bottom - d4[1], d4[0] + d4[2], r.bottom - d4[1] - d4[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        else glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], d4[0], d4[1], d4[0] + d4[2], d4[1] + d4[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (g_drawlog_frame >= 0 && frame == g_drawlog_frame + 1) save_bmp("frame_drawlog.bmp", t);      /* the frame the draw log describes */
         { int step = nvn_front_take_step_shot(); if (step) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sstep_%03d.bmp", dir ? dir : "", dir ? "/" : "", step - 1); save_bmp(path, t); } }
         nvn_front_draw_tag_clear();
@@ -6920,6 +6928,9 @@ static DWORD WINAPI render_thread(LPVOID arg) {
         const char *e = getenv("TOMO_SWAP_INTERVAL");
         int si = e ? atoi(e) : gfx_options()->present == 2 ? 0 : 1;
         if (swap_interval) swap_interval(si);
+#ifdef _WIN32
+        g_swap_si = si;
+#endif
         printf("nvn_gl: swap interval %d (%s)\n", si, e ? "TOMO_SWAP_INTERVAL" : si ? "the flip waits for the vertical blank: no tearing" : "vsync = off: tearing allowed");
     }
     g_debug = getenv("SSBU_GLDEBUG") != NULL;
