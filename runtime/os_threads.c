@@ -162,6 +162,15 @@ static void sleep_ns(int64_t ns) {
  * Off by default: three pinned processors on a busy PC cost frame rate (measured in the round: see R6_fake_audit.md). */
 static int g_cc = -1;
 static DWORD_PTR g_cc_core[3];
+/* RELAXED after start-up (2026-10-30): the threads below the main thread's priority (the game's LowPriorityJobExecuter
+ * 0-2 at 22, SaveDataMgr 24, ParallelDecomp 19 ...) may run on any performance core once the game is running. Pinned,
+ * each shared its core with the main thread and a job pool thread and only ran in their gaps, so a job the main thread
+ * then waited for took 60-110 ms (island house view: 241 frames over 20 ms in 2 min, 7-10 s of main-thread waits;
+ * unpinned 121-153 frames, under 1 s). The start-up stays pinned (the game sizes child heaps from free memory there and
+ * raced with everything unpinned, 2026-10-25). TOMO_CC_RELAX=0: pinned throughout, as before. */
+static DWORD_PTR g_cc_all;
+static volatile LONG g_cc_relaxed;
+static int cc_relax_on(void) { static int o = -1; if (o < 0) { const char *e = getenv("TOMO_CC_RELAX"); o = e ? atoi(e) != 0 : 1; } return o; }
 static int console_cores(void) {
     if (g_cc < 0) {
         int n = 0, on = 0;
@@ -187,6 +196,7 @@ static int console_cores(void) {
                         at += s->Size;
                     }
                 free(buf);
+                for (int i = 0; i < k; i++) if (cls[i] == top) g_cc_all |= (DWORD_PTR)1 << lp[i];
                 for (int b = (int)(sizeof(DWORD_PTR) * 8) - 1; b >= 0 && n < 3; b--) {
                     int i = 0, dup = 0;
                     while (i < k && lp[i] != b) i++;
@@ -199,6 +209,7 @@ static int console_cores(void) {
             for (int b = (int)(sizeof(DWORD_PTR) * 8) - 1; b >= 0 && n < 3; b--)      /* from the top, every second processor: not two hardware threads of one core */
                 if (proc >> b & 1) { g_cc_core[n++] = (DWORD_PTR)1 << b; b--; }
             on = n == 3;
+            if (!g_cc_all) g_cc_all = proc;
             /* The process one class above normal: the three processors are the game's, and the other programs' threads (a
              * browser, another game) took them for whole time slices: the island at frame_rate = 60 came out at 52-54 fps with
              * frames of 30-40 ms among them, 60.0 with this (2026-10-25). Only these three are affected: nothing else of ours is
@@ -213,12 +224,21 @@ static int console_cores(void) {
     return g_cc;
 }
 uint64_t os_console_lp_mask(void) { return console_cores() ? (uint64_t)(g_cc_core[0] | g_cc_core[1] | g_cc_core[2]) : 0; }      /* display.c: host threads stay off these cores */
-static void apply_sched(HANDLE h, uint64_t core_mask) {
+static void apply_sched(HANDLE h, uint64_t core_mask, int prio) {
     DWORD_PTR m = 0;
     if (!console_cores() || !h) return;
+    if (g_cc_relaxed && prio >= 17 && g_cc_all) { SetThreadAffinityMask(h, g_cc_all); SetThreadPriorityBoost(h, TRUE); return; }
     for (int i = 0; i < 3; i++) if (core_mask >> i & 1) m |= g_cc_core[i];
     SetThreadAffinityMask(h, m ? m : g_cc_core[0]);
     SetThreadPriorityBoost(h, TRUE);
+}
+void os_cc_relax(void) {                              /* display.c, two seconds of frames after the first present */
+    if (!console_cores() || !cc_relax_on() || InterlockedExchange(&g_cc_relaxed, 1)) return;
+    int n = 0;
+    for (int h = 0; h < BUCKETS; h++)
+        for (Obj *o = g_table[h]; o; o = o->next)
+            if (o->thread && !o->finished && o->priority >= 17) { apply_sched(o->thread, o->core_mask, o->priority); n++; }
+    printf("nn::os: console core model relaxed: %d threads below the main thread's priority may run on any performance core (TOMO_CC_RELAX=0: pinned)\n", n);
 }
 static int host_priority(int prio) {
     if (console_cores()) {
@@ -477,12 +497,19 @@ static void os_StartThread(Ctx *c) {
           (unsigned long long)o->fn, o->priority, o->ideal_core, (unsigned long long)o->core_mask, (unsigned long long)o->stack_size, (unsigned long long)c->x[30]);
     InterlockedIncrement(&g_thread_count);
     o->thread = CreateThread(NULL, (SIZE_T)256 << 20, thread_main, o, STACK_SIZE_PARAM_IS_A_RESERVATION | CREATE_SUSPENDED, NULL);
-    if (o->thread) { SetThreadPriority(o->thread, host_priority(o->priority)); apply_sched(o->thread, o->core_mask); ResumeThread(o->thread); }
+    if (o->thread && o->name) {                       /* the game's name on the host thread too (debuggers, profilers, the sampler) */
+        typedef HRESULT (WINAPI *set_desc_t)(HANDLE, PCWSTR);
+        static set_desc_t set_desc; static int looked;
+        if (!looked) { looked = 1; set_desc = (set_desc_t)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription"); }
+        wchar_t w[64]; int n = MultiByteToWideChar(CP_UTF8, 0, (const char *)(uintptr_t)o->name, -1, w, 63);
+        if (set_desc && n > 0) { w[63] = 0; set_desc(o->thread, w); }
+    }
+    if (o->thread) { SetThreadPriority(o->thread, host_priority(o->priority)); apply_sched(o->thread, o->core_mask, o->priority); ResumeThread(o->thread); }
 }
 /* boot.c, on the main guest thread before the game starts: main.npdm gives it core 0 and priority 44 - 28 = 16 */
 void os_apply_main_sched(void) {
     if (!console_cores()) return;
-    apply_sched(GetCurrentThread(), 1ull << OS_DEFAULT_CORE);
+    apply_sched(GetCurrentThread(), 1ull << OS_DEFAULT_CORE, OS_DEFAULT_PRIORITY);
     SetThreadPriority(GetCurrentThread(), host_priority(OS_DEFAULT_PRIORITY));
 }
 static void os_WaitThread(Ctx *c) { Obj *o = obj(A0); if (o->thread) WaitForSingleObject(o->thread, INFINITE); }
@@ -499,7 +526,7 @@ static void os_ChangeThreadPriority(Ctx *c) {
     int old = o->priority;
     oslog("  change priority of %s: %d -> %d (called from %llx)\n", A0 == (uint64_t)(uintptr_t)g_main_thread ? "the main thread" : o->name ? (const char *)(uintptr_t)o->name : "?", old, (int)A1, (unsigned long long)c->x[30]);
     o->priority = (int)A1;
-    if (o->thread) SetThreadPriority(o->thread, host_priority(o->priority));
+    if (o->thread) { SetThreadPriority(o->thread, host_priority(o->priority)); if (g_cc_relaxed && (old >= 17) != (o->priority >= 17)) apply_sched(o->thread, o->core_mask, o->priority); }
     else if (A0 == (uint64_t)(uintptr_t)g_main_thread || A0 == t_thread) SetThreadPriority(GetCurrentThread(), host_priority(o->priority));
     RET((int64_t)old);
 }
@@ -540,12 +567,12 @@ static void os_SetThreadCoreMask(Ctx *c) {            /* (ThreadType*, int ideal
           ideal, (unsigned long long)mask, o->ideal_core, (unsigned long long)o->core_mask, o->thread ? "running" : "not started", (unsigned long long)c->x[30]);
     int is_self = t_thread ? A0 == t_thread : (!A0 || A0 == (uint64_t)(uintptr_t)g_main_thread);      /* the calling thread names itself */
     HANDLE h = o->thread ? o->thread : is_self ? GetCurrentThread() : NULL;                             /* NULL: not started yet (applied at StartThread) */
-    if (ideal == -2) { o->ideal_core = OS_DEFAULT_CORE; o->core_mask = 1ull << OS_DEFAULT_CORE; apply_sched(h, o->core_mask); return; }   /* IdealCoreUseDefaultValue: mask is ignored */
-    if (ideal == -3) { o->core_mask = mask; apply_sched(h, o->core_mask); return; }                           /* IdealCoreNoUpdate */
+    if (ideal == -2) { o->ideal_core = OS_DEFAULT_CORE; o->core_mask = 1ull << OS_DEFAULT_CORE; apply_sched(h, o->core_mask, o->priority); return; }   /* IdealCoreUseDefaultValue: mask is ignored */
+    if (ideal == -3) { o->core_mask = mask; apply_sched(h, o->core_mask, o->priority); return; }                           /* IdealCoreNoUpdate */
     o->core_mask = mask;
     if (ideal == -1) { if (!(mask >> (o->ideal_core & 63) & 1)) o->ideal_core = mask ? (int)__builtin_ctzll(mask) : OS_DEFAULT_CORE; }   /* IdealCoreDontCare */
     else o->ideal_core = ideal;
-    apply_sched(h, o->core_mask);
+    apply_sched(h, o->core_mask, o->priority);
 }
 static void os_GetThreadCoreMask(Ctx *c) {            /* (int *outIdealCore, Bit64 *outMask, const ThreadType*) */
     Obj *o = thread_obj(A2);
@@ -1128,7 +1155,7 @@ static void pt_create(Ctx *c) {
     LeaveCriticalSection(&o->cs);
     if (!o->thread) { VirtualFree(stack, 0, MEM_RELEASE); o->stack = 0; o->is_pthread = 0; RET(P_EAGAIN); return; }
     SetThreadPriority(o->thread, host_priority(o->priority));
-    apply_sched(o->thread, o->core_mask);
+    apply_sched(o->thread, o->core_mask, o->priority);
     wr64(A0, o->key);
     ResumeThread(o->thread);
     RET(0);
