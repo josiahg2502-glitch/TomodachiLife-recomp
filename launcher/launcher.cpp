@@ -191,7 +191,10 @@ const std::vector<Option>& options() {
         {"WIDESCREEN", "widescreen", "off", {{"off", "Off (16:9)"}, {"auto", "Fit the monitor"}, {"21:9", "21:9"}, {"32:9", "32:9"}}},
         {"VSYNC", "vsync", "auto", {{"auto", "Automatic"}, {"display", "Follow the display"}, {"clock", "Own 60 Hz clock"}, {"off", "Off"}}},
         {"VOLUME", "volume", "auto", {{"auto", "System"}, {"0", "0 %"}, {"10", "10 %"}, {"20", "20 %"}, {"30", "30 %"}, {"40", "40 %"}, {"50", "50 %"}, {"60", "60 %"}, {"70", "70 %"}, {"80", "80 %"}, {"90", "90 %"}, {"100", "100 %"}}},
-        {"LANGUAGE", "language", "auto", {{"auto", "Automatic"}, {"en", "English"}, {"fr", "Francais"}, {"de", "Deutsch"}, {"es", "Espanol"}, {"it", "Italiano"}, {"nl", "Nederlands"}, {"ja", "Japanese"}}},
+        // the game's 13 message sets (romfs/Mals: USen EUen USfr EUfr EUde USes EUes EUit EUnl JPja KRko CNzh TWzh); "en" alone meant en-GB
+        {"LANGUAGE", "language", "auto", {{"auto", "Automatic"}, {"en-US", "English (US)"}, {"en-GB", "English (UK)"}, {"fr-CA", "Francais (Canada)"}, {"fr", "Francais (France)"},
+                                          {"de", "Deutsch"}, {"es-419", "Espanol (Latinoamerica)"}, {"es", "Espanol (Espana)"}, {"it", "Italiano"}, {"nl", "Nederlands"},
+                                          {"ja", "Japanese"}, {"ko", "Korean"}, {"zh-Hans", "Chinese (Simplified)"}, {"zh-Hant", "Chinese (Traditional)"}}},
         {"IN-GAME MENU (F1)", "menu", "on", {{"on", "On"}, {"off", "Off"}}},
         {"FRAME-TIME COUNTER", "frame_time_overlay", "off", {{"off", "Off"}, {"on", "On"}}},
         // Local Play (the game's Mii and creation exchange) over a network instead of the console's radio (net_relay.c)

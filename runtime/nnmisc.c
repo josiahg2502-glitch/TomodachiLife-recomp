@@ -504,13 +504,13 @@ static void settings_CodeEqualsLanguage(Ctx *c) {         /* operator==(const La
 }
 /* nn::oe::GetDesiredLanguage: the language the application should use = the system language when the application
  * supports it, otherwise the system's choice among the supported ones. The system language here is the Windows
- * display language of the user. Languages this game ships (its message files): ja, en-US, en-GB, fr, fr-CA, de, it,
- * es, es-419, zh-Hans, zh-Hant, ko, nl, ru; anything else gives en-US (NOT VERIFIED: the console decides from the
+ * display language of the user. Languages this game ships (its message sets, romfs/Mals): ja, en-US, en-GB, fr, fr-CA,
+ * de, it, es, es-419, zh-Hans, zh-Hant, ko, nl; anything else gives en-US (NOT VERIFIED: the console decides from the
  * supported-language mask of the application's control data, which was not read here).
  * SSBU_LANGUAGE=<code> overrides (for example SSBU_LANGUAGE=en-US). */
 static uint64_t desired_language(void) {
     static uint64_t cached;
-    static const char *const supported[] = {"ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
+    static const char *const supported[] = {"ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl"};
     if (cached) return cached;
     char name[LOCALE_NAME_MAX_LENGTH * 3] = "", pick[16] = "en-US";
     const char *env = getenv("SSBU_LANGUAGE");

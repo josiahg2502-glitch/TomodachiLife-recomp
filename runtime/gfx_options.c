@@ -155,7 +155,7 @@ static const char *const k_default_ini =
 ";   SSBU_VOLUME=<0..100> wins. Music and effects apart: the game's own Options > Sound.\r\n"
 "volume = auto\r\n"
 "\r\n"
-"; language = auto | ja | en-US | en-GB | fr | fr-CA | de | it | es | es-419 | zh-Hans | zh-Hant | ko | nl | ru\r\n"
+"; language = auto | en-US | en-GB | fr-CA | fr | de | es-419 | es | it | nl | ja | ko | zh-Hans | zh-Hant\r\n"
 ";   auto: the Windows display language. SSBU_LANGUAGE=<code> wins. Read at start.\r\n"
 "language = auto\r\n";
 
