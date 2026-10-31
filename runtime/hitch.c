@@ -209,8 +209,9 @@ void hitch_frame(long long frame, double ms, int battle) {
     g_hitch_frames++; g_hitch_total_ms += ms;
     if (said < 4000) {
         said++;
-        printf("hitch: frame %lld%s %.1f ms | system CPU %.0f%% busy, this process %.0f%% of it | %lu page faults |", frame, battle ? " (battle)" : "", ms,
-               d_all > 0 ? 100.0 * (d_all - d_idle) / d_all : 0.0, d_all - d_idle > 0 ? 100.0 * d_us / (d_all - d_idle) : 0.0, (unsigned long)d_faults);
+        FILETIME now; GetSystemTimeAsFileTime(&now);
+        printf("hitch: frame %lld%s %.1f ms at %.2f s | system CPU %.0f%% busy, this process %.0f%% of it | %lu page faults |", frame, battle ? " (battle)" : "", ms,
+               (double)(FT(now) - FT(c0)) / 1e7, d_all > 0 ? 100.0 * (d_all - d_idle) / d_all : 0.0, d_all - d_idle > 0 ? 100.0 * d_us / (d_all - d_idle) : 0.0, (unsigned long)d_faults);
         for (int i = 0, shown = 0; i < n && shown < 7; i++) { if (b[i].ms < 1.5 && shown) continue; printf(" [%.1f ms %s]", b[i].ms, b[i].key); shown++; }
         printf("\n");
     }

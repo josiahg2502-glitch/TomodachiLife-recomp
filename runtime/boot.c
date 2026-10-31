@@ -498,6 +498,7 @@ int main(int argc, char **argv) {
                 Sleep(left < 0 ? 20 : 100);
             }
             printf("shaders: %lld known programs made ready before the game started (%.1f s)\n", total, (double)(GetTickCount64() - t0) / 1000.0);
+            { void tomo_timeline(const char *what); tomo_timeline("the game starts (shaders ready)"); }
             display_title_note("starting the game");
         }
     }

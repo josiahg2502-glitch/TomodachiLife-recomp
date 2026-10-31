@@ -6696,6 +6696,7 @@ static void job_present(void *arg) {
 #endif
     LONG64 pf0 = pf_now();
     drawsig_frame(frame);
+    if (frame == 1) { void tomo_timeline(const char *what); tomo_timeline("the game's first picture"); }
     if (shot == -2) { shot = getenv("SSBU_SHOT") ? atoi(getenv("SSBU_SHOT")) : -1; every = getenv("SSBU_SHOT_EVERY") ? atoi(getenv("SSBU_SHOT_EVERY")) : 0; shot_from = getenv("SSBU_SHOT_FROM") ? atoi(getenv("SSBU_SHOT_FROM")) : 0; shot_to = getenv("SSBU_SHOT_TO") ? atoi(getenv("SSBU_SHOT_TO")) : 0x7fffffff; }
     {   /* debug: TOMO_DBGBUF=<frame>: 64 KB of floats at storage binding 38 for override shaders (TOMO_SHOVR) to write; rows of 80 printed at that frame */
         static int dbf = -2;

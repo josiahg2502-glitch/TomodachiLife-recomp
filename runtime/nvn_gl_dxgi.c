@@ -147,7 +147,8 @@ static int dx_check_back(ID3D11Texture2D *bb, int want) {
 static int dx_present(int interval) {
     if (g_dx.state != 1) return 0;
     if (!g_dx.locked) return 0;                    /* nothing drawn since the last present (cannot happen: job_present locks) */
-    int want = g_dx.checks < 3 && g_dx.presents % 30 == 0 ? dx_check() : -1;
+    int want = -1;
+    if (g_dx.checks < 3 && g_dx.presents % 30 == 0) { HS_IN("DXGI check: OpenGL read-back", 0); want = dx_check(); HS_OUT(); }
     static int verify = -1; static unsigned gl_box[3];      /* TEST: TOMO_DXGI_VERIFY=1: every present, a 64x16 patch at the top middle as OpenGL drew
                                                              * it and as the back buffer got it (a stale or half-done copy = a mismatch, logged) */
     if (verify < 0) verify = getenv("TOMO_DXGI_VERIFY") ? atoi(getenv("TOMO_DXGI_VERIFY")) : 0;
@@ -160,7 +161,7 @@ static int dx_present(int interval) {
         gl_box[0] = gl_box[1] = gl_box[2] = 0;
         for (int i = 0; i < 64 * 16; i++) { gl_box[0] += px[i * 4]; gl_box[1] += px[i * 4 + 1]; gl_box[2] += px[i * 4 + 2]; }
     }
-    g_dx.unlock(g_dx.idev, 1, &g_dx.iobj); g_dx.locked = 0;
+    { HS_IN("DXGI: shared picture handed back (unlock)", 0); g_dx.unlock(g_dx.idev, 1, &g_dx.iobj); g_dx.locked = 0; HS_OUT(); }
     ID3D11Texture2D *bb = NULL;
     if (FAILED(IDXGISwapChain1_GetBuffer(g_dx.sc, 0, &k_iid_tex2d, (void **)&bb))) { dx_off("the swap chain's back buffer is not there"); return 0; }
     ID3D11DeviceContext_CopyResource(g_dx.ctx, (ID3D11Resource *)bb, (ID3D11Resource *)g_dx.pic);
@@ -185,7 +186,9 @@ static int dx_present(int interval) {
         }
     }
     if (want >= 0) {
-        if (!dx_check_back(bb, want)) { ID3D11Texture2D_Release(bb); dx_off("the shared picture did not reach the swap chain"); return 0; }
+        int same;
+        { HS_IN("DXGI check: swap chain read-back", 0); same = dx_check_back(bb, want); HS_OUT(); }
+        if (!same) { ID3D11Texture2D_Release(bb); dx_off("the shared picture did not reach the swap chain"); return 0; }
         g_dx.checks++;
     }
     {   /* TOMO_DXGI_SHOT=<n> (TEST): the swap chain's back buffer at the n-th present, as dxgi_<n>.bmp (what the screen gets) */
@@ -220,7 +223,8 @@ static int dx_present(int interval) {
         }
     }
     ID3D11Texture2D_Release(bb);
-    HRESULT hr = IDXGISwapChain1_Present(g_dx.sc, (UINT)interval, 0);
+    HRESULT hr;
+    { HS_IN("DXGI Present", 0); hr = IDXGISwapChain1_Present(g_dx.sc, (UINT)interval, 0); HS_OUT(); }
     g_dx.presents++;
     if (FAILED(hr)) { char why[80]; snprintf(why, sizeof why, "Present failed: 0x%08lx", (unsigned long)hr); dx_off(why); return 0; }
     return 1;

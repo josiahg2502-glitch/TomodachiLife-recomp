@@ -50,7 +50,7 @@ static int ga_init(void) {
     printf("nvn_gl: ASTC textures decoded on the GPU (astc_decode.comp)%s\n", g_ga.check ? "; every level checked against the software decoder" : "");
     return 1;
 }
-static int ga_on(void) { return g_ga.state > 0 || (!g_ga.state && ga_init()); }
+static int ga_on(void) { if (g_ga.state) return g_ga.state > 0; HS_IN("ASTC decoder made (driver)", 0); int ok = ga_init(); HS_OUT(); return ok; }
 /* Before any GL command that reads a texture (a draw, a copy, a blit, a read-back): the texels stored by the decoder are visible. */
 static void ga_barrier(void) {
     if (!g_ga.pending) return;
