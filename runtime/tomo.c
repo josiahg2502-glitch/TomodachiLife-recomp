@@ -921,10 +921,20 @@ static void amix_run(void) {                            /* sub-mixes into their 
     }
 }
 static volatile unsigned long long g_audio_updates;     /* renderer updates so far (5 ms each): a clock for test logs */
+unsigned long long tomo_audio_clock(void) { return g_audio_updates; }      /* (prof15.c burst lines) */
 static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t frames) {
     static int said;
     if (!in || !out) return 0;
     g_audio_updates++;
+    {   static int rl = -1; static LARGE_INTEGER t0, f;      /* TOMO_AUDIOLOG>=4: the update rate against the wall clock (200 a second when the game keeps up) */
+        if (rl < 0) { rl = getenv("TOMO_AUDIOLOG") && atoi(getenv("TOMO_AUDIOLOG")) >= 4; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0); }
+        if (rl && g_audio_updates % 2000 == 0) {
+            LARGE_INTEGER t; QueryPerformanceCounter(&t);
+            printf("audio-rate: 2000 updates in %.0f ms (%.0f a second; 200 = real time) @%llu\n", (double)(t.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart,
+                   2000.0 * f.QuadPart / (double)(t.QuadPart - t0.QuadPart), (unsigned long long)g_audio_updates);
+            t0 = t;
+        }
+    }
     uint32_t rev = (rd32(in) >> 24) - '0';
     uint32_t vsz = rev >= 15 ? 0x188 : 0x170, esz_out = rev >= 9 ? 0x90 : 0x10;
     uint32_t npool = rd32(in + 8) / 0x20, nvoice = rd32(in + 0xc) / vsz, neffect = rd32(in + 0x14) / 0xc0, nsink = rd32(in + 0x1c) / 0x140;
@@ -956,6 +966,8 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
         uint64_t wb = v + (rev >= 15 ? 0x78 : 0x60);
         SilentVoice *s = &g_sv[id < 1024 ? id : 0];
         if (is_new || !s->seen) { memset(s, 0, sizeof *s); s->seen = 1; s->last_index = index; s->af = -1; }
+        {   static int nl = -1; if (nl < 0) nl = getenv("TOMO_AUDIOLOG") && atoi(getenv("TOMO_AUDIOLOG")) >= 4;     /* TEST: every new 16-bit voice (speech), audible or not */
+            if (nl && is_new && in_use && rd8(v + 0xb) == 2) printf("audio-voice NEW: update %llu voice %u rate %u vol %.3f play %u\n", (unsigned long long)g_audio_updates, id, rate, rdf(v + 0x20), play); }
         if (in_use && play == 0 && !is_new) {
             s->popped += (index - s->last_index) & 3;    /* the client released that many buffers since the last update */
             s->last_index = index;
@@ -1481,13 +1493,15 @@ static void heaplog_install(void) {
 /* TEST ONLY, TOMO_MEMSCAN=<step>:<op>,... with SSBU_SEQ: a search for a game value that follows the input (the hand cursor).
  * At the start of each listed sequence step the 32-bit floats of the game's heap (committed pages of the write-watched
  * regions) are compared with the previous look: snap = copy everything; up / down = keep the floats that grew / shrank by
- * 0.01..100000 since the previous look; same = keep those unchanged. Up to 40 survivors are printed after each look. */
+ * 0.01..100000 since the previous look; same = keep those unchanged. As 32-bit words instead: C changed, K kept, O back to
+ * the snap's value (a focus that moves away and back). Up to 40 survivors are printed after each look. */
 int nvn_ww_regions(uint64_t *base, uint64_t *size, int max);      /* nvn_gl.c */
-typedef struct { uint64_t a; float v; } MsCand;
+typedef struct { uint64_t a; float v; uint32_t i0; } MsCand;
 static struct { uint64_t a, n; uint8_t *copy; } g_ms_snap[4096];
 static int g_ms_nsnap;
 static MsCand *g_ms; static size_t g_ms_n;
 static int ms_keep(float was, float now, char op) {
+    if (op == 'C' || op == 'K') { uint32_t w, n; memcpy(&w, &was, 4); memcpy(&n, &now, 4); return op == 'C' ? n != w : n == w; }   /* 32-bit words: changed, kept */
     if (now != now || was != was || now > 1e9f || now < -1e9f) return 0;
     float d = now - was;
     return op == 'u' ? d > 0.01f && d < 1e5f : op == 'd' ? -d > 0.01f && -d < 1e5f : d == 0.0f && was != 0.0f;
@@ -1542,7 +1556,7 @@ void tomo_memscan_step(int step) {
             for (uint64_t w = 0; w < g_ms_snap[i].n / 4; w++)
                 if (ms_keep(was[w], now[w], op)) {
                     if (k == cap) { cap = cap ? cap * 2 : 1 << 20; g_ms = realloc(g_ms, cap * sizeof *g_ms); }
-                    g_ms[k].a = g_ms_snap[i].a + w * 4; g_ms[k++].v = now[w];
+                    g_ms[k].a = g_ms_snap[i].a + w * 4; memcpy(&g_ms[k].i0, &was[w], 4); g_ms[k++].v = now[w];
                 }
             free(g_ms_snap[i].copy);
         }
@@ -1557,13 +1571,17 @@ void tomo_memscan_step(int step) {
                 }
             }
             float now = *(const float *)(uintptr_t)g_ms[i].a;
-            if (ms_keep(g_ms[i].v, now, op)) { g_ms[k].a = g_ms[i].a; g_ms[k++].v = now; }
+            uint32_t nw, vw; memcpy(&nw, &now, 4); memcpy(&vw, &g_ms[i].v, 4);
+            if (op == 'O' ? nw == g_ms[i].i0 && nw != vw : ms_keep(g_ms[i].v, now, op)) { g_ms[k].a = g_ms[i].a; g_ms[k].i0 = g_ms[i].i0; g_ms[k++].v = now; }      /* O: back to the snap's word */
         }
     }
     g_ms_n = k;
-    printf("memscan: step %d %s: %llu candidates%c", step, op == 'u' ? "up" : op == 'd' ? "down" : "same", (unsigned long long)k, 10);
-    for (size_t i = 0; i < k && i < 40; i++) printf("memscan:   %llx = %g (next %g %g)%c", (unsigned long long)g_ms[i].a, g_ms[i].v,
-                                                    *(const float *)(uintptr_t)(g_ms[i].a + 4), *(const float *)(uintptr_t)(g_ms[i].a + 8), 10);
+    printf("memscan: step %d %c: %llu candidates%c", step, op, (unsigned long long)k, 10);
+    for (size_t i = 0; i < k && i < 40; i++)
+        if (op == 'C' || op == 'K' || op == 'O') { uint32_t vw; memcpy(&vw, &g_ms[i].v, 4); printf("memscan:   %llx = %d (snap %d; next %d %d)%c", (unsigned long long)g_ms[i].a, (int)vw, (int)g_ms[i].i0,
+                                                        *(const int *)(uintptr_t)(g_ms[i].a + 4), *(const int *)(uintptr_t)(g_ms[i].a + 8), 10); }
+        else printf("memscan:   %llx = %g (next %g %g)%c", (unsigned long long)g_ms[i].a, g_ms[i].v,
+                    *(const float *)(uintptr_t)(g_ms[i].a + 4), *(const float *)(uintptr_t)(g_ms[i].a + 8), 10);
 }
 
 static void ret7(Ctx *c) { RET(7); }

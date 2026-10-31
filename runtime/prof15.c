@@ -271,7 +271,7 @@ static DWORD WINAPI burst_thread(LPVOID arg) {
         else if (in && t.QuadPart - last_busy.QuadPart > f.QuadPart / 200) {
             double ms = (double)(last_busy.QuadPart - start.QuadPart) * 1000.0 / (double)f.QuadPart, mc = (double)(prev - b0) / 1e6;
             in = 0;
-            if (ms > 5) { n++; sum_ms += ms; sum_mc += mc; if (ms > max_ms) max_ms = ms; printf("burst: %s %.1f ms, %.1f Mcycles\n", want, ms, mc); fflush(stdout); }
+            if (ms > 5) { n++; sum_ms += ms; sum_mc += mc; if (ms > max_ms) max_ms = ms; { unsigned long long tomo_audio_clock(void); printf("burst: %s %.1f ms, %.1f Mcycles, ended @%llu\n", want, ms, mc, tomo_audio_clock()); } fflush(stdout); }
         }
         prev = q;
         if (t.QuadPart > period_end) {
