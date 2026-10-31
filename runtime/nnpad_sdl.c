@@ -18,6 +18,7 @@
 #define MAXDEV 16
 #define MAXCFG 64
 #define NTYPE 6
+#define KB_KEYS 3                       /* keys a keyboard target can have */
 static const char *const g_type_key[NTYPE] = {"xbox", "playstation", "switch", "gamecube", "generic", "joystick"};
 enum { SK_NONE = 0, SK_BTN, SK_AXP, SK_AXN, SK_HAT, SK_AXF };
 typedef struct { unsigned char kind, raw; short idx; } Src;     /* raw: joystick numbering (button3, axis2, hat0up); else SDL gamepad names */
@@ -37,7 +38,8 @@ typedef struct {
     char pguid[8][40]; int pnone[8];    /* [players]: a GUID reserves the slot for that device, none = nobody */
     char ignore[16][40]; int nignore;   /* [general] ignore = <GUID>: devices that are never used */
     int kb_player;                      /* -2 auto, -1 none, 0..7 */
-    int kb_vk[24];
+    int kb_vk[24][KB_KEYS];            /* up to KB_KEYS keys a target ("A = ENTER, SPACE"); 0 = none */
+    int kb_scheme;                      /* [keyboard] scheme = pc seen (else old single-key defaults are upgraded) */
     int gc_pro;                         /* [general] gamecube_style = pro: GameCube controllers reach the game as Pro Controllers (default: native) */
 } Cfg;
 typedef struct {
@@ -55,8 +57,18 @@ static const char *const g_gpax[6] = {"leftx", "lefty", "rightx", "righty", "lef
 static const char *const g_stk[4] = {"LX", "LY", "RX", "RY"};
 static const char *const g_kbn[24] = {"A", "B", "X", "Y", "STICK_L", "STICK_R", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN",
     "LSTICK_LEFT", "LSTICK_UP", "LSTICK_RIGHT", "LSTICK_DOWN", "RSTICK_LEFT", "RSTICK_UP", "RSTICK_RIGHT", "RSTICK_DOWN"};
-static const int g_kb_default[24] = {'Z', 'X', 'C', 'V', 0, 0, 'Q', 'E', 'A', 'S', VK_RETURN, VK_BACK, 'J', 'I', 'L', 'K',
-    VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, 'F', 'T', 'H', 'G'};      /* right stick: F T H G (Tomodachi Life's camera) */
+/* The keyboard as a PC player expects it (2026-10-31, the user: "keyboard and mouse controls ... aren't good at all"): the
+ * hand on W A S D and the arrows, confirm on Enter / Space, back on Esc / Backspace / B, the X and Y letters (and M menu,
+ * R residents) for the buttons the game's prompts show, Q / E tabs, Z / C the triggers, = and - the + and - buttons, the
+ * camera on I J K L, the d-pad on the number pad. The mouse is nnhid.c's. */
+static const int g_kb_default[24][KB_KEYS] = {
+    {VK_RETURN, VK_SPACE}, {VK_ESCAPE, VK_BACK, 'B'}, {'X', 'M'}, {'Y', 'R'}, {0}, {0}, {'Q'}, {'E'}, {'Z'}, {'C'},
+    {VK_OEM_PLUS, VK_ADD}, {VK_OEM_MINUS, VK_SUBTRACT}, {VK_NUMPAD4}, {VK_NUMPAD8}, {VK_NUMPAD6}, {VK_NUMPAD2},
+    {'A', VK_LEFT}, {'W', VK_UP}, {'D', VK_RIGHT}, {'S', VK_DOWN}, {'J'}, {'I'}, {'L'}, {'K'}};
+/* The single keys of earlier versions (the default file wrote RSTICK_* = none, the settings menu F T H G): a [keyboard]
+ * holding exactly these and no "scheme" line was never changed by its player and gets the keys above. */
+static const int g_kb_old[24] = {'Z', 'X', 'C', 'V', 0, 0, 'Q', 'E', 'A', 'S', VK_RETURN, VK_BACK, 'J', 'I', 'L', 'K',
+    VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, 'F', 'T', 'H', 'G'};
 
 static CRITICAL_SECTION g_cs;
 static volatile LONG g_cs_ready;
@@ -165,11 +177,14 @@ static const char *const g_default_ini =
 "; and without any pad the keyboard is player 1); 1..8 = that player (merged with the pad of that player); none = no keyboard.\r\n"
 "; The environment variable SSBU_KEYBOARD_PLAYER (0 = none, 1..8) overrides this line. The keyboard counts only while the game window has the focus.\r\n"
 "player = auto\r\n"
-"; Keys: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT F1..F12, NUM0..NUM9, or 0x<virtual key code>; none = unbound.\r\n"
-"A = Z\r\nB = X\r\nX = C\r\nY = V\r\nL = Q\r\nR = E\r\nZL = A\r\nZR = S\r\nPLUS = ENTER\r\nMINUS = BACKSPACE\r\n"
-"STICK_L = none\r\nSTICK_R = none\r\nLEFT = J\r\nUP = I\r\nRIGHT = L\r\nDOWN = K\r\n"
-"LSTICK_LEFT = LEFT\r\nLSTICK_UP = UP\r\nLSTICK_RIGHT = RIGHT\r\nLSTICK_DOWN = DOWN\r\n"
-"RSTICK_LEFT = none\r\nRSTICK_UP = none\r\nRSTICK_RIGHT = none\r\nRSTICK_DOWN = none\r\n"
+"; Keys: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT = - NUM+ NUM- PAGEUP PAGEDOWN F1..F12,\r\n"
+"; NUM0..NUM9, or 0x<virtual key code>; none = unbound; up to three keys with commas. TAB (fast-forward), F1 (PC settings),\r\n"
+"; F11 (full screen) and F12 are taken. The mouse moves the hand (left button A, right button B, wheel zoom).\r\n"
+"scheme = pc\r\n"
+"A = ENTER, SPACE\r\nB = ESC, BACKSPACE, B\r\nX = X, M\r\nY = Y, R\r\nL = Q\r\nR = E\r\nZL = Z\r\nZR = C\r\nPLUS = =, NUM+\r\nMINUS = -, NUM-\r\n"
+"STICK_L = none\r\nSTICK_R = none\r\nLEFT = NUM4\r\nUP = NUM8\r\nRIGHT = NUM6\r\nDOWN = NUM2\r\n"
+"LSTICK_LEFT = A, LEFT\r\nLSTICK_UP = W, UP\r\nLSTICK_RIGHT = D, RIGHT\r\nLSTICK_DOWN = S, DOWN\r\n"
+"RSTICK_LEFT = J\r\nRSTICK_UP = I\r\nRSTICK_RIGHT = L\r\nRSTICK_DOWN = K\r\n"
 "\r\n"
 "; Per device (GUID from --pad-test). Every key is optional; what is missing falls back to [general] and the built-in default:\r\n"
 "; [device 03000000de280000ff11000000007801]\r\n"
@@ -203,18 +218,23 @@ static void cfg_defaults(Cfg *c) {
     c->def.layout = 2; c->def.dz = 0.10f; c->def.outer = 0.98f; c->def.trig = 0.33f; c->def.rstr = 1.0f; c->def.rumble = 1;
     c->kb_player = -2;
     memcpy(c->kb_vk, g_kb_default, sizeof c->kb_vk);
+    c->kb_scheme = 0;
 }
 static int parse_vk(const char *t) {
     char b[24];
     snprintf(b, sizeof b, "%s", t);
     for (char *p = b + strlen(b); p > b && (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r' || p[-1] == '\n'); ) *--p = 0;
     if (!b[0] || !_stricmp(b, "none")) return 0;
+    if (!strcmp(b, "=")) return VK_OEM_PLUS; if (!strcmp(b, "-")) return VK_OEM_MINUS;      /* (before the one-character keys: not letters) */
     if (b[1] == 0) { char ch = b[0]; if (ch >= 'a' && ch <= 'z') ch -= 32; return ch; }
     if (!_stricmp(b, "LEFT")) return VK_LEFT; if (!_stricmp(b, "UP")) return VK_UP;
     if (!_stricmp(b, "RIGHT")) return VK_RIGHT; if (!_stricmp(b, "DOWN")) return VK_DOWN;
     if (!_stricmp(b, "ENTER")) return VK_RETURN; if (!_stricmp(b, "BACKSPACE")) return VK_BACK;
     if (!_stricmp(b, "SPACE")) return VK_SPACE; if (!_stricmp(b, "TAB")) return VK_TAB; if (!_stricmp(b, "ESC")) return VK_ESCAPE;
     if (!_stricmp(b, "SHIFT")) return VK_SHIFT; if (!_stricmp(b, "CTRL")) return VK_CONTROL; if (!_stricmp(b, "ALT")) return VK_MENU;
+    if (!_stricmp(b, "=")) return VK_OEM_PLUS; if (!_stricmp(b, "-")) return VK_OEM_MINUS;
+    if (!_stricmp(b, "NUM+")) return VK_ADD; if (!_stricmp(b, "NUM-")) return VK_SUBTRACT;
+    if (!_stricmp(b, "PAGEUP")) return VK_PRIOR; if (!_stricmp(b, "PAGEDOWN")) return VK_NEXT;
     if ((b[0] == 'F' || b[0] == 'f') && atoi(b + 1) >= 1 && atoi(b + 1) <= 12) return VK_F1 + atoi(b + 1) - 1;
     if (!_strnicmp(b, "NUM", 3) && b[3] >= '0' && b[3] <= '9') return VK_NUMPAD0 + b[3] - '0';
     if (b[0] == '0' && (b[1] == 'x' || b[1] == 'X')) return (int)strtol(b, NULL, 16);
@@ -294,7 +314,12 @@ static void cfg_parse(Cfg *c, char *text) {
             if (!_stricmp(val, "none")) c->pnone[p] = 1; else if (_stricmp(val, "auto")) snprintf(c->pguid[p], sizeof c->pguid[0], "%s", val);
         } else if (sect == 3) {
             if (!_stricmp(key, "player")) c->kb_player = !_stricmp(val, "auto") ? -2 : !_stricmp(val, "none") ? -1 : atoi(val) >= 1 && atoi(val) <= 8 ? atoi(val) - 1 : -2;
-            else for (int i = 0; i < 24; i++) if (!_stricmp(key, g_kbn[i])) c->kb_vk[i] = parse_vk(val);
+            else if (!_stricmp(key, "scheme")) c->kb_scheme = 1;
+            else for (int i = 0; i < 24; i++) if (!_stricmp(key, g_kbn[i])) {          /* one key or several: "A = ENTER, SPACE" */
+                memset(c->kb_vk[i], 0, sizeof c->kb_vk[i]);
+                char *q = val;
+                for (int k = 0; k < KB_KEYS && q && *q; k++) { char *comma = strchr(q, ','); if (comma) *comma = 0; while (*q == ' ') q++; c->kb_vk[i][k] = parse_vk(q); q = comma ? comma + 1 : NULL; }
+            }
         }
     }
 }
@@ -343,6 +368,11 @@ static void cfg_load(int first) {                 /* lock held */
     text = read_file(g_cfg.path, NULL);
     ULONGLONG mt = file_mtime(g_cfg.path);
     if (text) { cfg_parse(&n, text); free(text); }
+    if (!n.kb_scheme) {                                   /* an old [keyboard] its player never changed: the PC keys */
+        int old = 1;
+        for (int i = 0; i < 24; i++) old &= (n.kb_vk[i][0] == g_kb_old[i] || (i >= 20 && !n.kb_vk[i][0])) && !n.kb_vk[i][1];
+        if (old) memcpy(n.kb_vk, g_kb_default, sizeof n.kb_vk);
+    }
     strcpy(n.path, g_cfg.path);
     n.mtime = mt;
     {   const char *l = getenv("SSBU_PAD_LAYOUT");
@@ -793,10 +823,11 @@ int nnpad_keyboard_player(void) {
     unlock();
     return r;
 }
-int nnpad_kb_vk(int idx) {
+int nnpad_kb_vk_at(int idx, int k) {                  /* the k-th key of a target (0 = none) */
     if (!g_inited) { lock(); if (!g_cfg.path[0]) { cfg_load(1); } unlock(); }
-    return idx >= 0 && idx < 24 ? g_cfg.kb_vk[idx] : 0;
+    return idx >= 0 && idx < 24 && k >= 0 && k < KB_KEYS ? g_cfg.kb_vk[idx][k] : 0;
 }
+int nnpad_kb_vk(int idx) { return nnpad_kb_vk_at(idx, 0); }
 
 /* ================================================================ tools: --pad-test, --pad-map */
 static int active_sources(const Dev *d, char out[][24], int max) {
@@ -1371,6 +1402,24 @@ int nnpad_selftest(const NnHidHooks *h) {
         SDL_CloseJoystick(rj); SDL_DetachVirtualJoystick(rid);
     }
 
+    /* ---- the keyboard's keys (no device needed): several keys a target, the upgrade of an untouched old [keyboard] */
+    {   static Cfg kc;
+        static char t1[] = "[keyboard]\nscheme = pc\nA = ENTER, SPACE\nPLUS = =, NUM+\nB = none\n";
+        cfg_defaults(&kc); cfg_parse(&kc, t1);
+        check(kc.kb_vk[0][0] == VK_RETURN && kc.kb_vk[0][1] == VK_SPACE && !kc.kb_vk[0][2] && kc.kb_vk[10][0] == VK_OEM_PLUS && kc.kb_vk[10][1] == VK_ADD && !kc.kb_vk[1][0],
+              "keyboard: several keys a target (A = ENTER, SPACE; PLUS = =, NUM+; B = none)");
+        static char t2[] = "[keyboard]\nA = Z\nB = X\nX = C\nY = V\nL = Q\nR = E\nZL = A\nZR = S\nPLUS = ENTER\nMINUS = BACKSPACE\nLEFT = J\nUP = I\nRIGHT = L\nDOWN = K\n"
+                           "LSTICK_LEFT = LEFT\nLSTICK_UP = UP\nLSTICK_RIGHT = RIGHT\nLSTICK_DOWN = DOWN\nRSTICK_LEFT = F\nRSTICK_UP = T\nRSTICK_RIGHT = H\nRSTICK_DOWN = G\n";
+        static char t3[] = "[keyboard]\nA = Z\nB = X\nX = C\nY = V\nL = Q\nR = E\nZL = A\nZR = S\nPLUS = ENTER\nMINUS = BACKSPACE\nLEFT = J\nUP = I\nRIGHT = L\nDOWN = K\n"
+                           "LSTICK_LEFT = LEFT\nLSTICK_UP = UP\nLSTICK_RIGHT = RIGHT\nLSTICK_DOWN = DOWN\nRSTICK_LEFT = F\nRSTICK_UP = T\nRSTICK_RIGHT = H\nRSTICK_DOWN = P\n";
+        int up = 1, kept = 1;
+        cfg_defaults(&kc); cfg_parse(&kc, t2);
+        if (!kc.kb_scheme) { int old = 1; for (int i = 0; i < 24; i++) old &= (kc.kb_vk[i][0] == g_kb_old[i] || (i >= 20 && !kc.kb_vk[i][0])) && !kc.kb_vk[i][1]; up = old; }
+        cfg_defaults(&kc); cfg_parse(&kc, t3);
+        if (!kc.kb_scheme) { int old = 1; for (int i = 0; i < 24; i++) old &= (kc.kb_vk[i][0] == g_kb_old[i] || (i >= 20 && !kc.kb_vk[i][0])) && !kc.kb_vk[i][1]; kept = !old; }
+        check(up && kept, "keyboard: an untouched old [keyboard] gets the PC keys, a changed one is kept");
+    }
+
     /* ---- clean up */
     for (int i = 0; i < 8; i++) { if (id[i] && js[i]) { SDL_CloseJoystick(js[i]); SDL_DetachVirtualJoystick(id[i]); } }
     settle();
@@ -1395,17 +1444,37 @@ void nnpad_vk_name(int vk, char *o, int n) {         /* the spelling parse_vk re
     case VK_SPACE: snprintf(o, (size_t)n, "SPACE"); return; case VK_TAB: snprintf(o, (size_t)n, "TAB"); return;
     case VK_ESCAPE: snprintf(o, (size_t)n, "ESC"); return; case VK_SHIFT: snprintf(o, (size_t)n, "SHIFT"); return;
     case VK_CONTROL: snprintf(o, (size_t)n, "CTRL"); return; case VK_MENU: snprintf(o, (size_t)n, "ALT"); return;
+    case VK_OEM_PLUS: snprintf(o, (size_t)n, "="); return; case VK_OEM_MINUS: snprintf(o, (size_t)n, "-"); return;
+    case VK_ADD: snprintf(o, (size_t)n, "NUM+"); return; case VK_SUBTRACT: snprintf(o, (size_t)n, "NUM-"); return;
+    case VK_PRIOR: snprintf(o, (size_t)n, "PAGEUP"); return; case VK_NEXT: snprintf(o, (size_t)n, "PAGEDOWN"); return;
     }
     if (vk >= VK_F1 && vk <= VK_F12) { snprintf(o, (size_t)n, "F%d", vk - VK_F1 + 1); return; }
     if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) { snprintf(o, (size_t)n, "NUM%d", vk - VK_NUMPAD0); return; }
     snprintf(o, (size_t)n, "0x%02X", vk);
 }
+void nnpad_kb_text(int idx, char *o, int n) {         /* all keys of a target, as shown: "ENTER / SPACE" */
+    char nm[16];
+    int at = 0;
+    o[0] = 0;
+    for (int k = 0; k < KB_KEYS && at < n - 1; k++) {
+        int vk = nnpad_kb_vk_at(idx, k);
+        if (!vk) continue;
+        nnpad_vk_name(vk, nm, sizeof nm);
+        at += snprintf(o + at, (size_t)(n - at), "%s%s", at ? " / " : "", nm);
+    }
+    if (!at) snprintf(o, (size_t)n, "none");
+}
 int nnpad_kb_player_cfg(void) { nnpad_kb_vk(0); return g_cfg.kb_player; }      /* -2 auto, -1 none, 0..7 (the file's value) */
 static void kb_write(void) {                          /* lock held */
     char body[2048], nm[16];
-    int o = snprintf(body, sizeof body, "; written by the settings menu (F1); key names: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT F1..F12 NUM0..NUM9, 0x.. or none\r\n");
-    o += snprintf(body + o, sizeof body - (size_t)o, "player = %s\r\n", g_cfg.kb_player == -2 ? "auto" : g_cfg.kb_player == -1 ? "none" : (snprintf(nm, sizeof nm, "%d", g_cfg.kb_player + 1), nm));
-    for (int i = 0; i < 24 && o < (int)sizeof body - 64; i++) { nnpad_vk_name(g_cfg.kb_vk[i], nm, sizeof nm); o += snprintf(body + o, sizeof body - (size_t)o, "%s = %s\r\n", g_kbn[i], nm); }
+    int o = snprintf(body, sizeof body, "; written by the settings menu (F1); key names: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT = - NUM+ NUM- PAGEUP PAGEDOWN F1..F12 NUM0..NUM9, 0x.. or none; several keys with commas\r\n");
+    o += snprintf(body + o, sizeof body - (size_t)o, "player = %s\r\nscheme = pc\r\n", g_cfg.kb_player == -2 ? "auto" : g_cfg.kb_player == -1 ? "none" : (snprintf(nm, sizeof nm, "%d", g_cfg.kb_player + 1), nm));
+    for (int i = 0; i < 24 && o < (int)sizeof body - 96; i++) {
+        o += snprintf(body + o, sizeof body - (size_t)o, "%s = ", g_kbn[i]);
+        int any = 0;
+        for (int k = 0; k < KB_KEYS; k++) if (g_cfg.kb_vk[i][k]) { nnpad_vk_name(g_cfg.kb_vk[i][k], nm, sizeof nm); o += snprintf(body + o, sizeof body - (size_t)o, "%s%s", any++ ? ", " : "", nm); }
+        o += snprintf(body + o, sizeof body - (size_t)o, "%s\r\n", any ? "" : "none");
+    }
     ini_replace_section(g_cfg.path, "[keyboard]", body);
     g_cfg.mtime = file_mtime(g_cfg.path);             /* what is in memory is what was written: no reload needed */
     say("nn::pad: [keyboard] of %s written (settings menu)\n", g_cfg.path);
@@ -1414,7 +1483,8 @@ void nnpad_kb_bind(int idx, int vk) {
     if (idx < 0 || idx >= 24) return;
     nnpad_kb_vk(0);
     lock();
-    g_cfg.kb_vk[idx] = vk;
+    memset(g_cfg.kb_vk[idx], 0, sizeof g_cfg.kb_vk[idx]);
+    g_cfg.kb_vk[idx][0] = vk;
     kb_write();
     unlock();
 }
@@ -1645,4 +1715,12 @@ void nnpad_player_assign(int index, int player) {
     }
     unlock();
 }
-int nnpad_kb_default(int idx) { return idx >= 0 && idx < 24 ? g_kb_default[idx] : 0; }      /* U1: the built-in key of a target */
+int nnpad_kb_default(int idx) { return idx >= 0 && idx < 24 ? g_kb_default[idx][0] : 0; }      /* U1: the built-in key of a target (the first) */
+void nnpad_kb_reset(int idx) {                        /* U1: a target back to all its built-in keys */
+    if (idx < 0 || idx >= 24) return;
+    nnpad_kb_vk(0);
+    lock();
+    memcpy(g_cfg.kb_vk[idx], g_kb_default[idx], sizeof g_cfg.kb_vk[idx]);
+    kb_write();
+    unlock();
+}

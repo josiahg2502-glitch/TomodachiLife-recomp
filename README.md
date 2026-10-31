@@ -72,17 +72,21 @@ The game is played as on a docked Switch.
 
 | Switch | Controller | Keyboard |
 |---|---|---|
-| A / B / X / Y | the buttons with those letters; PlayStation: cross, circle, square, triangle (the game then shows those symbols) | Z / X / C / V |
-| L / R, ZL / ZR | shoulders, triggers | Q / E, A / S |
-| + / - | Start / Back | Enter / Backspace |
-| Left stick | left stick | arrow keys |
-| Right stick (camera) | right stick | F / T / H / G |
-| D-pad | D-pad | J / I / L / K |
+| A (confirm) | A; PlayStation: cross (the game then shows the PlayStation symbols) | Enter or Space |
+| B (back) | B; PlayStation: circle | Esc, Backspace or B |
+| X (menu) / Y (residents) | X / Y; PlayStation: square / triangle | X or M / Y or R |
+| L / R, ZL / ZR | shoulders, triggers | Q / E, Z / C |
+| + / - | Start / Back | = / - (or the number pad's + / -) |
+| Left stick (the hand) | left stick | W A S D or the arrow keys |
+| Right stick (camera) | right stick | J / I / L / K |
+| D-pad | D-pad | number pad 4 / 8 / 6 / 2 |
 
 **Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B; the
 wheel acts as ZL / ZR (in menus it moves the selection).
 Keys and buttons can be changed in the game: PC Settings, **Controls** (pick the controller with left / right, choose a button,
-press the new one; it holds for every controller of that kind), or in `build\config\controllers.ini`.
+press the new one; it holds for every controller of that kind), or in `build\config\controllers.ini`, where a button can have
+up to three keys (`A = ENTER, SPACE`). A keyboard section still holding the old default keys (Z / X / C / V) is moved to the
+keys above by itself; one you changed is kept.
 
 ## Mods
 

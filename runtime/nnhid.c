@@ -579,9 +579,11 @@ static int key_for(uint32_t id, int vk, int kbidx) {         /* vk = the fixed k
     if (id == 0) down = scripted(vk) || script_key(vk) || seq_key(vk);
     /* U1 (menu.cpp): while the settings menu is open the real keyboard is its own */
     if (!down && (int)id == g_keyboard_player && !input_held()) {
-        int real = sdl_on() ? nnpad_kb_vk(kbidx) : vk;
-        down = real && keyboard_ours() && (GetAsyncKeyState(real) & 0x8000) != 0;
-        if (!down && g_test_vk && real == g_test_vk) down = 1;      /* U1 test only (nnhid_test_key) */
+        for (int k = 0; k < 3 && !down; k++) {                     /* any of the target's keys (controllers.ini "A = ENTER, SPACE") */
+            int real = sdl_on() ? nnpad_kb_vk_at(kbidx, k) : k ? 0 : vk;
+            down = real && keyboard_ours() && (GetAsyncKeyState(real) & 0x8000) != 0;
+            if (!down && g_test_vk && real == g_test_vk) down = 1;  /* U1 test only (nnhid_test_key) */
+        }
     }
     return down;
 }
@@ -771,7 +773,7 @@ uint64_t nnhid_preview(int id, int st[4]) {
     if (id < 0 || id > 7 || scripted_run()) return 0;
     if (id == g_keyboard_player && sdl_on() && keyboard_ours()) {
         int k[24];
-        for (int i = 0; i < 24; i++) { int vk = nnpad_kb_vk(i); k[i] = vk && (GetAsyncKeyState(vk) & 0x8000) != 0; }
+        for (int i = 0; i < 24; i++) { k[i] = 0; for (int j = 0; j < 3; j++) { int vk = nnpad_kb_vk_at(i, j); k[i] |= vk && (GetAsyncKeyState(vk) & 0x8000) != 0; } }
         for (int i = 0; i < 16; i++) if (k[i]) b |= 1ull << i;
         lx = (k[18] - k[16]) * STICK_MAX; ly = (k[17] - k[19]) * STICK_MAX; rx = (k[22] - k[20]) * STICK_MAX; ry = (k[21] - k[23]) * STICK_MAX;
     }

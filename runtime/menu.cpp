@@ -62,7 +62,7 @@ void nnhid_test_key(int vk); long nnhid_test_result(uint64_t *buttons); int nnpa
 uint64_t nnhid_menu_buttons(void);                                   /* nnhid.c: every pad, Npad bit order, no effect on the game */
 void display_set_window_mode(int mode); void display_set_client_size(int w, int h); int display_window_mode(void);      /* display.c */
 int nnaudio_volume(void); void nnaudio_set_volume(int percent);     /* nnaudio.c */
-int nnpad_kb_vk(int idx); void nnpad_kb_bind(int idx, int vk); void nnpad_kb_player_set(int p); int nnpad_kb_player_cfg(void);      /* nnpad_sdl.c */
+int nnpad_kb_vk(int idx); void nnpad_kb_text(int idx, char *o, int n); void nnpad_kb_reset(int idx); void nnpad_kb_bind(int idx, int vk); void nnpad_kb_player_set(int p); int nnpad_kb_player_cfg(void);      /* nnpad_sdl.c */
 const char *nnpad_kb_label(int idx); void nnpad_vk_name(int vk, char *o, int n); int nnpad_describe(char *out, int n); const char *nnpad_config_path(void);
 int nnaoc_owned(const int **list);                                   /* nnmisc.c */
 long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
@@ -808,7 +808,7 @@ static void sec_controls(void) {
         for (int i = 0; i < 24; i++) {
             char name[96];
             int from = 0;
-            if (dv) from = nnpad_target_text(dv->index, i, name, sizeof name); else nnpad_vk_name(nnpad_kb_vk(i), name, sizeof name);
+            if (dv) from = nnpad_target_text(dv->index, i, name, sizeof name); else nnpad_kb_text(i, name, sizeof name);
             ImGui::PushID(i);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(k_target_label[i]);
@@ -827,7 +827,7 @@ static void sec_controls(void) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Clear")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, "none"); else nnpad_kb_bind(i, 0); }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Default")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, NULL); else nnpad_kb_bind(i, nnpad_kb_default(i)); }
+            if (ImGui::SmallButton("Default")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, NULL); else nnpad_kb_reset(i); }
             if (dis_3) ImGui::EndDisabled();
             ImGui::PopID();
         }
@@ -851,7 +851,7 @@ static void sec_controls(void) {
             if (ImGui::IsItemDeactivatedAfterEdit()) { nnpad_tune_set(dv->index, g_ctl_scope, k, v); editing = -1; }
         }
     } else {
-        if (ImGui::Button("All keys back to the default")) for (int i = 0; i < 24; i++) nnpad_kb_bind(i, nnpad_kb_default(i));
+        if (ImGui::Button("All keys back to the default")) for (int i = 0; i < 24; i++) nnpad_kb_reset(i);
     }
     if (dis_4) ImGui::EndDisabled();
     ImGui::Separator();
@@ -1795,7 +1795,7 @@ static void tc_value(int row, char *v, int n) {
         return;
     }
     char t[96];
-    if (!d) { nnpad_vk_name(nnpad_kb_vk(target), t, sizeof t); snprintf(v, (size_t)n, "%s", t[0] ? t : "none"); return; }
+    if (!d) { nnpad_kb_text(target, t, sizeof t); snprintf(v, (size_t)n, "%s", t[0] ? t : "none"); return; }
     nnpad_target_text(d->index, target, t, sizeof t);
     int o = 0;                                  /* "south, button7" -> "A, button7" */
     for (char *tok = strtok(t, ","); tok && o < n - 1; tok = strtok(NULL, ",")) {
@@ -1822,7 +1822,7 @@ static void tc_act(int a) {
     case A_OK:
         if (g_tc_sel == TC_RESET) {
             if (d) { nnpad_profile_reset(d->index, 0); nnpad_profile_reset(d->index, 1); }
-            else for (int i = 0; i < 24; i++) nnpad_kb_bind(i, nnpad_kb_default(i));
+            else for (int i = 0; i < 24; i++) nnpad_kb_reset(i);
             printf("menu: Controls: %s back to the default\n", d ? d->name : "the keyboard"); fflush(stdout);
         } else if (g_tc_sel >= TC_FIRST) {
             int target = k_tc_target[g_tc_sel - TC_FIRST];
