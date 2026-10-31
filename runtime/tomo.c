@@ -1469,7 +1469,7 @@ static void persp_install(void) {
  * (a position put in is none), hence nnhid.c's nudge while the mouse moves. The hand is shown while bit 0 of the halfword
  * at +0x14 is set. Found 2026-10-28 with TOMO_MEMSCAN and write watchpoints. TOMO_MOUSE=0 off. */
 static ImportFn g_pointer_update;
-static volatile LONG g_centred_tick;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
+static volatile LONG g_centred_tick, g_seen_buttons;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
 /* THE MOUSE IN MENUS AND DIALOGS (2026-10-31). The X menu, Settings, the yes / no questions... move a hand from button to
  * button with the stick: the pointer object is then in mode 3 (+0x1a0) and follows the element its FOCUS HOLDER names
  * (0x7100241508: [[hand global]] + 0x40 -> its vtable slot 0 (type id) -> + 0x28 = holder; holder + 0x58 the focused element,
@@ -1504,6 +1504,12 @@ static int dlg_rect(uint64_t el, float r[4]) {      /* the element's pane as 0x7
     r[0] = cx - hw; r[1] = cy - hh; r[2] = cx + hw; r[3] = cy + hh;
     return hw > 0.5f && hh > 0.5f && hw < 2000.0f && hh < 2000.0f && fabsf(cx) < 4000.0f && fabsf(cy) < 4000.0f;
 }
+static int dlg_shown(uint64_t el) {             /* its pane and every pane above it visible (nn::ui2d pane flags +0x58, bit 0): a shop keeps the
+                                                 * items of its other tabs in the same ring, hidden, over the shown ones */
+    uint64_t part = rd64(el + 0x18), q = part ? rd64(part + 0x58) : 0;
+    for (int i = 0; q && i < 32; i++, q = rd64(q + 0x18)) if (!(rd8(q + 0x58) & 1)) return 0;
+    return 1;
+}
 static int dlg_enabled(Ctx *c, const DlgAddr *ad, uint64_t holder, uint64_t el) {      /* as the stick's navigation asks */
     uint64_t part = rd64(el + 0x18);
     if (!part || !(rd8(part + 0x42) & 2)) return 0;
@@ -1535,7 +1541,7 @@ static void dialog_mouse(Ctx *c) {
     int n = 0, at = -1, sent = -1;                  /* sent: buttons collected when the walk passed the list's head (its end) */
     do {                                            /* the ring of the focused element's buttons, in the game's order */
         if (rd64(el + 0x20) != owner) { if (sent < 0) sent = n; }
-        else if (dlg_rect(el, r)) {
+        else if ((el == cur || dlg_shown(el)) && dlg_rect(el, r)) {
             if (el == cur) at = n;
             if (n < 64) { scr[n][0] = r[0] / 1.5f + 640.0f; scr[n][1] = 360.0f - r[3] / 1.5f; scr[n][2] = r[2] / 1.5f + 640.0f; scr[n][3] = 360.0f - r[1] / 1.5f; }
             ring[n++] = el;
@@ -1577,6 +1583,7 @@ static void pointer_hook(Ctx *c, void *user) {
     int up = *(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1, centred = up && *(const int *)(uintptr_t)(A0 + 0x1a0) == 1;
     if (up) { void nnhid_pointer_free(void); nnhid_pointer_free(); }
     if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());      /* (the island: the hand stays in the middle, see isle_mouse) */
+    if (*(const int *)(uintptr_t)(A0 + 0x1a0) == 3) g_seen_buttons = 1;      /* (the title's "Press A" is one: the island marker waits for it) */
     else if (up && nnhid_mouse(xy)) { memcpy((void *)(uintptr_t)(A0 + 0x118), xy, 8); display_mouse_hand(); }
     g_pointer_update(c);
 }
@@ -1619,8 +1626,11 @@ static void isle_mouse(uint64_t cam, uint64_t tgt) {
     int nnhid_mouse(float xy[2]); int nnhid_mouse_buttons(void); void nnhid_tap_a(void); void nnhid_hold_a(int on);
     static int down, drag, glide, hold; static float px, py, last[2], goal[2]; static DWORD pressed;
     float xy[2], g0[2], g1[2];
-    {   static const char *to = (const char *)-1; static long long done = -1;      /* TEST ONLY: TOMO_ISLE_GOTO="<poll>:x,z ...": glide there at that input poll */
+    {   static const char *to = (const char *)-1; static long long done = -1, base = -1;      /* TEST ONLY: TOMO_ISLE_GOTO="<poll>:x,z ...": glide there
+                                                                                               * that many input polls after the island first showed */
         long long nnhid_seq_polls(void), now = nnhid_seq_polls();
+        if (base < 0) base = now;
+        now -= base;
         if (to == (const char *)-1) to = getenv("TOMO_ISLE_GOTO");
         for (const char *p = to; p && *p; p = strchr(p, ' '), p = p ? p + 1 : NULL) {
             long long at; float gx, gz;
@@ -1665,6 +1675,11 @@ static void isle_input_hook(Ctx *c, void *user) {   /* (work: +0 the controller,
     uint64_t ctl = rd64(work), tgt = rd64(work + 8), holder = ctl ? rd64(ctl + 0xf0) : 0, cam = holder ? rd64(holder + 0x30) : 0;
     if (rd8(work + 0x60) && tgt && cam && GetTickCount() - (DWORD)g_centred_tick < 250 && rdf(cam + 0x50) == 0.0f && rdf(cam + 0x54) == 1.0f && rdf(cam + 0x58) == 0.0f) {
         InterlockedExchange(&g_isle_tick, (LONG)GetTickCount());
+        {   static int marked; static DWORD since, last; void input_mark(const char *what);      /* (SSBU_SEQ @untilmark:island:Z/300; after 2 s of it: the start-up shows it a moment) */
+            DWORD now = GetTickCount();
+            if (now - last > 300) since = now;
+            last = now;
+            if (!marked && g_seen_buttons && now - since >= 2000) { marked = 1; input_mark("island"); } }
         isle_mouse(cam, tgt);
     }
 }

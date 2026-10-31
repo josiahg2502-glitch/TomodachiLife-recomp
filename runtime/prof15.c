@@ -236,7 +236,7 @@ static DWORD WINAPI p15_thread(LPVOID arg) {
     fflush(stdout);
     return 0;
 }
-/* SSBU_BURSTS=<guest thread name> (test only): the thread's work in bursts, from its CPU cycles read every millisecond: a
+/* SSBU_BURSTS=<guest thread name>[,<name>...] (test only): the thread's work in bursts, from its CPU cycles read every millisecond: a
  * burst ends after 5 ms without cycles. Each burst over 5 ms: its wall time and cycles ("burst:" lines), a summary at the
  * end of every 60 s. Made to time the Mii voice synthesis, which the main thread waits for. */
 static DWORD WINAPI burst_thread(LPVOID arg) {
@@ -285,7 +285,12 @@ static DWORD WINAPI burst_thread(LPVOID arg) {
 void prof15_start(void) {
     const char *spec = getenv("SSBU_PROF15"), *bursts = getenv("SSBU_BURSTS");
     if (spec && *spec) CloseHandle(CreateThread(NULL, 0, p15_thread, (LPVOID)spec, 0, NULL));
-    if (bursts && *bursts) CloseHandle(CreateThread(NULL, 0, burst_thread, (LPVOID)bursts, 0, NULL));
+    for (const char *p = bursts; p && *p;) {      /* (several names: a,b,c) */
+        const char *e = strchr(p, ','); size_t n = e ? (size_t)(e - p) : strlen(p);
+        char *one = malloc(n + 1);
+        if (one && n) { memcpy(one, p, n); one[n] = 0; CloseHandle(CreateThread(NULL, 0, burst_thread, (LPVOID)one, 0, NULL)); }
+        p = e ? e + 1 : NULL;
+    }
 }
 
 #endif

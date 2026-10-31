@@ -656,13 +656,21 @@ static int mouse_test(float *x, float *y, int *b, int *wheel) {
     if (!spec) return -1;
     int in = 0;
     *b = 0; *wheel = 0;
-    for (const char *p = spec; p && *p; p = strchr(p, ' '), p = p ? p + 1 : NULL) {
+    static long long base = -1; static char mark[24];
+    const char *p = spec;
+    if (*p == '@') {                               /* "@<mark> ...": the polls count from when the sequence's mark was first seen */
+        size_t n = strcspn(p + 1, " ");
+        if (!mark[0]) { memcpy(mark, p + 1, n < sizeof mark - 1 ? n : sizeof mark - 1); }
+        if (base < 0) { if (!mark_seen(mark)) return 0; base = g_seq_polls; }      /* (no mouse until then) */
+        p += 1 + n; while (*p == ' ') p++;
+    } else base = 0;
+    for (; p && *p; p = strchr(p, ' '), p = p ? p + 1 : NULL) {
         long long at = 0; float tx, ty; char k = 0;
         int n = sscanf(p, "%lld:%f,%f,%c", &at, &tx, &ty, &k);
-        if (n < 3 || at > g_seq_polls) break;
+        if (n < 3 || at > g_seq_polls - base) break;
         *x = tx; *y = ty; in = 1;
-        *b = n == 4 && (k == 'H' || k == 'M') ? (k == 'H' ? 1 : 4) : n == 4 && g_seq_polls < at + 8 ? (k == 'L' ? 1 : k == 'R' ? 2 : 0) : 0;      /* (H / M: the left / middle button held while at this point) */
-        *wheel = n == 4 && g_seq_polls == at ? (k == 'U' ? 1 : k == 'D' ? -1 : 0) : 0;
+        *b = n == 4 && (k == 'H' || k == 'M') ? (k == 'H' ? 1 : 4) : n == 4 && g_seq_polls - base < at + 8 ? (k == 'L' ? 1 : k == 'R' ? 2 : 0) : 0;      /* (H / M: the left / middle button held while at this point) */
+        *wheel = n == 4 && g_seq_polls - base == at ? (k == 'U' ? 1 : k == 'D' ? -1 : 0) : 0;
     }
     return in;
 }
