@@ -888,6 +888,7 @@ static uint64_t *ww_slot(uint64_t page, int insert) {
     }
 }
 /* Newest write stamp of the pages of [p, p+n), or 0 when the memory is not write-watched. Never returns less than 1 otherwise. */
+static void hot_mark(void *const *pages, ULONG_PTR count, int all);
 static uint64_t ww_newest(const uint8_t *p, size_t n) {
     static void *pages[16384];
     ULONG_PTR count = 16384;
@@ -898,6 +899,7 @@ static uint64_t ww_newest(const uint8_t *p, size_t n) {
     if (g_ww_used > WW_SLOTS / 2) { memset(g_ww_tab, 0, WW_SLOTS * sizeof *g_ww_tab); g_ww_used = 0; g_ww_floor = ++g_ww_stamp; newest = g_ww_floor; }      /* forget: everything counts as written once */
     if (count) {
         uint64_t stamp = ++g_ww_stamp;
+        hot_mark(pages, count, count == 16384);
         if (count == 16384) {                      /* more written pages than the list holds: stamp the whole range */
             ResetWriteWatch((void *)p, n);
             for (uint64_t pg = first; pg <= last; pg++) *ww_slot(pg, 1) = stamp;
@@ -967,11 +969,20 @@ static int g_wws_all, g_wws_sync = -1;
 static volatile LONG64 g_wws_asked, g_wws_done;
 static volatile LONG g_wws_started;
 static HANDLE g_wws_ev, g_wws_done_ev;
+static volatile LONG g_hot_page[1 << 18];                 /* by page (hashed buckets): the frame a question last found it written by the game (SnapSet) */
+static volatile LONG g_hot_all;                           /* the frame of a question that found more written pages than it could list */
+#define HOT_BUCKET(pg) (((uint64_t)(pg) * 0x9E3779B97F4A7C15ULL) >> 46)
+static void hot_mark(void *const *pages, ULONG_PTR count, int all) {
+    LONG fr = (LONG)g_st.frames;
+    if (all) { g_hot_all = fr; return; }
+    for (ULONG_PTR i = 0; i < count; i++) g_hot_page[HOT_BUCKET((uint64_t)(uintptr_t)pages[i] >> 12)] = fr;
+}
 static void ww_ask(uint64_t base, uint64_t size, void **pages, LONG64 *wpages) {
     ULONG_PTR count = 1 << 18;
     DWORD gran = 0;
     if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)base, (SIZE_T)size, pages, &count, &gran) || !count) return;
     *wpages += (LONG64)count;
+    hot_mark(pages, count, count == (ULONG_PTR)1 << 18);
     AcquireSRWLockExclusive(&g_wws_lock);
     if (count == (ULONG_PTR)1 << 18) g_wws_all = 1;          /* more than the list holds: everything counts as written */
     else {
@@ -1067,8 +1078,14 @@ static uint64_t ww_range_stamp(uint64_t addr, uint64_t size) {      /* newest st
     return newest;
 }
 static uint32_t g_arena_gen;
+static volatile LONG64 g_emu_serial;                     /* writes of ours into guest memory (ww_note), counted (SnapSet) */
+static volatile LONG64 g_emu_page[1 << 16];              /* by page (hashed buckets): the count at the newest of them */
+#define EMU_RING 65536
+static struct { uint64_t addr, size; } g_emu_ring[EMU_RING];      /* the last writes of ours, by count (render thread) */
 static void ww_note(uint64_t addr, uint64_t size) {      /* the emulator wrote guest memory: later reads stream it again */
     g_arena_gen++;
+    if (size) { LONG64 v = g_emu_serial + 1; g_emu_ring[v % EMU_RING].addr = addr; g_emu_ring[v % EMU_RING].size = size; InterlockedExchange64(&g_emu_serial, v);
+                for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) g_emu_page[(pg * 0x9E3779B97F4A7C15ULL) >> 48] = v; }
     if (!g_ww_tab || !size) return;
     uint64_t stamp = ++g_ww_stamp;
     for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) *ww_slot(pg, 1) = stamp;
@@ -1923,11 +1940,90 @@ static void rb_land_at(int wait, int line) {        /* land the read-backs the G
 static void rb_land_range(uint64_t addr, uint64_t size) {
     for (int i = 0; i < g_rbp_n; i++) if (addr < g_rbp[i].addr + g_rbp[i].size && g_rbp[i].addr < addr + size) { rb_land(1); return; }
 }
+/* ---- what a batch binds, as it was when the game submitted it (SnapSet)
+ * The game rewrites uniform buffers a few ms after it has submitted and flushed a batch that reads them (the console's GPU
+ * has read them by then), for its next batch or frame: on the island about ten ranges a frame, the 2D layer's element data
+ * (positions jump by hundreds of pixels: another element's), at the title an animated model's. The render thread replays a
+ * batch later and read the new contents, so an element drew for one frame with another one's data, at random moments,
+ * anywhere (the user's "random flicker", 2026-10-31). At the submission the game's thread copies the small uniform and
+ * vertex ranges the batch binds that lie on pages the game wrote in the last 5 s; the replay takes the copy where guest
+ * memory no longer matches it, with the bytes our own writes (read-backs, buffer copies, uniform updates: ww_note) put
+ * there since the submission, which the batch must see. (Taking guest memory whenever one of ours touched the pages, as
+ * first written, left ranges such as a 64 KB uniform block that read-backs land in racing: in the wishing fountain scene
+ * the far background still took a glow pulse's pink tint for single frames.) Measured: the game never changes a copied
+ * range between its submission and its next flush, sync wait or present (TOMO_SNAP_FLUSHCHECK=1), so the copy holds what
+ * the console's GPU reads. Cost: 0.07-0.6 ms a batch on the game's thread (100-1100 KB). TOMO_SNAP=0: off, as before. */
+#define SNAP_MAX_UBO 65536
+#define SNAP_MAX_VBUF 32768
+typedef struct { uint64_t addr, size; size_t off, aoff; LONG64 emu_at; uint32_t aserial; int state; } SnapEnt;      /* state: 0 not looked at in the replay, 1 guest memory, 2 the copy (uploaded at aoff) */
+typedef struct SnapSet { SnapEnt *e; unsigned cap, n; int bad; uint8_t *data; size_t len, dcap; LONG64 emu; struct SnapSet *next; } SnapSet;
+static SnapSet *g_snap_cur;                              /* the batch being replayed (render thread) */
+static SnapSet *g_snap_pool;                             /* sets to use again (g_snap_lock) */
+static SRWLOCK g_snap_lock = SRWLOCK_INIT;
+static volatile LONG64 g_snap_used, g_snap_bytes, g_snap_ranges, g_snap_sets, g_snap_ticks;
+static int snap_on(void) { static int on = -1; if (on < 0) on = getenv("TOMO_SNAP") ? atoi(getenv("TOMO_SNAP")) : 1; return on; }      /* TEST: 2 = copies made and compared, guest memory used (as before) */
+static int emu_wrote_since(uint64_t addr, uint64_t size, LONG64 since) {
+    for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) if (g_emu_page[(pg * 0x9E3779B97F4A7C15ULL) >> 48] > since) return 1;
+    return 0;
+}
+static SnapEnt *snap_slot(SnapSet *s, uint64_t addr, uint64_t size) {
+    for (unsigned h = (unsigned)((((addr >> 4) ^ (size << 40)) * 0x9E3779B97F4A7C15ULL) >> 40) & (s->cap - 1);; h = (h + 1) & (s->cap - 1))
+        if (!s->e[h].addr || (s->e[h].addr == addr && s->e[h].size == size)) return &s->e[h];
+}
+static void snaplog_where(char *buf, size_t n);
+/* The copy takes the bytes our writes (counts after `from`) put into [addr, addr+size): 0 when the ring no longer holds them */
+static int snap_merge(uint8_t *copy, uint64_t addr, uint64_t size, LONG64 from) {
+    LONG64 now = g_emu_serial;
+    if (now - from >= EMU_RING) return 0;
+    for (LONG64 v = from + 1; v <= now; v++) {
+        uint64_t a = g_emu_ring[v % EMU_RING].addr, z = g_emu_ring[v % EMU_RING].size;
+        uint64_t lo = a > addr ? a : addr, hi = a + z < addr + size ? a + z : addr + size;
+        if (lo < hi) memcpy(copy + (lo - addr), (const uint8_t *)P(lo), (size_t)(hi - lo));
+    }
+    return 1;
+}
+/* The batch's entry for [addr, addr+size) when it must read the copy (render thread), else NULL: guest memory is right.
+ * The copy is what the range held at the submission plus what our writes (read-backs of what the GPU wrote, buffer copies,
+ * uniform updates) put there since: those come before this batch on the console's GPU, the game's later writes after it. */
+static SnapEnt *snap_pick(uint64_t addr, uint64_t size) {
+    SnapSet *s = g_snap_cur;
+    if (!s || !s->cap) return NULL;
+    SnapEnt *e = snap_slot(s, addr, size);
+    if (!e->addr) return NULL;
+    if (!e->state || (e->state == 2 && emu_wrote_since(addr, size, e->emu_at))) {
+        LONG64 from = e->state ? e->emu_at : s->emu, now = g_emu_serial;
+        uint8_t *copy = s->data + e->off;
+        int was = e->state, ours = emu_wrote_since(addr, size, from);
+        if (ours && !snap_merge(copy, addr, size, from)) e->state = 1;      /* (too many writes of ours since: guest memory, as before) */
+        else e->state = memcmp(copy, P(addr), (size_t)size) ? 2 : 1;
+        e->emu_at = now;
+        e->aserial = 0;
+        if (e->state == 2 && !was) {
+            InterlockedIncrement64(&g_snap_used);
+            static int sl = -2, nlog;      /* TEST: TOMO_SNAPLOG=<from frame>: where the copies are used */
+            if (sl == -2) sl = getenv("TOMO_SNAPLOG") ? atoi(getenv("TOMO_SNAPLOG")) : -1;
+            if (sl >= 0 && g_st.frames >= sl && nlog++ < 4000) {
+                char wh[96]; int k = -1;
+                for (uint64_t o = 0; o + 4 <= size; o += 4) if (memcmp(copy + o, (const uint8_t *)P(addr) + o, 4)) { k = (int)o; break; }
+                snaplog_where(wh, sizeof wh);
+                printf("snaplog: frame %lld %s range %llx+%llu: copy used%s, first change +0x%x %08x -> %08x%c", (long long)g_st.frames, wh, (unsigned long long)addr, (unsigned long long)size, ours ? " (with writes of ours)" : "", k,
+                       k >= 0 ? *(const uint32_t *)(copy + k) : 0, k >= 0 ? *(const uint32_t *)((const uint8_t *)P(addr) + k) : 0, 10);
+            }
+        }
+    }
+    return e->state == 2 && snap_on() == 1 ? e : NULL;
+}
 /* Offset in the streaming buffer of a copy of guest memory [addr, addr+size), made at most once per batch. */
 static size_t arena_put(uint64_t addr, uint64_t size) {
     static int nlog;
     if (g_rbp_n) rb_land_range(addr, size);
     if (size > ARENA_SIZE / 4) { logf_limited(&nlog, 10, "nvn_gl: buffer range of %llu bytes clamped to %llu\n", (unsigned long long)size, (unsigned long long)(ARENA_SIZE / 4)); size = ARENA_SIZE / 4; }
+    {   SnapEnt *se = g_snap_cur ? snap_pick(addr, size) : NULL;      /* the game rewrote it after the submission: what it held then */
+        if (se) {
+            if (se->aserial != g_arena_serial) { se->aoff = arena_put_raw(g_snap_cur->data + se->off, (size_t)size); se->aserial = g_arena_serial; }
+            return se->aoff;
+        }
+    }
     static int keep = -1; if (keep < 0) keep = !(getenv("TOMO_ARENA_KEEP") && getenv("TOMO_ARENA_KEEP")[0] == '0');
     unsigned h = (unsigned)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 2654435761u) >> 19, pick = 8192;
     uint64_t now = keep ? ww_range_stamp(addr, size) : 0;
@@ -4344,7 +4440,8 @@ static int g_frag_ssbo_pending;               /* a draw's fragment stage wrote a
 static int g_cbuf_live;
 static CBuf *cbuf_find(uint64_t addr, uint64_t size);
 static CBuf *cbuf_get(uint64_t addr, uint64_t size);
-static int g_dbg_noscissor, g_dbg_skipdraw = -1, g_frame_draw_index;      /* debug aids: SSBU_NOSCISSOR=1, SSBU_SKIPDRAW=<n-th draw of every frame> */
+static int g_dbg_noscissor, g_dbg_skipdraw = -1, g_frame_draw_index;
+static void snaplog_where(char *buf, size_t n) { snprintf(buf, n, "draw %d fbo %u (%dx%d)", g_frame_draw_index, S.fbo, S.fbo_w, S.fbo_h); }      /* debug aids: SSBU_NOSCISSOR=1, SSBU_SKIPDRAW=<n-th draw of every frame> */
 /* Audit measurement (fake audit, row "unbound or dead texture slots sample a 1x1 dummy texture"): draws whose bound
  * programs reference a texture unit (MxOut.tex_units of the translated stage) that holds the dummy texture; split by cause:
  * the game bound handle 0 to the unit / never bound it, or the handle names a texture that is gone or was never registered. */
@@ -6555,6 +6652,85 @@ static void bl_bind(void) { if (g_bl_buf) gs_ssbo(39, g_bl_buf, 0, (BL_SLOTS + 2
  * and the draw after it wait (the title's first frame: 292 small textures, 97 ms of GPU, a 150 ms frame, 2026-10-31). The
  * binds still sync (nothing is done twice in a batch); the pools as the batch sets them, deferred arrays as they hold now.
  * TOMO_TEX_PRESCAN=0: at the binds only, as before. */
+static int snap_hot(uint64_t addr, uint64_t size) {      /* a page of it written by the game in the last 5 s */
+    LONG fr = (LONG)g_st.frames;
+    if (fr - g_hot_all < 300) return 1;
+    for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) if (fr - g_hot_page[HOT_BUCKET(pg)] < 300) return 1;
+    return 0;
+}
+static void snap_range(SnapSet *s, uint64_t addr, uint64_t size, uint64_t max) {
+    if (!addr || !size || size > max || s->bad || !snap_hot(addr, size)) return;
+    if ((s->n + 1) * 2 > s->cap) {
+        unsigned oc = s->cap, nc = oc ? oc * 2 : 1024;
+        SnapEnt *oe = s->e, *ne = calloc(nc, sizeof *ne);
+        if (!ne) { s->bad = 1; return; }
+        s->e = ne; s->cap = nc;
+        for (unsigned i = 0; i < oc; i++) if (oe[i].addr) *snap_slot(s, oe[i].addr, oe[i].size) = oe[i];
+        free(oe);
+    }
+    SnapEnt *e = snap_slot(s, addr, size);
+    if (e->addr) return;
+    if (s->len + size > s->dcap) {
+        size_t nc = (s->len + (size_t)size) * 2 < 262144 ? 262144 : (s->len + (size_t)size) * 2;
+        uint8_t *nd = realloc(s->data, nc);
+        if (!nd) { s->bad = 1; return; }
+        s->data = nd; s->dcap = nc;
+    }
+    __try { memcpy(s->data + s->len, P(addr), (size_t)size); } __except (1) { return; }      /* (a binding no draw uses may name memory that is gone) */
+    e->addr = addr; e->size = size; e->off = s->len; e->state = 0; s->len += (size_t)size; s->n++;
+}
+/* The ranges a batch binds: uniform and vertex buffers. Not the arrays of deferred binds (the game may fill those after the
+ * submission) nor storage buffers (the GPU writes them). */
+static void snap_list(SnapSet *s, uint64_t handle, int depth) {
+    size_t len = 0;
+    uint8_t *data = list_lookup(handle, &len);
+    for (size_t off = 0; data && off + sizeof(Cmd) <= len;) {
+        const Cmd *m = (const Cmd *)(data + off);
+        const uint8_t *blob = BLOB(m);
+        uint64_t r[2];
+        if (m->size < sizeof(Cmd)) break;
+        if (m->op == OP_UBO) for (int i = 0; i < (int)m->a[2] && i < 16; i++) { memcpy(r, blob + i * 16, 16); snap_range(s, r[0], r[1], SNAP_MAX_UBO); }
+        else if (m->op == OP_VBUF) for (int i = 0; i < (int)m->a[1] && i < 32; i++) { memcpy(r, blob + i * 16, 16); snap_range(s, r[0], r[1], SNAP_MAX_VBUF); }
+        else if (m->op == OP_CALL && depth < 8) for (int i = 0; i < (int)m->a[0]; i++) { uint64_t h; memcpy(&h, blob + i * 8, 8); snap_list(s, h, depth + 1); }
+        off += m->size;
+    }
+}
+static struct { uint64_t addr, size, h; } g_sfc[8192];      /* TEST: TOMO_SNAP_FLUSHCHECK=1: copied ranges the game changes before its next flush, sync wait or present */
+static int g_sfc_n, g_sfc_on = -1;
+static LONG64 g_sfc_changed, g_sfc_checked, g_sfc_points;
+void nvn_snap_flushcheck(const char *what) {             /* game thread */
+    if (g_sfc_on <= 0 || !g_sfc_n) return;
+    int changed = 0;
+    for (int i = 0; i < g_sfc_n; i++) if (mem_hash(P(g_sfc[i].addr), (size_t)g_sfc[i].size, 1) != g_sfc[i].h) changed++;
+    g_sfc_changed += changed; g_sfc_checked += g_sfc_n; g_sfc_points++;
+    if (changed) { static int nlog; if (nlog++ < 40) printf("snapcheck: frame %lld: %d of %d ranges copied at the submissions changed before the %s%c", (long long)g_st.frames, changed, g_sfc_n, what, 10); }
+    if (g_sfc_points % 2000 == 0) printf("snapcheck: %lld points, %lld ranges checked, %lld changed between the submission and the flush%c", (long long)g_sfc_points, (long long)g_sfc_checked, (long long)g_sfc_changed, 10);
+    g_sfc_n = 0;
+}
+static SnapSet *snap_take(const uint64_t *handles, int count) {      /* game thread, at the submission */
+    LONG64 t0 = pf_now();
+    AcquireSRWLockExclusive(&g_snap_lock);
+    SnapSet *s = g_snap_pool;
+    if (s) g_snap_pool = s->next;
+    ReleaseSRWLockExclusive(&g_snap_lock);
+    if (!s && !(s = calloc(1, sizeof *s))) return NULL;
+    s->emu = g_emu_serial;                                 /* (read before the copies: a write of ours racing them counts as later) */
+    for (int i = 0; i < count; i++) snap_list(s, handles[i], 0);
+    if (g_sfc_on < 0) g_sfc_on = getenv("TOMO_SNAP_FLUSHCHECK") != NULL;
+    if (g_sfc_on > 0) for (unsigned i = 0; i < s->cap && g_sfc_n < 8192; i++) if (s->e[i].addr) { g_sfc[g_sfc_n].addr = s->e[i].addr; g_sfc[g_sfc_n].size = s->e[i].size; g_sfc[g_sfc_n++].h = mem_hash(s->data + s->e[i].off, (size_t)s->e[i].size, 1); }
+    InterlockedIncrement64(&g_snap_sets); InterlockedExchangeAdd64(&g_snap_ranges, s->n); InterlockedExchangeAdd64(&g_snap_bytes, (LONG64)s->len);
+    InterlockedExchangeAdd64(&g_snap_ticks, pf_now() - t0);
+    return s;
+}
+static void snap_give(SnapSet *s) {                        /* render thread, after the replay */
+    if (!s) return;
+    if (s->cap) memset(s->e, 0, s->cap * sizeof *s->e);
+    s->n = 0; s->len = 0; s->bad = 0;
+    if (s->dcap > ((size_t)8 << 20)) { free(s->data); s->data = NULL; s->dcap = 0; }
+    AcquireSRWLockExclusive(&g_snap_lock);
+    s->next = g_snap_pool; g_snap_pool = s;
+    ReleaseSRWLockExclusive(&g_snap_lock);
+}
 static void prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
     size_t len = 0;
     uint8_t *data = list_lookup(handle, &len);
@@ -6600,7 +6776,9 @@ static void job_submit(void *arg) {
         HS_OUT();
     }
     LONG64 pf0 = pf_now();
+    g_snap_cur = j->snap;
     for (int i = 0; i < j->count; i++) replay(j->handles[i], 0);
+    g_snap_cur = NULL; snap_give(j->snap); j->snap = NULL;
     { HS_IN("batch end: compute results (flush)", 0);
     compute_flush_async();                       /* the guest may read what compute wrote once its fence after this batch has passed */
     HS_OUT(); }
@@ -8242,6 +8420,7 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
     else if (j.count > 0 && A2) {
         if (g_rb == &rb_gl) j.ww_seq = ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now */
         if (gl_async_on() && j.count <= 4096) {
+            if (g_rb == &rb_gl && snap_on()) j.snap = snap_take(j.handles, j.count);
             size_t size = sizeof j + (size_t)j.count * 8;
             SubmitJob *copy = malloc(size);
             *copy = j;
@@ -8391,6 +8570,7 @@ void nvn_l1_report(FILE *out) { if (g_l1_early_n || g_l1_early_miss) fprintf(out
 static void queue_present(Ctx *c) {                     /* (queue, window, textureIndex) */
     PresentJob j = {hobj(A1, K_WIN), (int)A2};
     L1T("PRESENT texture %d", (int)A2);
+    { void nvn_snap_flushcheck(const char *); nvn_snap_flushcheck("present"); }
     if (j.win && j.win->native && j.win->native == album_movie_native_window()) { gl_run(g_rb->present_movie, &j); return; }
     g_pf_main_tid = GetCurrentThreadId();
     int ra_mode; { int r1_ra_present_mode(void); ra_mode = g_l1_pipe > 0 ? r1_ra_present_mode() : 0; }      /* R1 round 5, run-ahead: 2 = the real pass's present (nothing), 1 = presented at the speculative submission already */
@@ -8540,6 +8720,10 @@ static void present_fence(long long frame) {
     g_pfence[k] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0);
     g_pf_frame[k] = frame;
     if (frame % 600 == 0 && (g_frz_rest || g_frz_skip)) printf("nvn_gl: frozen scene so far: %lld restores, %lld of them followed by 3D in the same frame (wrong), %lld left out (frames that start with 2D)%c", (long long)g_frz_rest, (long long)g_frz_wrong, (long long)g_frz_skip, 10);
+    if (frame % 600 == 0 && g_snap_sets) { LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        printf("nvn_gl: submit copies: %lld batches, %.0f ranges and %.0f KB a batch, %.3f ms a batch on the game's thread; %lld ranges the game rewrote before the replay read them (the copy was used)%c",
+               (long long)g_snap_sets, (double)g_snap_ranges / (double)g_snap_sets, (double)g_snap_bytes / 1024.0 / (double)g_snap_sets, (double)g_snap_ticks * 1000.0 / (double)fq.QuadPart / (double)g_snap_sets, (long long)g_snap_used, 10);
+        g_snap_sets = g_snap_ranges = g_snap_bytes = g_snap_ticks = g_snap_used = 0; }
     if (frame % 600 == 0) { static LONG64 cb0; printf("nvn_gl: one frame in flight: %lld early waits, %lld of them landed read-backs first; %.2f MB a frame read back from GPU-written buffers%c", (long long)g_early_n, (long long)g_full_n, (double)(g_st.compute_bytes - cb0) / 600.0 / 1048576.0, 10); cb0 = g_st.compute_bytes; }
 }
 static void job_sync_wait(void *arg) {
@@ -8563,6 +8747,7 @@ static void sync_wait(Ctx *c) {                         /* (sync, timeoutNs) -> 
     SyncObj *o = hobj(A0, K_SYNC);
     SyncJob j = {o, 0, A1, 3};
     LONG64 sw0 = pf_now();
+    { void nvn_snap_flushcheck(const char *); nvn_snap_flushcheck("sync wait"); }
     if (o) gl_run(g_rb->sync_wait, &j);
     {   static int on = -1, n; if (on < 0) on = getenv("TOMO_SYNCLOG") ? (atoi(getenv("TOMO_SYNCLOG")) > 1 ? atoi(getenv("TOMO_SYNCLOG")) : 1500) : 0;      /* TEST ONLY, TOMO_SYNCLOG=1|<from frame>: which fence the game waits for, and how long */
         if (on && o && g_st.frames > on && n++ < 80) { LARGE_INTEGER f; QueryPerformanceFrequency(&f);
@@ -8642,7 +8827,7 @@ static void queue_total_compute(Ctx *c) { QueueObj *q = hobj(A0, K_QUEUE); RET(q
 static void queue_reset_usage(Ctx *c) { QueueObj *q = hobj(A0, K_QUEUE); if (q) q->cmd_used = q->control_used = q->compute_used = 0; }
 static void job_flush(void *arg) { (void)arg; glFlush(); }
 static void job_finish(void *arg) { (void)arg; glFinish(); if (g_rbp_n) rb_land(1); }
-static void queue_flush(Ctx *c) { (void)c; if (gl_async_on()) gl_post(g_rb->flush, NULL, 0); else gl_run(g_rb->flush, NULL); }
+static void queue_flush(Ctx *c) { (void)c; { void nvn_snap_flushcheck(const char *); nvn_snap_flushcheck("flush"); } if (gl_async_on()) gl_post(g_rb->flush, NULL, 0); else gl_run(g_rb->flush, NULL); }
 static void queue_finish(Ctx *c) { (void)c; gl_run(g_rb->finish, NULL); }
 static void job_reset_status(void *arg) { *(int *)arg = glGetGraphicsResetStatus ? (int)glGetGraphicsResetStatus() : 0; }
 static void queue_get_error(Ctx *c) {                   /* (queue, NVNqueueErrorInfo *) -> NVNqueueGetErrorResult: the state of the real GPU context */

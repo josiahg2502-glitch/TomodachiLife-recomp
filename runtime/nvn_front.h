@@ -96,7 +96,7 @@ typedef struct { uint64_t addr, size; } Range;
 typedef struct { Tex *tex; View view; } TargetRef;
 
 /* ---------------------------------------------------------------- render-thread jobs (arguments of RBackend members) */
-typedef struct { int count; const uint64_t *handles; uint64_t ww_seq; } SubmitJob;      /* ww_seq: nvn_gl.c's write-watch scan asked at the submission */
+typedef struct { int count; const uint64_t *handles; uint64_t ww_seq; void *snap; } SubmitJob;      /* ww_seq: nvn_gl.c's write-watch scan asked at the submission; snap: its SnapSet */
 typedef struct { Window *win; int index; int shot_fight; } PresentJob;      /* shot_fight (session 13, test): fight frame whose picture this present is, 0 = none; set when the game queues the present */
 typedef struct { SyncObj *o; int flags; uint64_t timeout; int result; } SyncJob;
 typedef struct { Tex *tex; View view; int has_view; int region[6]; const void *data; int64_t row_stride; } WriteJob;
