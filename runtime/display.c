@@ -811,6 +811,13 @@ int gfx_frame_rate(void);
  * try every 20 s. */
 static volatile LONG g_adapt;                 /* 1: the interval is the game's halved and adapts (frame_rate = 60) */
 static LARGE_INTEGER g_release_at;            /* end of the last refresh wait */
+static volatile LONG64 g_held_qpc;            /* time the game's thread was held for a refresh since display_take_held (QPC ticks) */
+/* The time the game's main thread spent held for its refresh (display_wait_refresh / the old pacing's wait) since the last
+ * call, in the console's 19.2 MHz system ticks (tomo.c: the game's own frame-rate controller judges by a span that holds it). */
+long long display_take_held(void) {
+    LONG64 q = InterlockedExchange64(&g_held_qpc, 0);
+    return g_freq.QuadPart ? (long long)((double)q * 19200000.0 / (double)g_freq.QuadPart) : 0;
+}
 /* THE GAME'S OWN FRAME-RATE CONTROLLER (2026-10-30). Tomodachi Life picks its present interval itself, every frame
  * (1.0.4: 0x710027f474, called from 0x710027efe4; 1.0.0: 0x710028b2b8 from 0x710028ae34): interval = clamp(int(frame time
  * x 60 + bias) + 1, minimum, maximum) (fields +0 and +4 of the controller, a singleton behind a global), fps = 60 / interval
@@ -864,13 +871,34 @@ static void adapt_frame(LARGE_INTEGER now) {
     if (g_rate_ctl) {                                  /* the game's controller is in charge: the fallback moves its minimum */
         static int over, at30, window, missed, off = -1;
         if (off < 0) off = getenv("TOMO_ADAPT") && getenv("TOMO_ADAPT")[0] == '0';      /* TEST: no fallback to 30 */
+        {   static int pl = -1, n, late; static double worst;      /* TOMO_PACELOG=1 (TEST): the game's controller and the presents, per 60 frames */
+            if (pl < 0) pl = getenv("TOMO_PACELOG") != NULL;
+            if (pl) {
+                late += gap > 16.7 * (g_interval > 0 ? g_interval : 1) + 8.3; if (gap > worst) worst = gap;
+                if (++n >= 60) {
+                    void tomo_pick_stats(double *avg, double *mx, double *raw); double pa, pm, pr; tomo_pick_stats(&pa, &pm, &pr);
+                    printf("pacelog: floor %ld | game min %u max %u now %u next %u counters %u %u fps %u, judged frame time %.1f ms (max %.1f; %.1f with the refresh wait) | our interval %ld | late %d, worst gap %.1f ms, busy ema %.1f ms%c",
+                           (long)g_rate_floor, rd32(g_rate_ctl), rd32(g_rate_ctl + 4), rd32(g_rate_ctl + 0x40), rd32(g_rate_ctl + 0x44), rd32(g_rate_ctl + 0x48), rd32(g_rate_ctl + 0x4c),
+                           rd32(g_rate_ctl + 0x50), pa, pm, pr, (long)g_interval, late, worst, ema, 10);
+                    n = late = 0; worst = 0;
+                }
+            }
+        }
         if (off) return;
+        /* The stay at 30 doubles (20 s, 40 s, 80 s, at most 2 min) when 60 fails again within 10 s of a try: a scene that cannot
+         * hold 60 no longer switches back and forth every 20 s (each switch shows); a minute at 60 resets it. */
+        static int stay = 600, at60 = 600;              /* (the first drop, often at a load, is not a failed try) */
         if (g_rate_floor == 1) {
             double due = (double)(g_interval > 0 ? g_interval : 1) * 1000.0 / 60.0;      /* (the game may choose 2 for a while itself: not late) */
             missed += gap > due + 8.3 && gap < due + 33.4; if (++window >= 60) { if (missed >= 4) over = 60; window = missed = 0; }      /* 4 a second: steady 30 beats a 55 fps judder (the quality bar) */
             over = ema > 15.5 || over >= 60 ? over + 1 : 0;
-            if (over >= 60) { window = missed = 0; over = at30 = 0; rate_floor(2); static int n; if (n++ < 20) printf("display: frame_rate 60: frames take %.1f ms: 30 fps for now (the game's minimum interval 2)%c", ema, 10); }
-        } else if (++at30 >= 600) { over = at30 = 0; rate_floor(1); static int n; if (n++ < 20) printf("display: frame_rate 60: 60 fps again (the game's minimum interval 1)%c", 10); }
+            if (++at60 >= 3600) stay = 600;
+            if (over >= 60) {
+                stay = at60 < 600 ? (stay * 2 > 7200 ? 7200 : stay * 2) : 600;
+                window = missed = 0; over = at30 = at60 = 0; rate_floor(2);
+                static int n; if (n++ < 20) printf("display: frame_rate 60: frames take %.1f ms: 30 fps for %d s (the game's minimum interval 2)%c", ema, stay / 60, 10);
+            }
+        } else if (++at30 >= stay) { over = at30 = at60 = 0; rate_floor(1); static int n; if (n++ < 20) printf("display: frame_rate 60: 60 fps again (the game's minimum interval 1)%c", 10); }
         return;
     }
     if (g_interval == 1) {
@@ -1346,6 +1374,7 @@ int display_wait_refresh(void) {
     hitch_pacing(0);
     QueryPerformanceCounter(&b);
     nvn_pf_pace(b.QuadPart - a.QuadPart);
+    InterlockedExchangeAdd64(&g_held_qpc, b.QuadPart - a.QuadPart);
     return 1;
 }
 static void pace_release_selftest(void) {
@@ -1410,6 +1439,7 @@ void display_pace(void) {
         for (QueryPerformanceCounter(&after); after.QuadPart < next.QuadPart; QueryPerformanceCounter(&after)) YieldProcessor();
         hitch_pacing(0);
         nvn_pf_pace(after.QuadPart - now.QuadPart);
+        InterlockedExchangeAdd64(&g_held_qpc, after.QuadPart - now.QuadPart);
     } else if (-left > frame_ticks) next.QuadPart = now.QuadPart - frame_ticks;
     if ((now.QuadPart - second_start.QuadPart) >= g_freq.QuadPart) {
         char title[160];

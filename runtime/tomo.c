@@ -1335,7 +1335,8 @@ int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportF
  * same functions elsewhere (found by their code; the struct offsets they use are unchanged). Any other build gets no hook. */
 static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
     static const uint64_t v262144[][2] = {{0x71008ce838ull, 0x7100897d48ull}, {0x71006ec3c0ull, 0x71006ce020ull},
-        {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull}};
+        {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull},
+        {0x710028b2b8ull, 0x710027f474ull}};
     uint64_t at = 0;
     if (g_main.text_size == 0x25ce6a0) at = a;
     else if (g_main.text_size == 0x256d250)
@@ -1479,6 +1480,30 @@ static void pointer_hook(Ctx *c, void *user) {
     if ((*(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1) && nnhid_mouse(xy)) { memcpy((void *)(uintptr_t)(A0 + 0x118), xy, 8); display_mouse_hand(); }
     g_pointer_update(c);
 }
+/* The game's own frame-rate controller [0x710028b2b8] (controller, framework) picks its present interval each frame from
+ * the framework's frame time (+0x118, system ticks): interval = int(time x 60 / 19.2 MHz + bias) + 1. That time runs from
+ * the end of one present to the next present's submission, so it holds the wait for the display's refresh, which on the
+ * console happens elsewhere: here a frame of 3 ms work measured 16+ ms with that wait and the game chose 30 fps
+ * (user's sessions, 2026-10-30: 30 fps most of the time in light scenes). The pick sees the time without the wait
+ * (display_take_held); the framework keeps its own value for everything else. TOMO_RATE_HELD=0: as before. */
+static ImportFn g_rate_pick;
+static double g_pick_sum, g_pick_max, g_pick_raw; static int g_pick_n;
+static void rate_pick_hook(Ctx *c, void *user) {
+    long long display_take_held(void);
+    static int off = -1;
+    (void)user;
+    if (off < 0) off = getenv("TOMO_RATE_HELD") && getenv("TOMO_RATE_HELD")[0] == '0';
+    uint64_t fw = A1;
+    int64_t t = (int64_t)rd64(fw + 0x118), held = display_take_held(), j = off || held <= 0 ? t : t - held > 1 ? t - held : 1;
+    g_pick_raw += (double)t / 19200.0; g_pick_sum += (double)j / 19200.0; g_pick_n++; if (j / 19200.0 > g_pick_max) g_pick_max = j / 19200.0;
+    if (j != t) wr64(fw + 0x118, (uint64_t)j);
+    g_rate_pick(c);
+    if (j != t) wr64(fw + 0x118, (uint64_t)t);
+}
+void tomo_pick_stats(double *avg, double *mx, double *raw) { *avg = g_pick_n ? g_pick_sum / g_pick_n : 0; *mx = g_pick_max; *raw = g_pick_n ? g_pick_raw / g_pick_n : 0; g_pick_sum = g_pick_max = g_pick_raw = 0; g_pick_n = 0; }
+static void rate_install(void) {
+    if (!tomo_hook(0x710028b2b8ull, rate_pick_hook, &g_rate_pick)) printf("display: the frame-rate pick hook is not installed (the game judges its frame time with the refresh wait in it)%c", 10);
+}
 static void pointer_install(void) {
     if (getenv("TOMO_MOUSE") && getenv("TOMO_MOUSE")[0] == '0') return;
     if (!tomo_hook(0x710022dce0ull, pointer_hook, &g_pointer_update)) printf("mouse: the hand pointer hook is not installed (the mouse cannot move the hand)%c", 10);
@@ -1594,6 +1619,7 @@ static const ImportDef tomo_overrides[] = {
 };
 void register_tomo_imports(void) {
     persp_install();
+    rate_install();
     pointer_install();
     chatter_install();
     audio_volume_selftest();                     /* SSBU_AUDIO_VOLUME_SELFTEST=<expected startup percent>, -1 for no device */
