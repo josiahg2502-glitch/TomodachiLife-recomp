@@ -166,8 +166,13 @@ static DWORD WINAPI watchdog(LPVOID arg) {
                 if (!h || !QueryThreadCycleTime(h, &q)) continue;
                 int ran = q - g_thr_cyc[i] > 200000;
                 g_thr_cyc[i] = q;
-                if (!ran) continue;
                 const char *ti = tc->in_import;
+                if (!ran && ti && !strstr(ti, "WaitLightEvent") && !strstr(ti, "ReceiveLightMessageQueue") && !strstr(ti, "WaitSystemEvent") && !strstr(ti, "WaitTimerEvent")
+                    && !strstr(ti, "SleepThread") && !strstr(ti, "WaitConditionVariable") && !strstr(ti, "WaitEvent") && !strstr(ti, "ReceiveMessageQueue")) {
+                    snprintf(key, sizeof key, "  (blocked meanwhile) %s: %s called from %llx", name ? name : "?", ti, (unsigned long long)tc->import_from);      /* a thread held up in a call that is not its idle wait */
+                    bucket_add(key, dt);
+                }
+                if (!ran) continue;
                 snprintf(key, sizeof key, "  (meanwhile) %s: %s", name ? name : "?", ti ? ti : "lifted code");
                 bucket_add(key, dt);
             }

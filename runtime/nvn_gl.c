@@ -1257,12 +1257,12 @@ static uint64_t twin_key(Tex *t, uint64_t h, int full) {      /* 0: not a candid
     return k ? k : 1;
 }
 static GLuint twin_copy(Tex *t, uint64_t key) {   /* the GL texture copied from, 0 = none */
-    ga_barrier();
     unsigned i = (unsigned)key & (TWIN_SLOTS - 1);
     Tex *c = g_twin[i].t;
     if (!key || !c || c == t || g_twin[i].key != key || c->hash != g_twin[i].h || !c->o.gl || c->gpu_written || c->rw || c->b.format != t->b.format
         || c->b.width != t->b.width || c->b.height != t->b.height || c->b.depth != t->b.depth || c->b.target != t->b.target || c->glevels != t->glevels
         || !gl_has(glCopyImageSubData, "glCopyImageSubData")) return 0;
+    ga_barrier();                                  /* (the twin's own levels may still be queued for the GPU decoder) */
     if (c->dec_pending) dec_finish(c);
     TexLayout L;
     GLenum tg = gl_target(t->b.target, t->b.samples);
@@ -5612,8 +5612,9 @@ static void gputime_note(const Cmd *m) {
 static void exec(const Cmd *m, int depth) {
     const uint8_t *blob = BLOB(m);
     const uint64_t *a = m->a;
-    ga_barrier();                                  /* texels the GPU decoder stored are visible to this command */
     g_cur_op = k_op_name[m->op < OP_COUNT ? m->op : 0];
+    HS_IN(g_cur_op, 0);                            /* (the hitch report names the command; the scopes inside name its parts) */
+    ga_barrier();                                  /* texels the GPU decoder stored are visible to this command */
     /* TOMO_GPUTIME_EVERY=<n>: only every n-th draw / dispatch is finished and timed (the others run pipelined, as without the
      * diagnostic); the last commands are noted for the record either way */
     static int every = -1;
@@ -6286,6 +6287,7 @@ static void exec(const Cmd *m, int depth) {
         GLenum e = glGetError();
         if (e) { g_st.gl_errors++; logf_limited(&nlog, 60, "nvn_gl: GL error 0x%x after %s\n", e, g_cur_op); }
     }
+    HS_OUT();
 }
 static void replay(uint64_t handle, int depth) {
     size_t len = 0;
@@ -6510,6 +6512,33 @@ static void bl_update(void) {                                /* render thread, b
     }
 }
 static void bl_bind(void) { if (g_bl_buf) gs_ssbo(39, g_bl_buf, 0, (BL_SLOTS + 2) * 16); }
+/* The ASTC textures a batch binds, synced before its first command: their GPU decodes then run back to back with one memory
+ * barrier after them. Synced at their binds, each decode came between two draws, and the GPU let the draws before it finish
+ * and the draw after it wait (the title's first frame: 292 small textures, 97 ms of GPU, a 150 ms frame, 2026-10-31). The
+ * binds still sync (nothing is done twice in a batch); the pools as the batch sets them, deferred arrays as they hold now.
+ * TOMO_TEX_PRESCAN=0: at the binds only, as before. */
+static void prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
+    size_t len = 0;
+    uint8_t *data = list_lookup(handle, &len);
+    for (size_t off = 0; data && off + sizeof(Cmd) <= len && *n < 4096;) {
+        const Cmd *m = (const Cmd *)(data + off);
+        const uint8_t *blob = BLOB(m), *hs = NULL;
+        int count = 0;
+        if (m->size < sizeof(Cmd)) break;
+        if (m->op == OP_TEXPOOL) *tp = P(m->a[0]);
+        else if (m->op == OP_TEXTURES) { count = (int)m->a[2]; hs = blob; }
+        else if (m->op == OP_DEFERRED && m->a[5] == OP_TEXTURES && m->a[3]) { count = (int)m->a[2]; hs = P(m->a[3]); }
+        else if (m->op == OP_CALL && depth < 8) for (int i = 0; i < (int)m->a[0]; i++) { uint64_t h; memcpy(&h, blob + i * 8, 8); prescan_list(h, depth + 1, tp, n); }
+        for (int i = 0; i < count && i < 32; i++) {
+            uint64_t h;
+            Tex *t; View v; SamplerParams sp;
+            memcpy(&h, hs + i * 8, 8);
+            handle_lookup(*tp, NULL, h, &t, &v, &sp);
+            if (t && !t->dead && t->b.format >= 0x79 && t->b.format <= 0x94 && t->checked != g_serial) { tex_sync_a(t, 1); (*n)++; }
+        }
+        off += m->size;
+    }
+}
 static void job_submit(void *arg) {
     SubmitJob *j = arg;
     static int nlog;
@@ -6519,9 +6548,19 @@ static void job_submit(void *arg) {
     }
     g_serial++;
     g_arena_gen++;                               /* guest memory may have changed since the last batch */
+    { HS_IN("batch start: write watch scan (waited for), lists, decoded levels", 0);
     ww_scan_apply(j->ww_seq);                     /* which: the arena keeps what nobody wrote */
     bl_update();
     dec_land();
+    HS_OUT(); }
+    {   static int on = -1;
+        if (on < 0) on = !(getenv("TOMO_TEX_PRESCAN") && getenv("TOMO_TEX_PRESCAN")[0] == '0');
+        TexPool *tp = S.tpool;
+        int n = 0;
+        HS_IN("batch start: ASTC textures it binds (checked, queued)", 0);
+        if (on && ga_on()) for (int i = 0; i < j->count; i++) prescan_list(j->handles[i], 0, &tp, &n);
+        HS_OUT();
+    }
     LONG64 pf0 = pf_now();
     for (int i = 0; i < j->count; i++) replay(j->handles[i], 0);
     compute_flush_async();                       /* the guest may read what compute wrote once its fence after this batch has passed */
@@ -7445,8 +7484,13 @@ static void prog_set_shaders(Ctx *c) {             /* session 8: the call timed 
 }
 static void prog_set_shaders_(Ctx *c) {
     static int nlog, nlog2;
-    { LONG64 tb = pf_now(); gl_barrier(); nvn_setsh_part[0] += pf_now() - tb; }
     Prog *p = hobj(A0, K_PROG);
+    /* Only a program set again waits for the commands queued before (they read its stages when they run); one that has no
+     * stages yet (just initialized) is drawn by none of them: the game's job threads waited 30-70 ms for the render thread
+     * here at each scene load (2026-10-31). */
+    int had = 0;
+    for (int s = 0; p && s < 6; s++) had |= p->st[s].state != 0;
+    if (had) { LONG64 tb = pf_now(); gl_barrier(); nvn_setsh_part[0] += pf_now() - tb; }
     int count = (int)A1;
     uint64_t stride = strstr(hostfn_current_name(), "Ext") ? 24 : 16;      /* the Ext variant has a third pointer per shader */
     InterlockedIncrement(&g_setshaders_calls);

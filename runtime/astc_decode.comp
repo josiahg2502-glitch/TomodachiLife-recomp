@@ -1,40 +1,23 @@
 #version 450
-// ASTC (LDR, 2D) decoding on the GPU (nvn_gl_astc.c): the port of tex_decode.c's astc_block, writing the texels into the
-// RGBA8 image of their level. One dispatch decodes up to 8 levels of a texture (a work group belongs to one level; its
-// image is picked by a switch). Desktop GPUs have no ASTC; decoded on the CPU, a scene change cost 100-460 ms of the
-// render thread (2026-10-30). Precompiled into astc_decode_spv.h by scripts/gl_shaders.sh.
-// A work group takes 64 blocks in two steps (2026-10-31): each invocation decodes one block's mode, endpoints and weights
-// into shared memory, then the 64 invocations share out the texels of the 64 blocks. One invocation per block for both
-// (as first written) kept ~1.3 KB of arrays per invocation and 36-144 texels in a row: the first frames' 33 MB of 6x6
-// blocks held the GPU about 190 ms.
+// ASTC (LDR, 2D) decoding on the GPU (nvn_gl_astc.c): the port of tex_decode.c's astc_block. One dispatch decodes the
+// levels of all the textures queued since the last command that read textures; the texels (RGBA8) go into a buffer that
+// nvn_gl_astc.c then copies into each texture's level. Desktop GPUs have no ASTC; decoded on the CPU, a scene change cost
+// 100-460 ms of the render thread (2026-10-30). Precompiled into astc_decode_spv.h by scripts/gl_shaders.sh.
+// A work group takes 64 blocks of one level in two steps (2026-10-31): each invocation decodes one block's mode, endpoints
+// and weights into shared memory, then the 64 invocations share out the texels of the 64 blocks. One invocation per block
+// for both (as first written) kept ~1.3 KB of arrays per invocation and 36-144 texels in a row: the first frames' 33 MB of
+// 6x6 blocks held the GPU about 190 ms. One dispatch per texture: a small one is as long as one block's decode on one
+// invocation, the title's 292 small textures one after the other 94 ms of GPU.
 // Khronos Data Format Specification, chapter "ASTC Compressed Texture Image Format".
 layout(local_size_x = 64) in;
 layout(binding = 91, std430) readonly buffer Blocks { uvec4 blk[]; };
-layout(binding = 0, rgba8) uniform writeonly image2D dst0;
-layout(binding = 1, rgba8) uniform writeonly image2D dst1;
-layout(binding = 2, rgba8) uniform writeonly image2D dst2;
-layout(binding = 3, rgba8) uniform writeonly image2D dst3;
-layout(binding = 4, rgba8) uniform writeonly image2D dst4;
-layout(binding = 5, rgba8) uniform writeonly image2D dst5;
-layout(binding = 6, rgba8) uniform writeonly image2D dst6;
-layout(binding = 7, rgba8) uniform writeonly image2D dst7;
-// [2l] = (width, height, blocks per row, block rows) of level l; [2l + 1] = (its first work group, its blocks, its first
-// block in blk[], 0); [16] = (block width, block height, levels, srgb: 1 = the texels are stored as the sRGB bytes)
-layout(location = 0) uniform ivec4 u_lv[17];
-int g_lvl, g_w, g_h;
-void store(int x, int y, vec4 c) {
-    ivec2 p = ivec2(x, y);
-    switch (g_lvl) {
-    case 0: imageStore(dst0, p, c); break;
-    case 1: imageStore(dst1, p, c); break;
-    case 2: imageStore(dst2, p, c); break;
-    case 3: imageStore(dst3, p, c); break;
-    case 4: imageStore(dst4, p, c); break;
-    case 5: imageStore(dst5, p, c); break;
-    case 6: imageStore(dst6, p, c); break;
-    default: imageStore(dst7, p, c); break;
-    }
-}
+// 3 per level: (width, height, blocks per row, block rows), (first work group, blocks, first block in blk[], first texel in
+// texel[]), (block width, block height, srgb: 1 = the texels are stored as the sRGB bytes, 0)
+layout(binding = 92, std430) readonly buffer Levels { ivec4 lv[]; };
+layout(binding = 93, std430) writeonly buffer Texels { uint texel[]; };
+layout(location = 0) uniform ivec4 u_info;                // x = levels
+int g_w, g_h, g_base;
+void store(int x, int y, ivec4 c) { texel[g_base + y * g_w + x] = uint(c.x) | (uint(c.y) << 8) | (uint(c.z) << 16) | (uint(c.w) << 24); }
 
 // ---- bits of a 128-bit block held as four words; bits past `end` read as zero
 uint bits128(uvec4 p, int pos, int n) {
@@ -396,13 +379,14 @@ int infill(int b, int p, int dual, int gw, int gh, int Ds, int Dt, int x, int y)
 }
 
 void main() {
-    int gid = int(gl_WorkGroupID.x), lid = int(gl_LocalInvocationID.x), nl = u_lv[16].z, l = 0, first = 0, nblocks = 0;
-    for (l = 0; l < nl; l++) { first = u_lv[2 * l + 1].x; nblocks = u_lv[2 * l + 1].y; if (gid >= first && gid < first + (nblocks + 63) / 64) break; }
-    if (l >= nl) return;                             // (the whole work group)
-    g_lvl = l; g_w = u_lv[2 * l].x; g_h = u_lv[2 * l].y;
-    int wb = u_lv[2 * l].z, bw = u_lv[16].x, bh = u_lv[16].y, srgb = u_lv[16].w;
+    int gid = int(gl_WorkGroupID.x), lid = int(gl_LocalInvocationID.x), lo = 0, hi = u_info.x - 1;
+    while (lo < hi) { int mid = (lo + hi + 1) >> 1; if (lv[3 * mid + 1].x <= gid) lo = mid; else hi = mid - 1; }      // the work group's level
+    int l = lo, first = lv[3 * l + 1].x, nblocks = lv[3 * l + 1].y;
+    if (u_info.x <= 0 || gid < first || gid >= first + (nblocks + 63) / 64) return;      // (the whole work group)
+    g_w = lv[3 * l].x; g_h = lv[3 * l].y; g_base = lv[3 * l + 1].w;
+    int wb = lv[3 * l].z, bw = lv[3 * l + 2].x, bh = lv[3 * l + 2].y, srgb = lv[3 * l + 2].z;
     int base = (gid - first) * 64, nb = min(64, nblocks - base);
-    if (lid < nb) decode_block(lid, blk[u_lv[2 * l + 1].z + base + lid], bw, bh);
+    if (lid < nb) decode_block(lid, blk[lv[3 * l + 1].z + base + lid], bw, bh);
     barrier();
     // Step 2: the texels of the work group's blocks, shared out among the 64 invocations
     int per = bw * bh, Ds = (1024 + bw / 2) / (bw - 1), Dt = (1024 + bh / 2) / (bh - 1), shift = per < 31 ? 1 : 0;
@@ -413,7 +397,7 @@ void main() {
         uint hd = s_hdr[b];
         if ((hd & 3u) != 0u) {
             uint c = (hd & 3u) == 1u ? s_ep[b][0] : 0xFFFF00FFu;      // (error: magenta)
-            store(px0, py0, vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), float(c >> 24)) / 255.0);
+            texel[g_base + py0 * g_w + px0] = c;
             continue;
         }
         int gw = int((hd >> 2) & 15u), gh = int((hd >> 6) & 15u), dual = int((hd >> 10) & 1u), ccs = int((hd >> 11) & 3u), nparts = int((hd >> 13) & 3u) + 1;
@@ -427,6 +411,6 @@ void main() {
             int w = dual != 0 && c == ccs ? w1 : w0, v = (e0 * (64 - w) + e1 * w + 32) >> 6;
             px[c] = srgb != 0 ? v >> 8 : v == 65535 ? 255 : (v * 255 + 32768) >> 16;
         }
-        store(px0, py0, vec4(px) / 255.0);
+        store(px0, py0, px);
     }
 }
