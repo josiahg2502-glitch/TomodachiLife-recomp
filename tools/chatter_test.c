@@ -49,9 +49,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < g_cm.nmii; i++)
         for (int j = 0; j < g_cm.nmii; j++) {
             int si = cm_slot(g_cm.mii[i].name), sj = cm_slot(g_cm.mii[j].name), c = i != j && si >= 0 && sj >= 0 ? g_cm.rel[cm_pair(si, sj)] : 0;
-            if (c & 0x7f) printf("  tie: %s is %s's %s\n", g_cm.mii[j].name, g_cm.mii[i].name, cm_rel_what(c));
+            if (c & 0x3f) printf("  tie: %s is %s's %s\n", g_cm.mii[j].name, g_cm.mii[i].name, cm_rel_what(c));
         }
-    {   static AiFacts f; int c = ai_want_cat(); ai_facts(&f, 2, c); printf("a thought's facts (category %d):\n  %s\n", c, f.text); }
+    {   static AiFacts f; int c = ai_want_cat(2); ai_facts(&f, 2, c); printf("a thought's facts (category %d):\n  %s\n", c, f.text); }
     for (int i = 0; i < g_cm.nword; i++) printf("  word %s\n", g_cm.word[i]);
     for (int kind = 1; kind <= 2; kind++) {
         printf("%s, speaker unknown:\n", kind == 1 ? "touch talk" : "thoughts");
@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < lines; i++) {
         char raw[300], line[300]; const char *why = "";
         DWORD a = GetTickCount();
-        char about[100]; int cat = i % 2 ? ai_want_cat() : -1, ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, about, &cat, &why);
+        char about[100]; int cat = ai_want_cat(1 + i % 2), ok = ai_write(m, prefix, 1 + i % 2, &rng, raw, sizeof raw, line, sizeof line, about, &cat, &why);
         good += ok;
         if (ok) ai_push(1 + i % 2, line, about, cat);           /* (so the next thought goes to another personality) */
         printf("  %s %5lu ms %-6s %-60s -> %s\n", i % 2 ? "think" : "say  ", GetTickCount() - a, cat >= 0 ? k_pcat_key[cat] : "", raw, ok ? line : why);

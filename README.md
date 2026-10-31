@@ -103,8 +103,8 @@ their own voice and way of talking, while the game's own lines stay most of what
 - When two Miis chat (**English Mii chats (mod)**, on by default), some conversations are in English instead of Mii-speak.
 
 It learns your island as you play: who lives there, who just moved in (a new Mii is learned once the game saves), who
-moved away, and the words you taught the Miis. It knows which Mii is speaking, so a thought can be about another resident
-by name, never about the one thinking it. It also knows each Mii as the game does: their personality (worked out from
+moved away, and the words you taught the Miis. It knows which Mii is speaking, so a thought, or what a Mii tells you when you check on
+them, can be about another resident by name, never about the one speaking. It also knows each Mii as the game does: their personality (worked out from
 their personality sliders the way the game does, with the game's own names and descriptions), their pronouns, their
 birthday and who they are to each other (partners, family, friends), so thoughts and chats fit who is talking, birthdays
 coming up get mentioned and Miis gossip about the island's couples and families. Everything it learns and writes is kept in `build\userdata`
