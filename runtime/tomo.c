@@ -1534,7 +1534,7 @@ static void prompt_seen(uint64_t q) {
                                                                                                     * it with its label, if button-sized */
             char c0 = (char)rd8(up + 0xb0);
             if ((c0 == 'L' || c0 == 'N') && rd8(up + 0xb1) == '_' && pane_rect(up, pr) && pr[2] - pr[0] < 600.0f && pr[3] - pr[1] < 190.0f &&
-                pr[3] - pr[1] < (r[3] - r[1]) * 2.5f && pr[0] <= r[0] && pr[2] >= r[2] && pr[1] <= r[1] && pr[3] >= r[3]) { memcpy(r, pr, sizeof r); break; }
+                (c0 == 'L' || pr[3] - pr[1] < (r[3] - r[1]) * 2.5f) && pr[0] <= r[0] && pr[2] >= r[2] && pr[1] <= r[1] && pr[3] >= r[3]) { memcpy(r, pr, sizeof r); break; }      /* (a group no taller than a line or two) */
             if (c0 == 'L') break;                      /* (not past the part) */
         }
         {   uint64_t par = rd64(q + 0x18);            /* a label right of the symbol in the same group ("L More info"): the click area takes it in */

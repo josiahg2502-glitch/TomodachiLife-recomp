@@ -722,6 +722,7 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
         if (!on) { wheel = 0; if (g_mouse_on) InterlockedExchange(&g_mouse_on, 0); }
     }
     if ((long long)*lx * *lx + (long long)*ly * *ly > (long long)(STICK_MAX / 4) * (STICK_MAX / 4)) InterlockedExchange(&g_mouse_on, 0);      /* a stick takes over */
+    if (!in) { InterlockedExchange(&g_mouse_left, 0); InterlockedExchange(&g_mouse_right, 0); }      /* (window in the background, pointer off the picture: no button held) */
     if (in) {
         int moved = px > -1e8f && (fabsf(x - px) >= 1.0f || fabsf(y - py) >= 1.0f);      /* (the first look only notes where it is) */
         if (moved || (px > -1e8f && b)) InterlockedExchange(&g_mouse_on, 1);
