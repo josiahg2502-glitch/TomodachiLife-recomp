@@ -1337,7 +1337,7 @@ int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportF
 static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
     static const uint64_t v262144[][2] = {{0x71008ce838ull, 0x7100897d48ull}, {0x71006ec3c0ull, 0x71006ce020ull},
         {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull},
-        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}};
+        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}};
     uint64_t at = 0;
     if (g_main.text_size == 0x25ce6a0) at = a;
     else if (g_main.text_size == 0x256d250)
@@ -1506,44 +1506,65 @@ static int dlg_rect(uint64_t el, float r[4]) {      /* the element's pane */
     uint64_t part = rd64(el + 0x18), pane = part ? rd64(part + 0x58) : 0;
     return pane && pane_rect(pane, r);
 }
-/* Button prompts ("+ Buy", "B Put one back", the L / R of tabs): text boxes (pane name "T_...", +0xb0) whose text (+0xd8)
- * holds one of the font's button symbols, U+E0E0.. A B X Y L R ZL ZR, U+E0EF +, U+E0F0 -. Found in the layout of the focused
- * buttons (shown panes only); a click on one, or on the button part around it ("L_...", when button-sized: "+ Buy"),
- * presses that button (nnhid.c). */
-static void dlg_prompts(uint64_t root) {
-    void nnhid_prompts(const float (*r)[4], const int *code, int n);
-    float rs[32][4]; int code[32], n = 0, visits = 0;
-    uint64_t stack[128]; int sp = 0;
-    if (root) stack[sp++] = root;
-    while (sp && visits++ < 4000 && n < 32) {
-        uint64_t q = stack[--sp], t;
-        if (!(rd8(q + 0x58) & 1)) continue;        /* hidden, with all it holds */
+/* Button prompts ("+ Buy", "B Put one back", the L / R of tabs, the island's X menu and Y residents icons): text boxes
+ * (pane name "T_...", +0xb0) whose text (+0xd8) holds one of the font's button symbols, U+E0E0.. A B X Y L R ZL ZR,
+ * U+E0EF +, U+E0F0 -. Collected as the game draws them ([0x710026dca0], 1.0.4 0x710026eef0: a pane's Draw, which skips
+ * hidden panes and those below them; flags +0x58 0x81 = shown and ready, +0x5a its alpha) and handed to nnhid.c once a
+ * frame (prompts_publish): a click on one, or on the button part around it ("L_...", when button-sized: "+ Buy"), presses
+ * that button. Panes drawn in the 3D world (names over buildings) are not in the screen's layout units: only those
+ * inside the screen count. */
+static ImportFn g_pane_draw;
+static float g_pr[2][32][4]; static int g_pr_code[2][32]; static volatile LONG g_pr_n[2], g_pr_side;
+static uint64_t g_txt_base, g_txt_end;          /* (the last memory region text was read from: no system call for most) */
+static void prompt_seen(uint64_t q) {
+    uint64_t t = rd64(q + 0xd8);
+    if (t < 0x10000 || (t & 1)) return;
+    if (t < g_txt_base || t + 8 > g_txt_end) {
         MEMORY_BASIC_INFORMATION mi;
-        if (rd8(q + 0xb0) == 'T' && rd8(q + 0xb1) == '_' && (t = rd64(q + 0xd8)) > 0x10000 && !(t & 1) &&
-            VirtualQuery((void *)(uintptr_t)t, &mi, sizeof mi) && mi.State == MEM_COMMIT && (mi.Protect & (PAGE_READWRITE | PAGE_READONLY))) {
-            for (int k = 0; k < 4; k++) {
-                uint16_t ch = rd16(t + 2 * (uint64_t)k);
-                if (!ch) break;
-                if ((ch >= 0xe0e0 && ch <= 0xe0e7) || ch == 0xe0ef || ch == 0xe0f0) {
-                    float r[4], pr[4];
-                    if (!pane_rect(q, r)) break;
-                    for (uint64_t up = rd64(q + 0x18), k = 0; up && k < 4; up = rd64(up + 0x18), k++)      /* the button part holding it ("L_..."), if button-sized */
-                        if (rd8(up + 0xb0) == 'L' && rd8(up + 0xb1) == '_') {
-                            if (pane_rect(up, pr) && pr[2] - pr[0] < 600.0f && pr[3] - pr[1] < 190.0f && pr[0] <= r[0] && pr[2] >= r[2] && pr[1] <= r[1] && pr[3] >= r[3]) memcpy(r, pr, sizeof r);
-                            break;
-                        }
-                    rs[n][0] = r[0] / 1.5f + 640.0f; rs[n][1] = 360.0f - r[3] / 1.5f; rs[n][2] = r[2] / 1.5f + 640.0f; rs[n][3] = 360.0f - r[1] / 1.5f;
-                    code[n++] = ch;
-                    break;
-                }
-            }
-        }
-        for (uint64_t node = rd64(q + 0x28), k = 0; node && node != q + 0x20 && k < 256 && sp < 128; node = rd64(node + 8), k++) stack[sp++] = node - 8;
+        if (!VirtualQuery((void *)(uintptr_t)t, &mi, sizeof mi) || mi.State != MEM_COMMIT || !(mi.Protect & (PAGE_READWRITE | PAGE_READONLY))) return;
+        g_txt_base = (uint64_t)(uintptr_t)mi.BaseAddress; g_txt_end = g_txt_base + mi.RegionSize;
     }
-    {   static int said = -1; static float sx; float sum = 0; for (int i = 0; i < n; i++) sum += rs[i][0] + rs[i][1] * 3 + code[i];      /* TEST ONLY */
+    for (int k = 0; k < 3; k++) {
+        uint16_t ch = rd16(t + 2 * (uint64_t)k);
+        if (!ch) return;
+        if (!((ch >= 0xe0e0 && ch <= 0xe0e7) || ch == 0xe0ef || ch == 0xe0f0)) continue;
+        float r[4], pr[4];
+        if (!pane_rect(q, r) || r[0] < -960.0f * 1.6f || r[2] > 960.0f * 1.6f || r[1] < -540.0f || r[3] > 540.0f) return;      /* (wide screens reach past +-960) */
+        for (uint64_t up = rd64(q + 0x18), k2 = 0; up && k2 < 3; up = rd64(up + 0x18), k2++) {      /* the button part ("L_...") or group ("N_...") holding
+                                                                                                    * it with its label, if button-sized */
+            char c0 = (char)rd8(up + 0xb0);
+            if ((c0 == 'L' || c0 == 'N') && rd8(up + 0xb1) == '_' && pane_rect(up, pr) && pr[2] - pr[0] < 600.0f && pr[3] - pr[1] < 190.0f &&
+                pr[3] - pr[1] < (r[3] - r[1]) * 2.5f && pr[0] <= r[0] && pr[2] >= r[2] && pr[1] <= r[1] && pr[3] >= r[3]) { memcpy(r, pr, sizeof r); break; }
+            if (c0 == 'L') break;                      /* (not past the part) */
+        }
+        {   uint64_t par = rd64(q + 0x18);            /* a label right of the symbol in the same group ("L More info"): the click area takes it in */
+            for (uint64_t node = par ? rd64(par + 0x28) : 0, k2 = 0; node && node != par + 0x20 && k2 < 64; node = rd64(node + 8), k2++) {
+                uint64_t sib = node - 8; float sr[4];
+                if (sib == q || rd8(sib + 0xb0) != 'T' || rd8(sib + 0xb1) != '_' || (rd8(sib + 0x58) & 0x81) != 0x81 || !pane_rect(sib, sr)) continue;
+                float ov = (sr[3] < r[3] ? sr[3] : r[3]) - (sr[1] > r[1] ? sr[1] : r[1]);
+                if (ov > (r[3] - r[1]) * 0.5f && sr[0] >= r[2] - 8.0f && sr[0] <= r[2] + 40.0f && sr[2] - sr[0] < 500.0f) { if (sr[2] > r[2]) r[2] = sr[2]; }
+            } }
+        int side = (int)g_pr_side, i = (int)InterlockedIncrement(&g_pr_n[side]) - 1;
+        if (i < 32) { g_pr[side][i][0] = r[0] / 1.5f + 640.0f; g_pr[side][i][1] = 360.0f - r[3] / 1.5f; g_pr[side][i][2] = r[2] / 1.5f + 640.0f; g_pr[side][i][3] = 360.0f - r[1] / 1.5f; g_pr_code[side][i] = ch; }
+        return;
+    }
+}
+static void pane_draw_hook(Ctx *c, void *user) {
+    (void)user;
+    uint64_t q = A0;
+    if (rd8(q + 0xb0) == 'T' && rd8(q + 0xb1) == '_' && (rd8(q + 0x58) & 0x81) == 0x81 && rd8(q + 0x5a)) prompt_seen(q);
+    g_pane_draw(c);
+}
+static void prompts_publish(void) {                /* once a frame (the hand's update): what was drawn since the last time */
+    void nnhid_prompts(const float (*r)[4], const int *code, int n);
+    int side = (int)g_pr_side, n = (int)g_pr_n[side];
+    InterlockedExchange(&g_pr_n[!side], 0);
+    InterlockedExchange(&g_pr_side, !side);
+    if (n > 32) n = 32;
+    {   static int said = -1; static float sx; float sum = 0; for (int i = 0; i < n; i++) sum += g_pr[side][i][0] + g_pr[side][i][1] * 3 + g_pr_code[side][i];      /* TEST ONLY */
         if (getenv("TOMO_MOUSE_DEBUG") && (n != said || sum != sx)) { said = n; sx = sum;
-            for (int i = 0; i < n; i++) printf("prompts: %d of %d: %04x at %.0f,%.0f..%.0f,%.0f%c", i, n, code[i], rs[i][0], rs[i][1], rs[i][2], rs[i][3], 10); } }
-    nnhid_prompts((const float (*)[4])rs, code, n);
+            for (int i = 0; i < n; i++) printf("prompts: %d of %d: %04x at %.0f,%.0f..%.0f,%.0f%c", i, n, g_pr_code[side][i], g_pr[side][i][0], g_pr[side][i][1], g_pr[side][i][2], g_pr[side][i][3], 10); } }
+    nnhid_prompts((const float (*)[4])g_pr[side], g_pr_code[side], n);
 }
 static int dlg_shown(uint64_t el) {             /* its pane and every pane above it visible (nn::ui2d pane flags +0x58, bit 0): a shop keeps the
                                                  * items of its other tabs in the same ring, hidden, over the shown ones */
@@ -1600,7 +1621,6 @@ static void dialog_mouse(Ctx *c) {
         else for (int k = n - 1; k >= (sent < 0 ? 1 : end); k--) if (dlg_enabled(c, ad, holder, ring[k])) { dlg_focus(c, ad, holder, ring[k]); focused = 1; break; }
         if (!focused && sent >= 0) nnhid_dialog_page(wheel < 0 ? 1 : -1);      /* past the end: the next / previous page (ZR / ZL), as lists turn them */
     }
-    { uint64_t root = rd64(rd64(cur + 0x18) + 0x58); for (int k = 0; root && rd64(root + 0x18) && k < 32; k++) root = rd64(root + 0x18); dlg_prompts(root); }
     int moved = mouse && (fabsf(xy[0] - last[0]) >= 1.0f || fabsf(xy[1] - last[1]) >= 1.0f);
     if (mouse) { last[0] = xy[0]; last[1] = xy[1]; }
     if (!focused && over && over != cur && (moved || nnhid_mouse_left()) && dlg_enabled(c, ad, holder, over)) {
@@ -1614,6 +1634,7 @@ static void dialog_mouse(Ctx *c) {
     nnhid_dialog_mouse(!mouse ? 3 : over && (over == cur || focused) ? 1 : 2, focused);
 }
 static void pointer_hook(Ctx *c, void *user) {
+    prompts_publish();
     dialog_mouse(c);
     int nnhid_mouse(float xy[2]); void display_mouse_hand(void);
     float xy[2];
@@ -1753,6 +1774,7 @@ static void pointer_install(void) {
     if (getenv("TOMO_MOUSE") && getenv("TOMO_MOUSE")[0] == '0') return;
     if (!tomo_hook(0x710022dce0ull, pointer_hook, &g_pointer_update)) printf("mouse: the hand pointer hook is not installed (the mouse cannot move the hand)%c", 10);
     if (!tomo_hook(0x710044d090ull, isle_input_hook, &g_isle_input)) printf("mouse: the island camera hook is not installed (the mouse cannot move the island)%c", 10);
+    if (!tomo_hook(0x710026dca0ull, pane_draw_hook, &g_pane_draw)) printf("mouse: the pane draw hook is not installed (button prompts cannot be clicked)%c", 10);
 }
 static void heaplog_install(void) {
     trace_install();

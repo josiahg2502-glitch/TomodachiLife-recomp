@@ -637,7 +637,8 @@ void nnhid_dialog_rects(const float (*r)[4], int n, int cur) {
 }
 int nnhid_mouse_left(void) { return g_mouse_on && g_mouse_left; }
 static volatile LONG g_mouse_right;
-int nnhid_mouse_buttons(void) { return g_mouse_on ? (int)(g_mouse_left | (g_mouse_right << 1)) : 0; }      /* (osk.c under TOMO_MOUSE_TEST) */
+static volatile LONG g_on_prompt;                /* the left button went down on a button prompt (tomo.c's island leaves it alone) */
+int nnhid_mouse_buttons(void) { return g_mouse_on ? (int)((g_mouse_left && !g_on_prompt) | (g_mouse_right << 1)) : 0; }      /* (osk.c, tomo.c's island) */
 static int dialog_click_ok(float x, float y) {    /* a click presses A only on the focused button under the mouse (where it is now) */
     DWORD now = GetTickCount();
     if (now - (DWORD)g_dlg_tick > 250 || g_dlg_state == 0) return 1;      /* no buttons on screen lately */
@@ -721,10 +722,12 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
         float px_was = px;
         px = x; py = y; g_mouse_xy[0] = x; g_mouse_xy[1] = y;
         InterlockedExchange(&g_mouse_left, b & 1); InterlockedExchange(&g_mouse_right, (b >> 1) & 1);
-        {   static int pb, on_prompt = -1, held;     /* a press that began on a button prompt taps that button (4 polls: a held one repeats), not A */
-            if ((b & 1) && !(pb & 1)) { on_prompt = g_mouse_on && !island ? prompt_at(x, y) : -1; held = 0;
+        {   static int pb, on_prompt = -1, held;     /* a press that began on a button prompt taps that button (4 polls: a held one repeats), not A
+                                                       * (on the island the press is then not a drag or a click there either: g_on_prompt) */
+            if ((b & 1) && !(pb & 1)) { on_prompt = g_mouse_on ? prompt_at(x, y) : -1; held = 0;
                 if (getenv("TOMO_MOUSE_DEBUG")) printf("mouse: press at %.0f,%.0f: prompt button %d%c", x, y, on_prompt, 10); }
             if (!(b & 1)) on_prompt = -1;
+            InterlockedExchange(&g_on_prompt, on_prompt >= 0);
             pb = b;
             if (g_mouse_on && on_prompt >= 0) { if (held++ < 4) *buttons |= 1ull << on_prompt; }
             else if (g_mouse_on) { if ((b & 1) && !island && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; }
