@@ -710,6 +710,9 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
     static float px = -1e9f, py = -1e9f;
     static int nudge, zoom, zoom_dir, flick, flick_dir, tap;
     int tomo_island(void), island = tomo_island();      /* the island: the left button drags and clicks there (tomo.c isle_mouse), the middle one turns it */
+    int tomo_carry(void), carry = g_mouse_on && tomo_carry();
+    int tomo_centred(void), panmode = g_mouse_on && !island && !carry && tomo_centred();      /* the hand held in the middle without the island's camera
+                                                                                                  * (the Island Builder): a drag is the stick, a click A */
     float x = 0, y = 0;
     int b = 0, wheel = 0, in = mouse_test(&x, &y, &b, &wheel);
     int free_hand = GetTickCount() - (DWORD)g_pointer_tick < 250;
@@ -734,7 +737,7 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
             InterlockedExchange(&g_on_prompt, on_prompt >= 0);
             pb = b;
             if (g_mouse_on && on_prompt >= 0) { if (held++ < 4) *buttons |= 1ull << on_prompt; }
-            else if (g_mouse_on) { if ((b & 1) && !island && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; }
+            else if (g_mouse_on) { if ((b & 1) && !island && !panmode && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; }
             if (g_mouse_on && (b & 2)) *buttons |= 1ull << BTN_B; }
         if (g_mouse_on && island && (b & 4) && moved && !*rx) { int v = (int)((x - px_was) * STICK_MAX / 10.0f); *rx = v > STICK_MAX ? STICK_MAX : v < -STICK_MAX ? -STICK_MAX : v; }
     }
@@ -755,7 +758,18 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
     if (InterlockedExchange(&g_tap_a, 0)) tap = 4;
     if (tap) { tap--; *buttons |= 1ull << BTN_A; }
     if (g_hold_a && island && g_mouse_left) *buttons |= 1ull << BTN_A;
-    int tomo_carry(void), carry = g_mouse_on && tomo_carry();
+    {   static int pdown, pdrag; static float p0x, p0y, plx, ply;      /* panmode: the world follows the drag (the stick opposite, by the drag's speed) */
+        int left = g_mouse_left && !g_on_prompt;
+        if (panmode && left) {
+            if (!pdown) { pdown = 1; pdrag = 0; p0x = plx = g_mouse_xy[0]; p0y = ply = g_mouse_xy[1]; }
+            if (!pdrag && fabsf(g_mouse_xy[0] - p0x) + fabsf(g_mouse_xy[1] - p0y) > 6.0f) pdrag = 1;
+            if (pdrag && !*lx && !*ly) {
+                int vx = (int)(-(g_mouse_xy[0] - plx) * STICK_MAX / 10.0f), vy = (int)((g_mouse_xy[1] - ply) * STICK_MAX / 10.0f);
+                *lx = vx > STICK_MAX ? STICK_MAX : vx < -STICK_MAX ? -STICK_MAX : vx; *ly = vy > STICK_MAX ? STICK_MAX : vy < -STICK_MAX ? -STICK_MAX : vy;
+            }
+            plx = g_mouse_xy[0]; ply = g_mouse_xy[1];
+        } else if (pdown) { pdown = 0; if (panmode && !pdrag) tap = 4; }      /* a click without a drag: A */
+    }
     {   /* a Mii grabbed with the mouse being carried: the cursor's offset from the middle is the stick */
         float dx = g_mouse_xy[0] - 640.0f, dy = g_mouse_xy[1] - 360.0f, d = sqrtf(dx * dx + dy * dy);
         if (carry && !*lx && !*ly && d > 40.0f) { float m = (d - 40.0f) / 260.0f; if (m > 1.0f) m = 1.0f; *lx = (int)(dx / d * m * STICK_MAX); *ly = (int)(-dy / d * m * STICK_MAX); } }

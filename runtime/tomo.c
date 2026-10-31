@@ -1686,6 +1686,7 @@ static void pointer_hook(Ctx *c, void *user) {
 static ImportFn g_isle_input;
 static volatile LONG g_isle_tick;
 int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
+int tomo_centred(void) { return GetTickCount() - (DWORD)g_centred_tick < 250; }      /* the hand held in the middle (the island, the Island Builder) */
 static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
 static volatile LONG g_carry;                     /* a Mii grabbed with the mouse: while it is carried (another camera; the island's is idle) the
                                                    * cursor's offset from the middle steers as the stick does, a click drops it (nnhid.c) */
