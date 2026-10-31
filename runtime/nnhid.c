@@ -664,11 +664,15 @@ void nnhid_prompts(const float (*r)[4], const int *code, int n) {
     ReleaseSRWLockExclusive(&g_dlg_lock);
     InterlockedExchange(&g_pr_tick, (LONG)GetTickCount());
 }
-static int prompt_at(float x, float y) {          /* the button whose prompt is under the mouse, or -1 */
+static int prompt_at(float x, float y) {          /* the button whose prompt is under the mouse, or -1; a menu button there that is smaller wins */
     if (GetTickCount() - (DWORD)g_pr_tick > 250) return -1;
-    int btn = -1;
+    int btn = -1; float area = 0;
     AcquireSRWLockShared(&g_dlg_lock);
-    for (int i = 0; i < g_pr_n && btn < 0; i++) if (x >= g_pr_rect[i][0] && x <= g_pr_rect[i][2] && y >= g_pr_rect[i][1] && y <= g_pr_rect[i][3]) btn = g_pr_btn[i];
+    for (int i = 0; i < g_pr_n && btn < 0; i++)
+        if (x >= g_pr_rect[i][0] && x <= g_pr_rect[i][2] && y >= g_pr_rect[i][1] && y <= g_pr_rect[i][3]) { btn = g_pr_btn[i]; area = (g_pr_rect[i][2] - g_pr_rect[i][0]) * (g_pr_rect[i][3] - g_pr_rect[i][1]); }
+    if (btn >= 0 && GetTickCount() - (DWORD)g_dlg_tick < 250 && g_dlg_state)
+        for (int i = 0; i < g_dlg_n; i++)
+            if (x >= g_dlg_rect[i][0] && x <= g_dlg_rect[i][2] && y >= g_dlg_rect[i][1] && y <= g_dlg_rect[i][3] && (g_dlg_rect[i][2] - g_dlg_rect[i][0]) * (g_dlg_rect[i][3] - g_dlg_rect[i][1]) < area) { btn = -1; break; }
     ReleaseSRWLockShared(&g_dlg_lock);
     return btn;
 }

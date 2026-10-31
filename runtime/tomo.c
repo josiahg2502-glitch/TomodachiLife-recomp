@@ -1549,18 +1549,29 @@ static void prompt_seen(uint64_t q) {
         return;
     }
 }
+static volatile LONG64 g_pdh_calls, g_pdh_ticks;   /* (TEST, TOMO_HOOKPROF: the hook's own cost) */
 static void pane_draw_hook(Ctx *c, void *user) {
     (void)user;
+    static int prof = -1; if (prof < 0) prof = getenv("TOMO_HOOKPROF") != NULL;
+    LARGE_INTEGER t0, t1; if (prof) QueryPerformanceCounter(&t0);
     uint64_t q = A0;
     if (rd8(q + 0xb0) == 'T' && rd8(q + 0xb1) == '_' && (rd8(q + 0x58) & 0x81) == 0x81 && rd8(q + 0x5a)) prompt_seen(q);
+    if (prof) { QueryPerformanceCounter(&t1); InterlockedIncrement64(&g_pdh_calls); InterlockedAdd64(&g_pdh_ticks, t1.QuadPart - t0.QuadPart); }
     g_pane_draw(c);
 }
 static void prompts_publish(void) {                /* once a frame (the hand's update): what was drawn since the last time */
     void nnhid_prompts(const float (*r)[4], const int *code, int n);
+    {   static int frames; static LARGE_INTEGER f; if (!f.QuadPart) QueryPerformanceFrequency(&f);      /* (TEST, TOMO_HOOKPROF) */
+        if (g_pdh_calls && ++frames % 300 == 0) { printf("hookprof: pane draws %lld a frame, %.3f ms a frame in the hook%c", (long long)(g_pdh_calls / 300),
+                                                          (double)g_pdh_ticks * 1000.0 / (double)f.QuadPart / 300.0, 10); InterlockedExchange64(&g_pdh_calls, 0); InterlockedExchange64(&g_pdh_ticks, 0); } }
     int side = (int)g_pr_side, n = (int)g_pr_n[side];
     InterlockedExchange(&g_pr_n[!side], 0);
     InterlockedExchange(&g_pr_side, !side);
     if (n > 32) n = 32;
+    for (int i = 0; i < n; i++) {                  /* a symbol on every item of a list (the Mii editor's Y on each category) is decoration: dropped */
+        int same = 0; for (int k = 0; k < n; k++) same += g_pr_code[side][k] == g_pr_code[side][i];
+        if (same > 3) { for (int k = i; k + 1 < n; k++) { memcpy(g_pr[side][k], g_pr[side][k + 1], sizeof g_pr[side][k]); g_pr_code[side][k] = g_pr_code[side][k + 1]; } n--; i--; }
+    }
     {   static int said = -1; static float sx; float sum = 0; for (int i = 0; i < n; i++) sum += g_pr[side][i][0] + g_pr[side][i][1] * 3 + g_pr_code[side][i];      /* TEST ONLY */
         if (getenv("TOMO_MOUSE_DEBUG") && (n != said || sum != sx)) { said = n; sx = sum;
             for (int i = 0; i < n; i++) printf("prompts: %d of %d: %04x at %.0f,%.0f..%.0f,%.0f%c", i, n, g_pr_code[side][i], g_pr[side][i][0], g_pr[side][i][1], g_pr[side][i][2], g_pr[side][i][3], 10); } }
