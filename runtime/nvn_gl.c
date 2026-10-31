@@ -1728,12 +1728,15 @@ static void fbo_purge(GLuint tex) {
     }
 }
 static int g_fbo_bad_last;                         /* set by fbo_get for an incomplete framebuffer: set_targets then names the textures */
+static LONG64 g_fbo_evicted, g_fbo_t_detach, g_fbo_t_make;      /* TOMO_RTSTAT */
 static GLuint fbo_get(const FboKey *k) {
     static int nlog;
     for (int i = 0; i < NFBO; i++) if (g_fbos[i].used && !memcmp(&g_fbos[i].k, k, sizeof *k)) return g_fbos[i].fbo;
+    LONG64 fq0 = pf_now();
     int slot = -1;
     for (int i = 0; i < NFBO && slot < 0; i++) if (!g_fbos[i].used) slot = i;
-    if (slot < 0) { slot = g_fbo_next++ & (NFBO - 1); fbo_drop_bound(g_fbos[slot].fbo); fbo_detach(g_fbos[slot].fbo); }
+    if (slot < 0) { slot = g_fbo_next++ & (NFBO - 1); fbo_drop_bound(g_fbos[slot].fbo); fbo_detach(g_fbos[slot].fbo); g_fbo_evicted++; }
+    g_fbo_t_detach += pf_now() - fq0;
     GLuint fbo = g_fbos[slot].fbo;                 /* a name kept from a purged or evicted entry, detached */
     GLenum bufs[8];
     if (!fbo) glGenFramebuffers(1, &fbo);
@@ -1758,6 +1761,7 @@ static GLuint fbo_get(const FboKey *k) {
         logf_limited(&nlog, 20, "nvn_gl: framebuffer incomplete (status 0x%x): %d colour targets (first gl %u), depth gl %u kind %d\n", st, k->n, k->color[0], k->depth, k->dkind);
     }
     g_fbos[slot].k = *k; g_fbos[slot].fbo = fbo; g_fbos[slot].used = 1;
+    g_fbo_t_make += pf_now() - fq0;
     return fbo;
 }
 
@@ -1879,9 +1883,11 @@ static int rb_stage(uint64_t size) {               /* a free staging buffer of a
     for (k = 0; k < 64 && g_rbs[k].buf; k++) {}
     if (k == 64 || !gl_has(glNamedBufferStorage, "glNamedBufferStorage") || !gl_has(glMapNamedBufferRange, "glMapNamedBufferRange")) return -1;
     uint64_t cap = 4096; while (cap < size) cap <<= 1;
+    HS_IN("compute results: staging buffer made", 0);
     glCreateBuffers(1, &g_rbs[k].buf);
     glNamedBufferStorage(g_rbs[k].buf, (ptrdiff_t)cap, NULL, 0x1 | 0x40 | 0x80 | 0x200);      /* MAP_READ | PERSISTENT | COHERENT | CLIENT_STORAGE */
     g_rbs[k].map = glMapNamedBufferRange(g_rbs[k].buf, 0, (ptrdiff_t)cap, 0x1 | 0x40 | 0x80);
+    HS_OUT();
     if (!g_rbs[k].map) { glDeleteBuffers(1, &g_rbs[k].buf); g_rbs[k].buf = 0; gs_invalidate(); return -1; }
     g_rbs[k].cap = cap;
     return k;
@@ -3969,9 +3975,10 @@ static int layered_rt(Tex *t, const View *v) {
  * neither compatible nor identical": the framebuffer was incomplete, the texture stayed empty and Mii faces black). The
  * target is a scratch texture of the view's format, a quarter the size, and its texels are copied into the compressed
  * texture (glCopyImageSubData: an uncompressed texel of the block's size is one block) when the render targets change. */
-typedef struct { Tex *t; int level, layer, w, h; GLuint gl; TexObj o; int pending; GLenum fmt, type; int bpb; } BcShadow;
+typedef struct { Tex *t; int level, layer, w, h; GLuint gl; TexObj o; int pending; GLenum fmt, type, internal; int bpb; } BcShadow;
 static BcShadow g_bcsh[64];
 static int g_bcsh_n;
+static LONG64 g_bc_made;                           /* scratches made (TOMO_RTSTAT) */
 static unsigned g_bcsh_next;
 static void bc_flush(void) {
     for (int i = 0; i < g_bcsh_n; i++) {
@@ -3985,13 +3992,22 @@ static void bc_flush(void) {
         Fmt tf;
         if ((tw < 4 || th < 4) && tg == GL_TEXTURE_2D && b->bpb && fmt_get(b->t->b.format, &tf)) {
             /* a level smaller than one block: glCopyImageSubData refuses it (a block is 4x4 texels, the level is not); the block
-             * goes through memory and is uploaded as compressed data of the level's real size */
-            uint8_t blk[16 * 4];
+             * goes through a buffer and is uploaded as compressed data of the level's real size. A buffer the GPU writes and
+             * reads (pack, then unpack): read into memory, each such level waited for the GPU, 28-35 ms a frame while the title
+             * made its Mii faces (2026-10-31). */
+            static GLuint pbo;
+            static unsigned slot;
             int n = b->w * b->h * b->bpb;
-            if (n <= (int)sizeof blk) {
-                glGetTextureSubImage(b->gl, 0, 0, 0, 0, b->w, b->h, 1, b->fmt, b->type, (GLsizei)sizeof blk, blk);
+            if (n <= 64) {
+                if (!pbo) { glCreateBuffers(1, &pbo); glNamedBufferData(pbo, 64 * 1024, NULL, 0x88EA /* DYNAMIC_COPY */); }
+                uintptr_t off = (uintptr_t)(slot++ % 1024) * 64;
+                glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, pbo);
+                glGetTextureSubImage(b->gl, 0, 0, 0, 0, b->w, b->h, 1, b->fmt, b->type, 64, (void *)off);
+                glBindBuffer(0x88EB, 0);
+                glBindBuffer(0x88EC /* PIXEL_UNPACK_BUFFER */, pbo);
                 glBindTexture(GL_TEXTURE_2D, b->t->o.gl);
-                glCompressedTexSubImage2D(GL_TEXTURE_2D, b->level, 0, 0, tw, th, tf.internal, n, blk);
+                glCompressedTexSubImage2D(GL_TEXTURE_2D, b->level, 0, 0, tw, th, tf.internal, n, (const void *)off);
+                glBindBuffer(0x88EC, 0);
             }
         } else
         glCopyImageSubData(b->gl, GL_TEXTURE_2D, 0, 0, 0, 0, b->t->o.gl, tg, b->level, 0, 0, tg == GL_TEXTURE_2D ? 0 : b->layer, b->w, b->h, 1);
@@ -4010,13 +4026,26 @@ static TexObj *bc_target(Tex *t, const View *v) {     /* NULL: not a render targ
         BcShadow *b = &g_bcsh[i];
         if (b->t == t && b->level == level && b->layer == layer && b->w == w && b->h == h) { b->pending = 1; return &b->o; }
     }
+    /* Scratches are kept by format and size for the next (with their framebuffers): the title compresses 4 Mii faces x 9
+     * levels every third frame, and making 36 scratches and their framebuffers anew each time held the render thread
+     * 25-40 ms (2026-10-31). */
+    static struct { GLuint gl; GLenum internal; int w, h; } pool[128];
+    static int npool;
     BcShadow *b = g_bcsh_n < 64 ? &g_bcsh[g_bcsh_n++] : &g_bcsh[(g_bcsh_next++) & 63];
-    if (b->gl) { fbo_purge(b->gl); glDeleteTextures(1, &b->gl); }
+    if (b->gl) {
+        if (npool == 128) { fbo_purge(pool[0].gl); glDeleteTextures(1, &pool[0].gl); memmove(&pool[0], &pool[1], sizeof pool[0] * 127); npool--; }
+        pool[npool].gl = b->gl; pool[npool].internal = b->internal; pool[npool].w = b->w; pool[npool].h = b->h; npool++;
+    }
     memset(b, 0, sizeof *b);
-    b->t = t; b->level = level; b->layer = layer; b->w = w; b->h = h; b->fmt = vf.format; b->type = vf.type; b->bpb = tf.bpb;
-    glGenTextures(1, &b->gl);
-    glBindTexture(GL_TEXTURE_2D, b->gl);
-    glTexStorage2D(GL_TEXTURE_2D, 1, vf.internal, w, h);
+    b->t = t; b->level = level; b->layer = layer; b->w = w; b->h = h; b->fmt = vf.format; b->type = vf.type; b->bpb = tf.bpb; b->internal = vf.internal;
+    for (int i = npool - 1; i >= 0 && !b->gl; i--)
+        if (pool[i].internal == vf.internal && pool[i].w == w && pool[i].h == h) { b->gl = pool[i].gl; memmove(&pool[i], &pool[i + 1], sizeof pool[0] * (size_t)(npool - 1 - i)); npool--; }
+    if (!b->gl) {
+        glGenTextures(1, &b->gl);
+        glBindTexture(GL_TEXTURE_2D, b->gl);
+        glTexStorage2D(GL_TEXTURE_2D, 1, vf.internal, w, h);
+        g_bc_made++;
+    }
     b->o.gl = b->gl; b->o.alias = 1;                  /* not counted, not freed with the texture */
     b->pending = 1;
     static int nlog;
@@ -4195,10 +4224,11 @@ static void rs_pass(Tex *t) {                         /* the scale of the target
 static void set_targets(int n, const TargetRef *col, const TargetRef *depth) {
     FboKey k;
     Fmt f;
-    if (g_bcsh_n) bc_flush();                         /* what was drawn into compressed textures goes into them now */
+    if (g_bcsh_n) { HS_IN("render targets: compressed targets copied in (bc_flush)", 0); bc_flush(); HS_OUT(); }      /* what was drawn into compressed textures goes into them now */
     memset(&k, 0, sizeof k);
     S.have_fbo = 0; S.color0 = NULL; S.depth_tex = NULL; S.fbo_w = S.fbo_h = 0;
     memset(S.color, 0, sizeof S.color);
+    HS_IN("render targets: textures (made, spare, cleared, aliases pulled, views)", 0);
     for (int i = 0; i < n && i < 8; i++) {
         Tex *t = col[i].tex;
         if (!t || t->dead) continue;
@@ -4231,12 +4261,13 @@ static void set_targets(int n, const TargetRef *col, const TargetRef *depth) {
         k.dkind = fmt_get(t->b.format, &f) ? f.kind : 1;
         if (!S.fbo_w) { S.fbo_w = t->b.width; S.fbo_h = t->b.height; }
     }
+    HS_OUT();
     g_rt0_layer = k.layer[0]; g_rt0_level = k.level[0]; g_rt0_vset = n ? col[0].view.set : 0;
     if (rtlog_match(S.color0)) printf("rtlog: frame %lld gl %u mem %p born %lld\n", (long long)g_st.frames + 1, S.color0->o.gl, (void *)S.color0->mem, S.color0->born);      /* TOMO_RTLOG */
     if (rs_on()) rs_pass(S.color0 ? S.color0 : S.depth_tex);
     if (!k.n && !k.depth) { glBindFramebuffer(GL_FRAMEBUFFER_, 0); return; }
     g_fbo_bad_last = 0;
-    S.fbo = fbo_get(&k);
+    { HS_IN("render targets: framebuffer (found or made)", 0); S.fbo = fbo_get(&k); HS_OUT(); }
     if (g_fbo_bad_last) {
         static int nlog;
         for (int i = 0; i < k.n; i++) if (S.color[i]) logf_limited(&nlog, 40, "nvn_gl:   colour %d: texture target %d format 0x%x %dx%d levels %d samples %d flags 0x%x gl %u\n", i,
@@ -4944,7 +4975,9 @@ static void compute_flush_async(void) {
         if (b->dirty) {
             int st = g_rbp_n < 64 ? rb_stage(b->size) : -1;
             if (st < 0) { rest = 1; continue; }
+            HS_IN("compute results: copy to staging", 0);
             glCopyNamedBufferSubData(b->buf, g_rbs[st].buf, 0, 0, (ptrdiff_t)b->size);
+            HS_OUT();
             g_rbs[st].busy = 1;
             g_rbp[g_rbp_n].addr = b->addr; g_rbp[g_rbp_n].size = b->size; g_rbp[g_rbp_n].slot = st; g_rbp[g_rbp_n].fence = NULL;
             g_rbp[g_rbp_n].snap = b->snap; b->snap = NULL;          /* the pending read-back owns it now */
@@ -4958,9 +4991,9 @@ static void compute_flush_async(void) {
         glMemoryBarrier(0x1000 /* CLIENT_MAPPED_BUFFER */);
         void *f = glFenceSync(0x9117, 0);
         for (int i = n0; i < g_rbp_n; i++) g_rbp[i].fence = f;
-        glFlush();
+        { HS_IN("batch end: compute results: glFlush", 0); glFlush(); HS_OUT(); }
     }
-    if (rest) compute_flush();                   /* what found no staging memory (lands the pending ones first) */
+    if (rest) { HS_IN("batch end: compute results read back at once (no staging)", 0); compute_flush(); HS_OUT(); }      /* what found no staging memory (lands the pending ones first) */
     else { g_cbuf_live = 0; nvn_front_ccmp_landed(); }
 }
 static CBuf *cbuf_get(uint64_t addr, uint64_t size) {
@@ -5563,11 +5596,16 @@ static void gpuprof_frame(void) {
         }
         prev = t;
     }
+    double per = 300;
+    {   static long long wlo = -2, whi;                 /* TOMO_GPUPROF=<from>-<to>: every frame in that window instead of every 300 */
+        if (wlo == -2) { wlo = -1; const char *e = getenv("TOMO_GPUPROF"); if (e && strchr(e, '-')) sscanf(e, "%lld-%lld", &wlo, &whi); }
+        if (wlo >= 0) { long long f = (long long)g_st.frames - GP_SLOTS; if (f < wlo || f > whi) { g_gp_tn = 0; return; } g_gp_frames = 299; per = 1; }
+    }
     if (++g_gp_frames % 300) return;
     qsort(g_gp_tab, (size_t)g_gp_tn, sizeof g_gp_tab[0], gp_cmp);
     double all = 0; for (int k = 0; k < g_gp_tn; k++) all += g_gp_tab[k].ms;
-    printf("gpuprof: frame %lld: %.2f ms of GPU a frame;", (long long)g_st.frames, all / 300);
-    for (int k = 0; k < g_gp_tn && k < 24; k++) printf(" | %s %.2f (%.0f)", g_gp_tab[k].key, g_gp_tab[k].ms / 300, (double)g_gp_tab[k].n / 300);
+    printf("gpuprof: frame %lld: %.2f ms of GPU a frame;", (long long)g_st.frames, all / per);
+    for (int k = 0; k < g_gp_tn && k < 24; k++) printf(" | %s %.2f (%.0f)", g_gp_tab[k].key, g_gp_tab[k].ms / per, (double)g_gp_tab[k].n / per);
     printf("%c", 10);
     g_gp_tn = 0;
 }
@@ -5808,7 +5846,7 @@ static void exec(const Cmd *m, int depth) {
          * TOMO_RT_FLUSH=<draws>: another spacing, 0 = none. */
         static int every = -1; static LONG64 last;
         if (every < 0) every = getenv("TOMO_RT_FLUSH") ? atoi(getenv("TOMO_RT_FLUSH")) : 300;
-        if (every > 0 && g_st.draws - last >= every) { glFlush(); last = g_st.draws; }
+        if (every > 0 && g_st.draws - last >= every) { HS_IN("render targets: glFlush (every 300 draws)", 0); glFlush(); last = g_st.draws; HS_OUT(); }
         g_fs_rt++; set_targets((int)a[0], (const TargetRef *)blob, (const TargetRef *)blob + 8); if (S.ms_ext & 8) apply_multisample(); break;
     }
     case OP_STENCIL_REF: case OP_STENCIL_VMASK: case OP_STENCIL_MASK: {
@@ -6563,10 +6601,13 @@ static void job_submit(void *arg) {
     }
     LONG64 pf0 = pf_now();
     for (int i = 0; i < j->count; i++) replay(j->handles[i], 0);
+    { HS_IN("batch end: compute results (flush)", 0);
     compute_flush_async();                       /* the guest may read what compute wrote once its fence after this batch has passed */
+    HS_OUT(); }
     pf_add(PF_SUBMIT, pf0);
     g_cur_op = "";
-    GLenum e = glGetError();
+    GLenum e;
+    { HS_IN("batch end: GL error check (glGetError)", 0); e = glGetError(); HS_OUT(); }
     if (e) { g_st.gl_errors++; logf_limited(&nlog, 30, "nvn_gl: GL error 0x%x in submitted batch %lld\n", e, (long long)g_st.submits); while (glGetError()) {} }
     g_st.submits++;
 }
@@ -6840,6 +6881,14 @@ static void job_present(void *arg) {
     LONG64 pf0 = pf_now();
     drawsig_frame(frame);
     if (frame == 1) { void tomo_timeline(const char *what); tomo_timeline("the game's first picture"); }
+    {   static long long lo = -2, hi; static LONG64 f0, v0, b0, t0;      /* TEST: TOMO_RTSTAT=<from>-<to>: what each frame made for its render targets */
+        if (lo == -2) { lo = -1; const char *e = getenv("TOMO_RTSTAT"); if (e) sscanf(e, "%lld-%lld", &lo, &hi); }
+        if (lo >= 0 && frame >= lo && frame <= hi && (g_st.fbo_made != f0 || g_st.views != v0 || g_bc_made != b0 || g_st.tex_created != t0))
+            { LARGE_INTEGER q; QueryPerformanceFrequency(&q);
+              printf("rtstat: frame %lld: %lld framebuffers (%lld evicted; %.1f ms making, %.1f of it detaching), %lld views, %lld compressed-target scratches, %lld textures made%c", frame, (long long)(g_st.fbo_made - f0), (long long)g_fbo_evicted,
+                     (double)g_fbo_t_make * 1000.0 / (double)q.QuadPart, (double)g_fbo_t_detach * 1000.0 / (double)q.QuadPart, (long long)(g_st.views - v0), (long long)(g_bc_made - b0), (long long)(g_st.tex_created - t0), 10); }
+        f0 = g_st.fbo_made; v0 = g_st.views; b0 = g_bc_made; t0 = g_st.tex_created; g_fbo_evicted = 0; g_fbo_t_make = g_fbo_t_detach = 0;
+    }
     if (shot == -2) { shot = getenv("SSBU_SHOT") ? atoi(getenv("SSBU_SHOT")) : -1; every = getenv("SSBU_SHOT_EVERY") ? atoi(getenv("SSBU_SHOT_EVERY")) : 0; shot_from = getenv("SSBU_SHOT_FROM") ? atoi(getenv("SSBU_SHOT_FROM")) : 0; shot_to = getenv("SSBU_SHOT_TO") ? atoi(getenv("SSBU_SHOT_TO")) : 0x7fffffff; }
     {   /* debug: TOMO_DBGBUF=<frame>: 64 KB of floats at storage binding 38 for override shaders (TOMO_SHOVR) to write; rows of 80 printed at that frame */
         static int dbf = -2;
