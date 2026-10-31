@@ -605,14 +605,45 @@ static void fight_shot_poll(int ticks) {
  * the same first 0x24 bytes, then analog trigger L at +0x24 and R at +0x28, 0..0x7fff; the layout follows libnx / suyu, NOT VERIFIED on a console). */
 /* The mouse steers the game's hand pointer (tomo.c pointer_hook) from the moment it moves over the picture until a stick
  * moves again; meanwhile its left button is A (hold to grab and drag) and its right button B, on player 1, who holds the
- * pointer. The wheel: ZL / ZR (pages, tabs) while the free hand is up; elsewhere (dialogs, where the hand jumps between
- * buttons and a click presses the one it is on) a flick of the stick left / right, one button per notch.
+ * pointer. The wheel: the camera's zoom (the right stick up / down) while the free hand is up; in menus and dialogs
+ * (tomo.c dialog_mouse) the next / previous button; elsewhere a flick of the stick left / right, one step per notch.
  * TEST ONLY, TOMO_MOUSE_TEST="<poll>:<x>,<y>[,L|R|U|D] ...": a mouse of the input sequence's polls (game screen coordinates;
  * a button is held 8 polls, U / D = a wheel notch away from / towards the user), the real one ignored. */
 int display_mouse(float *x, float *y, int *buttons); int display_mouse_wheel(void);     /* display.c */
 static volatile LONG g_mouse_on, g_pointer_tick;
 static float g_mouse_xy[2];
 int nnhid_mouse(float xy[2]) { if (!g_mouse_on) return 0; xy[0] = g_mouse_xy[0]; xy[1] = g_mouse_xy[1]; return 1; }
+/* Menus and dialogs (tomo.c dialog_mouse, once a frame): 0 none on screen, 1 the mouse is over the focused button, 2 beside
+ * the buttons (a click then presses nothing), 3 buttons but the mouse is not in use; focus_tick: when the mouse last moved
+ * the focus (the click's A waits for it). The wheel steps through such buttons (tomo.c) instead of flicking the stick. */
+static volatile LONG g_dlg_state, g_dlg_tick, g_dlg_focus_tick, g_mouse_left, g_dlg_wheel;
+static SRWLOCK g_dlg_lock = SRWLOCK_INIT;
+static float g_dlg_rect[64][4]; static int g_dlg_n, g_dlg_cur;      /* the buttons (screen 1280x720) and the focused one */
+int nnhid_dialog_wheel(void) { return (int)InterlockedExchange(&g_dlg_wheel, 0); }
+static int dialog_buttons(void) { return GetTickCount() - (DWORD)g_dlg_tick < 250 && g_dlg_state != 0; }
+void nnhid_dialog_mouse(int state, int moved_focus) {
+    LONG now = (LONG)GetTickCount();
+    InterlockedExchange(&g_dlg_state, state); InterlockedExchange(&g_dlg_tick, now);
+    if (moved_focus) InterlockedExchange(&g_dlg_focus_tick, now);
+}
+void nnhid_dialog_rects(const float (*r)[4], int n, int cur) {
+    AcquireSRWLockExclusive(&g_dlg_lock);
+    g_dlg_n = n > 64 ? 64 : n; g_dlg_cur = cur;
+    memcpy(g_dlg_rect, r, sizeof g_dlg_rect[0] * (size_t)g_dlg_n);
+    ReleaseSRWLockExclusive(&g_dlg_lock);
+}
+int nnhid_mouse_left(void) { return g_mouse_on && g_mouse_left; }
+static int dialog_click_ok(float x, float y) {    /* a click presses A only on the focused button under the mouse (where it is now) */
+    DWORD now = GetTickCount();
+    if (now - (DWORD)g_dlg_tick > 250 || g_dlg_state == 0) return 1;      /* no buttons on screen lately */
+    if (now - (DWORD)g_dlg_focus_tick < 80) return 0;             /* the focus just moved to the button under the mouse */
+    int hit = -1;
+    AcquireSRWLockShared(&g_dlg_lock);
+    for (int i = 0; i < g_dlg_n && hit < 0; i++) if (x >= g_dlg_rect[i][0] && x <= g_dlg_rect[i][2] && y >= g_dlg_rect[i][1] && y <= g_dlg_rect[i][3]) hit = i;
+    int ok = hit >= 0 && hit == g_dlg_cur;
+    ReleaseSRWLockShared(&g_dlg_lock);
+    return ok;
+}
 void nnhid_pointer_free(void) { InterlockedExchange(&g_pointer_tick, (LONG)GetTickCount()); }     /* tomo.c: the free hand is up this frame */
 static int mouse_test(float *x, float *y, int *b, int *wheel) {
     static const char *spec = (const char *)-1;
@@ -633,9 +664,9 @@ static int mouse_test(float *x, float *y, int *b, int *wheel) {
 /* While the mouse moves (and half a second after) the left stick gets a nudge too small to move anything else, its sign
  * flipping every poll: the game hides its hand 2-3 s after the last stick input, and a position put in by tomo.c is not
  * one. The hand itself stays on the mouse (tomo.c puts the position in before every update). */
-static void mouse_poll(uint64_t *buttons, int *lx, int *ly) {
+static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *ry) {
     static float px = -1e9f, py = -1e9f;
-    static int nudge, wheel_hold, wheel_bit, flick, flick_dir;
+    static int nudge, zoom, zoom_dir, flick, flick_dir;
     float x = 0, y = 0;
     int b = 0, wheel = 0, in = mouse_test(&x, &y, &b, &wheel);
     int free_hand = GetTickCount() - (DWORD)g_pointer_tick < 250;
@@ -650,15 +681,29 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly) {
         if (moved || (px > -1e8f && b)) InterlockedExchange(&g_mouse_on, 1);
         if (moved) nudge = 30;
         px = x; py = y; g_mouse_xy[0] = x; g_mouse_xy[1] = y;
-        if (g_mouse_on) { if (b & 1) *buttons |= 1ull << BTN_A; if (b & 2) *buttons |= 1ull << BTN_B; }
+        InterlockedExchange(&g_mouse_left, b & 1);
+        if (g_mouse_on) { if ((b & 1) && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; if (b & 2) *buttons |= 1ull << BTN_B; }
     }
-    if (wheel && !wheel_hold && !flick && !input_held()) {
-        if (free_hand) { wheel_bit = wheel > 0 ? BTN_ZL : BTN_ZR; wheel_hold = 4; }
+    if (wheel && !zoom && !flick && !input_held()) {
+        if (free_hand) { zoom_dir = wheel > 0 ? 1 : -1; zoom = 6; }      /* the free hand (the island): the camera's zoom, the right stick up / down */
+        else if (dialog_buttons()) InterlockedExchangeAdd(&g_dlg_wheel, wheel);
         else { flick_dir = wheel > 0 ? -1 : 1; flick = 4; }
     }
-    if (wheel_hold) { wheel_hold--; *buttons |= 1ull << wheel_bit; }
+    if (zoom) { zoom--; if (!*ry) *ry = zoom_dir * STICK_MAX; }
     if (flick && !*lx && !*ly) { flick--; *lx = flick_dir * STICK_MAX; }
     else if (g_mouse_on && free_hand && nudge > 0 && !*lx && !*ly) { nudge--; *lx = (nudge & 1) ? STICK_MAX / 6 : -STICK_MAX / 6; }
+}
+/* Keys as a stick: a diagonal lies on the circle like a stick's (not 1.41 x as fast). While the game's free hand is up, a
+ * key first moves it at half the stick, the full stick after 0.3 s held: a tap nudges the hand onto a small target, a
+ * held key still crosses the screen. Menus get the full value at once (their focus moves on a push past half way). */
+static void kb_stick(int *x, int *y, DWORD *since, int ramp) {
+    if (!*x && !*y) { *since = 0; return; }
+    DWORD now = GetTickCount();
+    if (!*since) *since = now;
+    double k = STICK_MAX, t = (double)(now - *since) / 300.0;
+    if (*x && *y) k *= 0.70710678;
+    if (ramp && t < 1.0) k *= 0.5 + 0.5 * t;
+    *x = (int)(*x * k); *y = (int)(*y * k);
 }
 static void fill_pad(uint64_t out, uint32_t id, int kind) {
     size_t size = kind == 2 ? 0x30 : 0x28;
@@ -684,10 +729,13 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     if (!(g_x_synth == 1 && id == 0) && !(g_x_synth == 2 && id == 1) &&
         ((int)id == g_keyboard_player || (id == 0 && scripted_run()))) {    /* keyboard, and the test scripts on player 1 */
         for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) if (key_for(id, map[i].vk, map[i].bit)) buttons |= 1ull << map[i].bit;
-        lx = (key_for(id, VK_RIGHT, 18) - key_for(id, VK_LEFT, 16)) * STICK_MAX;
-        ly = (key_for(id, VK_UP, 17) - key_for(id, VK_DOWN, 19)) * STICK_MAX;
-        rx = (key_for(id, 'H', 22) - key_for(id, 'F', 20)) * STICK_MAX;     /* T F G H: the right stick of the test scripts (Tomodachi Life's camera) */
-        ry = (key_for(id, 'T', 21) - key_for(id, 'G', 23)) * STICK_MAX;
+        static DWORD l_since, r_since;
+        lx = key_for(id, VK_RIGHT, 18) - key_for(id, VK_LEFT, 16);
+        ly = key_for(id, VK_UP, 17) - key_for(id, VK_DOWN, 19);
+        rx = key_for(id, 'H', 22) - key_for(id, 'F', 20);                  /* T F G H: the right stick of the test scripts (Tomodachi Life's camera) */
+        ry = key_for(id, 'T', 21) - key_for(id, 'G', 23);
+        kb_stick(&lx, &ly, &l_since, !scripted_run() && GetTickCount() - (DWORD)g_pointer_tick < 250);      /* (scripts: the full stick, as recorded) */
+        kb_stick(&rx, &ry, &r_since, 0);
     }
     int slot = g_source[id];
     if (sdl_on()) {
@@ -732,7 +780,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         }
         t_merge = 0;
     }
-    if (id == 0 && !t_merge) mouse_poll(&buttons, &lx, &ly);
+    if (id == 0 && !t_merge) mouse_poll(&buttons, &lx, &ly, &ry);
     if (id == 0) record_or_replay(&buttons, &lx, &ly, &rx, &ry);
     if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
     if (id == 1 && r1_on()) { void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); r1_pad_id(1, &buttons, &lx, &ly, &rx, &ry); }      /* R3: port 2 in an online rollback match */

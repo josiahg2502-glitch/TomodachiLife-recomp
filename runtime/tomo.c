@@ -1468,7 +1468,101 @@ static void persp_install(void) {
  * (a position put in is none), hence nnhid.c's nudge while the mouse moves. The hand is shown while bit 0 of the halfword
  * at +0x14 is set. Found 2026-10-28 with TOMO_MEMSCAN and write watchpoints. TOMO_MOUSE=0 off. */
 static ImportFn g_pointer_update;
+/* THE MOUSE IN MENUS AND DIALOGS (2026-10-31). The X menu, Settings, the yes / no questions... move a hand from button to
+ * button with the stick: the pointer object is then in mode 3 (+0x1a0) and follows the element its FOCUS HOLDER names
+ * (0x7100241508: [[hand global]] + 0x40 -> its vtable slot 0 (type id) -> + 0x28 = holder; holder + 0x58 the focused element,
+ * + 0x70 where the hand goes). A holder's elements share an owner (+0x20) and form a ring (+ 8 / + 0x10); each has a layout
+ * pane ([+0x18] + 0x58) whose rectangle the game's own navigation measures (0x710082a240: size x global scale around the
+ * global translation, by the pane's base position; 1920 x 1080 layout units around the middle, y up). Moving the mouse over
+ * an enabled button ([+0x18] + 0x42 bit 1, its vtable + 0x28 for the input mode) focuses it as the stick does (owner + 0x123 = 1,
+ * SetFocus(holder, element, 0, 0, 0)), so the game's own hand, sound and animation follow; a click presses the button under
+ * the mouse and nothing beside the buttons (nnhid.c mouse_poll). Screens without such buttons (talk, the free hand) are as
+ * before. TOMO_MOUSE_DEBUG=1 logs the buttons found. */
+typedef struct { uint64_t hand, guard, type, set_focus, mode; } DlgAddr;
+static const DlgAddr *dlg_addr(void) {
+    static const DlgAddr v100 = {0x71032cd3f8ull, 0x71032da7e0ull, 0x71032da7d8ull, 0x7100702510ull, 0x71004a9f18ull};
+    static const DlgAddr v104 = {0x710326fb08ull, 0x710327cef8ull, 0x710327cef0ull, 0x71006d8a88ull, 0x71005ea248ull};
+    return g_main.text_size == 0x25ce6a0 ? &v100 : g_main.text_size == 0x256d250 ? &v104 : NULL;
+}
+static uint64_t guest_fn(Ctx *c, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
+    Ctx save = *c;                                  /* (called at the entry of a hooked function: its arguments stay as they were) */
+    c->x[0] = a0; c->x[1] = a1; c->x[2] = a2; c->x[3] = a3; c->x[4] = a4;
+    call_guest(c, fn);
+    uint64_t r = c->x[0];
+    *c = save;
+    return r;
+}
+static int dlg_rect(uint64_t el, float r[4]) {      /* the element's pane as 0x710082a240 measures it: left, bottom, right, top */
+    uint64_t part = rd64(el + 0x18), pane = part ? rd64(part + 0x58) : 0;
+    if (!pane) return 0;
+    float hw = fabsf(rdf(pane + 0x50) * rdf(pane + 0x70)) * 0.5f, hh = fabsf(rdf(pane + 0x54) * rdf(pane + 0x84)) * 0.5f;
+    float tx = rdf(pane + 0x7c), ty = rdf(pane + 0x8c);
+    unsigned base = rd8(pane + 0x5b), bh = base & 3, bv = (base >> 2) & 3;
+    float cx = bh == 1 ? tx + hw : bh == 2 ? tx - hw : tx, cy = bv == 1 ? ty - hh : bv == 2 ? ty + hh : ty;
+    r[0] = cx - hw; r[1] = cy - hh; r[2] = cx + hw; r[3] = cy + hh;
+    return hw > 0.5f && hh > 0.5f && hw < 2000.0f && hh < 2000.0f && fabsf(cx) < 4000.0f && fabsf(cy) < 4000.0f;
+}
+static int dlg_enabled(Ctx *c, const DlgAddr *ad, uint64_t holder, uint64_t el) {      /* as the stick's navigation asks */
+    uint64_t part = rd64(el + 0x18);
+    if (!part || !(rd8(part + 0x42) & 2)) return 0;
+    int input_mode = (int)guest_fn(c, ad->mode, rd64(rd64(holder + 0x20) + 0x80), 0, 0, 0, 0);
+    return (int)(guest_fn(c, rd64(rd64(el) + 0x28), el, (uint64_t)(uint32_t)input_mode, 0, 0, 0) & 1);
+}
+static void dlg_focus(Ctx *c, const DlgAddr *ad, uint64_t holder, uint64_t el) {
+    wr8(rd64(el + 0x20) + 0x123, 1);
+    guest_fn(c, ad->set_focus, holder, el, 0, 0, 0);
+}
+static void dialog_mouse(Ctx *c) {
+    void nnhid_dialog_mouse(int state, int moved_focus); int nnhid_mouse(float xy[2]); int nnhid_mouse_left(void); int nnhid_dialog_wheel(void); int gfx_mouse(void);
+    void nnhid_dialog_rects(const float (*r)[4], int n, int cur);
+    static float last[2] = {-1e9f, -1e9f};
+    static int dbg = -1, mtest;
+    float xy[2];
+    const DlgAddr *ad = dlg_addr();
+    if (dbg < 0) { dbg = getenv("TOMO_MOUSE_DEBUG") != NULL; mtest = getenv("TOMO_MOUSE_TEST") != NULL; }
+    if (!ad || rd32(A0 + 0x1a0) != 3 || !(gfx_mouse() || mtest)) { nnhid_dialog_mouse(0, 0); return; }
+    uint64_t g = rd64(ad->hand), m = g ? rd64(g) : 0, look = m ? rd64(m + 0x40) : 0, guard = rd64(ad->guard);
+    if (!look || !guard || !(rd8(guard) & 1)) { nnhid_dialog_mouse(0, 0); return; }
+    uint64_t mgr = guest_fn(c, rd64(rd64(look)), look, rd64(ad->type), 0, 0, 0);
+    uint64_t holder = mgr ? rd64(mgr + 0x28) : 0, cur = holder ? rd64(holder + 0x58) : 0, owner = cur ? rd64(cur + 0x20) : 0;
+    if (!cur || !owner) { nnhid_dialog_mouse(0, 0); return; }
+    int mouse = nnhid_mouse(xy), wheel = nnhid_dialog_wheel(), focused = 0;
+    float lx = (xy[0] - 640.0f) * 1.5f, ly = (360.0f - xy[1]) * 1.5f, r[4];
+    uint64_t over = 0, el = cur, ring[256];
+    float scr[64][4];                               /* the buttons in the mouse's 1280x720 screen (nnhid.c tests a click there) */
+    int n = 0, at = -1, sent = -1;                  /* sent: buttons collected when the walk passed the list's head (its end) */
+    do {                                            /* the ring of the focused element's buttons, in the game's order */
+        if (rd64(el + 0x20) != owner) { if (sent < 0) sent = n; }
+        else if (dlg_rect(el, r)) {
+            if (el == cur) at = n;
+            if (n < 64) { scr[n][0] = r[0] / 1.5f + 640.0f; scr[n][1] = 360.0f - r[3] / 1.5f; scr[n][2] = r[2] / 1.5f + 640.0f; scr[n][3] = 360.0f - r[1] / 1.5f; }
+            ring[n++] = el;
+            if (mouse && lx >= r[0] && lx <= r[2] && ly >= r[1] && ly <= r[3]) over = el;
+            if (dbg && el == cur) { static uint64_t said; if (said != cur) { said = cur; printf("dialog mouse: focused %llx at %.0f,%.0f..%.0f,%.0f%c", (unsigned long long)cur, r[0], r[1], r[2], r[3], 10); } }
+        }
+        uint64_t next = rd64(el + 0x10);
+        if (!next || (next & 7)) break;
+        el = next - 8;
+    } while (el != cur && n < 256);
+    if (wheel && n > 1 && at == 0) {                /* the wheel: the next enabled button towards the user (down), or back; no wrap */
+        int end = sent < 0 ? n : sent;              /* ring[1 .. end) come after the focused one, ring[end .. n) before it */
+        if (wheel < 0) { for (int k = 1; k < end; k++) if (dlg_enabled(c, ad, holder, ring[k])) { dlg_focus(c, ad, holder, ring[k]); focused = 1; break; } }
+        else for (int k = n - 1; k >= (sent < 0 ? 1 : end); k--) if (dlg_enabled(c, ad, holder, ring[k])) { dlg_focus(c, ad, holder, ring[k]); focused = 1; break; }
+    }
+    int moved = mouse && (fabsf(xy[0] - last[0]) >= 1.0f || fabsf(xy[1] - last[1]) >= 1.0f);
+    if (mouse) { last[0] = xy[0]; last[1] = xy[1]; }
+    if (!focused && over && over != cur && (moved || nnhid_mouse_left()) && dlg_enabled(c, ad, holder, over)) {
+        dlg_focus(c, ad, holder, over);
+        focused = 1;
+        if (dbg) printf("dialog mouse: focus %llx (of %d buttons) at %.0f,%.0f%c", (unsigned long long)over, n, lx, ly, 10);
+    }
+    int now_at = at;
+    if (focused) { uint64_t f = rd64(holder + 0x58); for (int k = 0; k < n; k++) if (ring[k] == f) now_at = k; }
+    nnhid_dialog_rects((const float (*)[4])scr, n < 64 ? n : 64, now_at < 64 ? now_at : -1);
+    nnhid_dialog_mouse(!mouse ? 3 : over && (over == cur || focused) ? 1 : 2, focused);
+}
 static void pointer_hook(Ctx *c, void *user) {
+    dialog_mouse(c);
     int nnhid_mouse(float xy[2]); void display_mouse_hand(void);
     float xy[2];
     (void)user;
