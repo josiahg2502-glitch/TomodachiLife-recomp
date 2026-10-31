@@ -1494,15 +1494,56 @@ static uint64_t guest_fn(Ctx *c, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t
     *c = save;
     return r;
 }
-static int dlg_rect(uint64_t el, float r[4]) {      /* the element's pane as 0x710082a240 measures it: left, bottom, right, top */
-    uint64_t part = rd64(el + 0x18), pane = part ? rd64(part + 0x58) : 0;
-    if (!pane) return 0;
+static int pane_rect(uint64_t pane, float r[4]) {   /* a layout pane as 0x710082a240 measures it: left, bottom, right, top (layout units) */
     float hw = fabsf(rdf(pane + 0x50) * rdf(pane + 0x70)) * 0.5f, hh = fabsf(rdf(pane + 0x54) * rdf(pane + 0x84)) * 0.5f;
     float tx = rdf(pane + 0x7c), ty = rdf(pane + 0x8c);
     unsigned base = rd8(pane + 0x5b), bh = base & 3, bv = (base >> 2) & 3;
     float cx = bh == 1 ? tx + hw : bh == 2 ? tx - hw : tx, cy = bv == 1 ? ty - hh : bv == 2 ? ty + hh : ty;
     r[0] = cx - hw; r[1] = cy - hh; r[2] = cx + hw; r[3] = cy + hh;
     return hw > 0.5f && hh > 0.5f && hw < 2000.0f && hh < 2000.0f && fabsf(cx) < 4000.0f && fabsf(cy) < 4000.0f;
+}
+static int dlg_rect(uint64_t el, float r[4]) {      /* the element's pane */
+    uint64_t part = rd64(el + 0x18), pane = part ? rd64(part + 0x58) : 0;
+    return pane && pane_rect(pane, r);
+}
+/* Button prompts ("+ Buy", "B Put one back", the L / R of tabs): text boxes (pane name "T_...", +0xb0) whose text (+0xd8)
+ * holds one of the font's button symbols, U+E0E0.. A B X Y L R ZL ZR, U+E0EF +, U+E0F0 -. Found in the layout of the focused
+ * buttons (shown panes only); a click on one, or on the button part around it ("L_...", when button-sized: "+ Buy"),
+ * presses that button (nnhid.c). */
+static void dlg_prompts(uint64_t root) {
+    void nnhid_prompts(const float (*r)[4], const int *code, int n);
+    float rs[32][4]; int code[32], n = 0, visits = 0;
+    uint64_t stack[128]; int sp = 0;
+    if (root) stack[sp++] = root;
+    while (sp && visits++ < 4000 && n < 32) {
+        uint64_t q = stack[--sp], t;
+        if (!(rd8(q + 0x58) & 1)) continue;        /* hidden, with all it holds */
+        MEMORY_BASIC_INFORMATION mi;
+        if (rd8(q + 0xb0) == 'T' && rd8(q + 0xb1) == '_' && (t = rd64(q + 0xd8)) > 0x10000 && !(t & 1) &&
+            VirtualQuery((void *)(uintptr_t)t, &mi, sizeof mi) && mi.State == MEM_COMMIT && (mi.Protect & (PAGE_READWRITE | PAGE_READONLY))) {
+            for (int k = 0; k < 4; k++) {
+                uint16_t ch = rd16(t + 2 * (uint64_t)k);
+                if (!ch) break;
+                if ((ch >= 0xe0e0 && ch <= 0xe0e7) || ch == 0xe0ef || ch == 0xe0f0) {
+                    float r[4], pr[4];
+                    if (!pane_rect(q, r)) break;
+                    for (uint64_t up = rd64(q + 0x18), k = 0; up && k < 4; up = rd64(up + 0x18), k++)      /* the button part holding it ("L_..."), if button-sized */
+                        if (rd8(up + 0xb0) == 'L' && rd8(up + 0xb1) == '_') {
+                            if (pane_rect(up, pr) && pr[2] - pr[0] < 600.0f && pr[3] - pr[1] < 190.0f && pr[0] <= r[0] && pr[2] >= r[2] && pr[1] <= r[1] && pr[3] >= r[3]) memcpy(r, pr, sizeof r);
+                            break;
+                        }
+                    rs[n][0] = r[0] / 1.5f + 640.0f; rs[n][1] = 360.0f - r[3] / 1.5f; rs[n][2] = r[2] / 1.5f + 640.0f; rs[n][3] = 360.0f - r[1] / 1.5f;
+                    code[n++] = ch;
+                    break;
+                }
+            }
+        }
+        for (uint64_t node = rd64(q + 0x28), k = 0; node && node != q + 0x20 && k < 256 && sp < 128; node = rd64(node + 8), k++) stack[sp++] = node - 8;
+    }
+    {   static int said = -1; static float sx; float sum = 0; for (int i = 0; i < n; i++) sum += rs[i][0] + rs[i][1] * 3 + code[i];      /* TEST ONLY */
+        if (getenv("TOMO_MOUSE_DEBUG") && (n != said || sum != sx)) { said = n; sx = sum;
+            for (int i = 0; i < n; i++) printf("prompts: %d of %d: %04x at %.0f,%.0f..%.0f,%.0f%c", i, n, code[i], rs[i][0], rs[i][1], rs[i][2], rs[i][3], 10); } }
+    nnhid_prompts((const float (*)[4])rs, code, n);
 }
 static int dlg_shown(uint64_t el) {             /* its pane and every pane above it visible (nn::ui2d pane flags +0x58, bit 0): a shop keeps the
                                                  * items of its other tabs in the same ring, hidden, over the shown ones */
@@ -1559,6 +1600,7 @@ static void dialog_mouse(Ctx *c) {
         else for (int k = n - 1; k >= (sent < 0 ? 1 : end); k--) if (dlg_enabled(c, ad, holder, ring[k])) { dlg_focus(c, ad, holder, ring[k]); focused = 1; break; }
         if (!focused && sent >= 0) nnhid_dialog_page(wheel < 0 ? 1 : -1);      /* past the end: the next / previous page (ZR / ZL), as lists turn them */
     }
+    { uint64_t root = rd64(rd64(cur + 0x18) + 0x58); for (int k = 0; root && rd64(root + 0x18) && k < 32; k++) root = rd64(root + 0x18); dlg_prompts(root); }
     int moved = mouse && (fabsf(xy[0] - last[0]) >= 1.0f || fabsf(xy[1] - last[1]) >= 1.0f);
     if (mouse) { last[0] = xy[0]; last[1] = xy[1]; }
     if (!focused && over && over != cur && (moved || nnhid_mouse_left()) && dlg_enabled(c, ad, holder, over)) {

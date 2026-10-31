@@ -650,6 +650,27 @@ static int dialog_click_ok(float x, float y) {    /* a click presses A only on t
     return ok;
 }
 void nnhid_pointer_free(void) { InterlockedExchange(&g_pointer_tick, (LONG)GetTickCount()); }     /* tomo.c: the free hand is up this frame */
+/* Button prompts on screen (tomo.c dlg_prompts: rectangles in 1280x720 and the font symbol each shows): a click on one presses
+ * that button instead of A. */
+static float g_pr_rect[32][4]; static int g_pr_btn[32], g_pr_n; static volatile LONG g_pr_tick;
+void nnhid_prompts(const float (*r)[4], const int *code, int n) {
+    static const struct { int code, btn; } map[] = {{0xe0e0, BTN_A}, {0xe0e1, BTN_B}, {0xe0e2, BTN_X}, {0xe0e3, BTN_Y}, {0xe0e4, BTN_L}, {0xe0e5, BTN_R},
+                                                  {0xe0e6, BTN_ZL}, {0xe0e7, BTN_ZR}, {0xe0ef, BTN_PLUS}, {0xe0f0, BTN_MINUS}};
+    AcquireSRWLockExclusive(&g_dlg_lock);
+    g_pr_n = 0;
+    for (int i = 0; i < n && i < 32; i++)
+        for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) if (map[k].code == code[i]) { memcpy(g_pr_rect[g_pr_n], r[i], sizeof g_pr_rect[0]); g_pr_btn[g_pr_n++] = map[k].btn; }
+    ReleaseSRWLockExclusive(&g_dlg_lock);
+    InterlockedExchange(&g_pr_tick, (LONG)GetTickCount());
+}
+static int prompt_at(float x, float y) {          /* the button whose prompt is under the mouse, or -1 */
+    if (GetTickCount() - (DWORD)g_pr_tick > 250) return -1;
+    int btn = -1;
+    AcquireSRWLockShared(&g_dlg_lock);
+    for (int i = 0; i < g_pr_n && btn < 0; i++) if (x >= g_pr_rect[i][0] && x <= g_pr_rect[i][2] && y >= g_pr_rect[i][1] && y <= g_pr_rect[i][3]) btn = g_pr_btn[i];
+    ReleaseSRWLockShared(&g_dlg_lock);
+    return btn;
+}
 static int mouse_test(float *x, float *y, int *b, int *wheel) {
     static const char *spec = (const char *)-1;
     if (spec == (const char *)-1) spec = getenv("TOMO_MOUSE_TEST");
@@ -700,7 +721,14 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
         float px_was = px;
         px = x; py = y; g_mouse_xy[0] = x; g_mouse_xy[1] = y;
         InterlockedExchange(&g_mouse_left, b & 1); InterlockedExchange(&g_mouse_right, (b >> 1) & 1);
-        if (g_mouse_on) { if ((b & 1) && !island && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; if (b & 2) *buttons |= 1ull << BTN_B; }
+        {   static int pb, on_prompt = -1, held;     /* a press that began on a button prompt taps that button (4 polls: a held one repeats), not A */
+            if ((b & 1) && !(pb & 1)) { on_prompt = g_mouse_on && !island ? prompt_at(x, y) : -1; held = 0;
+                if (getenv("TOMO_MOUSE_DEBUG")) printf("mouse: press at %.0f,%.0f: prompt button %d%c", x, y, on_prompt, 10); }
+            if (!(b & 1)) on_prompt = -1;
+            pb = b;
+            if (g_mouse_on && on_prompt >= 0) { if (held++ < 4) *buttons |= 1ull << on_prompt; }
+            else if (g_mouse_on) { if ((b & 1) && !island && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; }
+            if (g_mouse_on && (b & 2)) *buttons |= 1ull << BTN_B; }
         if (g_mouse_on && island && (b & 4) && moved && !*rx) { int v = (int)((x - px_was) * STICK_MAX / 10.0f); *rx = v > STICK_MAX ? STICK_MAX : v < -STICK_MAX ? -STICK_MAX : v; }
     }
     if (wheel && !zoom && !flick && !input_held()) {
