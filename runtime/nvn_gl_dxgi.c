@@ -148,10 +148,42 @@ static int dx_present(int interval) {
     if (g_dx.state != 1) return 0;
     if (!g_dx.locked) return 0;                    /* nothing drawn since the last present (cannot happen: job_present locks) */
     int want = g_dx.checks < 3 && g_dx.presents % 30 == 0 ? dx_check() : -1;
+    static int verify = -1; static unsigned gl_box[3];      /* TEST: TOMO_DXGI_VERIFY=1: every present, a 64x16 patch at the top middle as OpenGL drew
+                                                             * it and as the back buffer got it (a stale or half-done copy = a mismatch, logged) */
+    if (verify < 0) verify = getenv("TOMO_DXGI_VERIFY") ? atoi(getenv("TOMO_DXGI_VERIFY")) : 0;
+    if (verify == 1 && g_dx.w >= 64 && g_dx.h >= 32) {      /* (=2: the back buffer only, every present, no OpenGL read that waits for the GPU) */
+        uint8_t px[64 * 16 * 4];
+        glBindFramebuffer(GL_READ_FRAMEBUFFER_, g_dx.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(g_dx.w / 2 - 32, 4, 64, 16, 0x1908 /* RGBA */, GL_UNSIGNED_BYTE, px);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER_, g_fbo_read);
+        gl_box[0] = gl_box[1] = gl_box[2] = 0;
+        for (int i = 0; i < 64 * 16; i++) { gl_box[0] += px[i * 4]; gl_box[1] += px[i * 4 + 1]; gl_box[2] += px[i * 4 + 2]; }
+    }
     g_dx.unlock(g_dx.idev, 1, &g_dx.iobj); g_dx.locked = 0;
     ID3D11Texture2D *bb = NULL;
     if (FAILED(IDXGISwapChain1_GetBuffer(g_dx.sc, 0, &k_iid_tex2d, (void **)&bb))) { dx_off("the swap chain's back buffer is not there"); return 0; }
     ID3D11DeviceContext_CopyResource(g_dx.ctx, (ID3D11Resource *)bb, (ID3D11Resource *)g_dx.pic);
+    if (verify && g_dx.w >= 64 && g_dx.h >= 32) {
+        static ID3D11Texture2D *st; D3D11_MAPPED_SUBRESOURCE ms;
+        if (!st) { D3D11_TEXTURE2D_DESC td; ID3D11Texture2D_GetDesc(bb, &td); td.Width = 64; td.Height = 16; td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+                   if (FAILED(ID3D11Device_CreateTexture2D(g_dx.dev, &td, NULL, &st))) st = NULL; }
+        D3D11_BOX box = {(UINT)(g_dx.w / 2 - 32), 4, 0, (UINT)(g_dx.w / 2 + 32), 20, 1};
+        if (st) {
+            ID3D11DeviceContext_CopySubresourceRegion(g_dx.ctx, (ID3D11Resource *)st, 0, 0, 0, 0, (ID3D11Resource *)bb, 0, &box);
+            if (SUCCEEDED(ID3D11DeviceContext_Map(g_dx.ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &ms))) {
+                unsigned d3[3] = {0, 0, 0};
+                for (int y = 0; y < 16; y++) for (int x = 0; x < 64; x++) { const uint8_t *p = (const uint8_t *)ms.pData + (size_t)y * ms.RowPitch + (size_t)x * 4; d3[0] += p[0]; d3[1] += p[1]; d3[2] += p[2]; }      /* (RGBA) */
+                ID3D11DeviceContext_Unmap(g_dx.ctx, (ID3D11Resource *)st, 0);
+                static unsigned long long n, bad;
+                if (verify == 2) { printf("dxgi sample: %llu %u %u %u%c", n++, d3[0] / 64, d3[1] / 64, d3[2] / 64, 10); goto sampled; }
+                int diff = 0; for (int k = 0; k < 3; k++) { int dd = (int)(d3[k] / 1024) - (int)(gl_box[k] / 1024); if (abs(dd) > diff) diff = abs(dd); }
+                n++; if (diff > 1) { bad++; if (bad <= 40) printf("dxgi verify: present %llu: drawn %u %u %u, back buffer %u %u %u%c", n, gl_box[0] / 1024, gl_box[1] / 1024, gl_box[2] / 1024, d3[0] / 1024, d3[1] / 1024, d3[2] / 1024, 10); }
+                if (n % 600 == 0) printf("dxgi verify: %llu presents, %llu mismatched%c", n, bad, 10);
+                sampled:;
+            }
+        }
+    }
     if (want >= 0) {
         if (!dx_check_back(bb, want)) { ID3D11Texture2D_Release(bb); dx_off("the shared picture did not reach the swap chain"); return 0; }
         g_dx.checks++;

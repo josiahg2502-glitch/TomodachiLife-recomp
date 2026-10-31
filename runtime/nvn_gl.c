@@ -6834,6 +6834,11 @@ static void job_present(void *arg) {
                 glBindFramebuffer(GL_FRAMEBUFFER_, S.have_fbo ? S.fbo : 0);
                 memmove(hist[0], hist[1], sizeof hist[0] * 2);
                 { uint8_t *o = ring[0]; ring[0] = ring[1]; ring[1] = ring[2]; ring[2] = o; memcpy(ring[2], px, 480 * 270 * 4); }
+                {   static int rl = -1; if (rl < 0) rl = getenv("TOMO_REGIONLOG") != NULL;      /* TEST: TOMO_REGIONLOG=1 (with TOMO_FLICKER): every frame's mean colour
+                                                                                                   * (x10) of three bands of the picture (rows of the 480x270 copy, y up) */
+                    if (rl) { static const int band[3][2] = {{240, 270}, {120, 150}, {0, 30}}; unsigned m[3][3] = {{0}};
+                        for (int bi = 0; bi < 3; bi++) for (int y = band[bi][0]; y < band[bi][1]; y++) for (int x = 0; x < 480; x++) { const uint8_t *q = px + ((size_t)y * 480 + x) * 4; m[bi][0] += q[0]; m[bi][1] += q[1]; m[bi][2] += q[2]; }
+                        printf("region: frame %lld top %u %u %u mid %u %u %u bottom %u %u %u%c", (long long)frame - 1, m[0][0] / 1440, m[0][1] / 1440, m[0][2] / 1440, m[1][0] / 1440, m[1][1] / 1440, m[1][2] / 1440, m[2][0] / 1440, m[2][1] / 1440, m[2][2] / 1440, 10); } }
                 for (int cy = 0; cy < 27; cy++)
                     for (int cx = 0; cx < 48; cx++) {
                         unsigned sum = 0;
