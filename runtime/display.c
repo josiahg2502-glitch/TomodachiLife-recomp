@@ -904,9 +904,9 @@ static void adapt_frame(LARGE_INTEGER now) {
             over = ema > 15.5 || over >= 60 ? over + 1 : 0;
             if (++at60 >= 3600) stay = 600;
             if (over >= 60) {
-                stay = at60 < 600 ? (stay * 2 > 7200 ? 7200 : stay * 2) : 600;
+                stay = at60 < 600 ? (stay * 2 > 3600 ? 3600 : stay * 2) : 600;      /* (frames at 30 fps: 2 min at most) */
                 window = missed = 0; over = at30 = at60 = 0; rate_floor(2);
-                static int n; if (n++ < 20) printf("display: frame_rate 60: frames take %.1f ms: 30 fps for %d s (the game's minimum interval 2)%c", ema, stay / 60, 10);
+                static int n; if (n++ < 20) printf("display: frame_rate 60: frames take %.1f ms: 30 fps for %d s (the game's minimum interval 2)%c", ema, stay / 30, 10);
             }
         } else if (++at30 >= stay) { over = at30 = at60 = 0; rate_floor(1); static int n; if (n++ < 20) printf("display: frame_rate 60: 60 fps again (the game's minimum interval 1)%c", 10); }
         return;
