@@ -2126,6 +2126,7 @@ static void shd_init(void) {
     printf("nvn_gl: shader binaries are kept in %s (SSBU_SHADER_CACHE=0 turns this off)%c", g_shd_dir, 10);
     shd_workers_start();
     prec_load();
+    { void xmemo_load(void); xmemo_load(); }
 }
 static void shd_path(char *path, size_t size, uint64_t h, size_t len) {
     snprintf(path, size, "%s/%016llx_%zx_%016llx.bin", g_shd_dir, (unsigned long long)h, len, (unsigned long long)g_shd_drv);
@@ -2173,11 +2174,11 @@ static GLuint shd_compile_save(GLenum type, const char *src, const char *path, G
     return q;
 }
 /* Render thread: the program for this text, from disk when its binary is there. */
-static GLuint shader_build(GLenum type, const char *src, size_t len, uint64_t h, GLint *ok) {
+/* The program of a GLSL text (hash h, length len) from its binary in the cache; 0 = not there or refused. */
+static GLuint shader_binary_load(uint64_t h, size_t len, GLint *ok);
+static GLuint shader_binary_load(uint64_t h, size_t len, GLint *ok) {
     char path[320];
-    int saved = 0;
     *ok = 0;
-    if (g_shd_mode <= 0) { GLuint q = glCreateShaderProgramv(type, 1, &src); glGetProgramiv(q, 0x8B82, ok); return q; }
     shd_path(path, sizeof path, h, len);
     FILE *f = fopen(path, "rb");
     if (f) {
@@ -2201,11 +2202,75 @@ static GLuint shader_build(GLenum type, const char *src, size_t len, uint64_t h,
         }
         fclose(f);
     }
-    GLuint q;
+    return 0;
+}
+static GLuint shader_build(GLenum type, const char *src, size_t len, uint64_t h, GLint *ok) {
+    char path[320];
+    int saved = 0;
+    *ok = 0;
+    if (g_shd_mode <= 0) { GLuint q = glCreateShaderProgramv(type, 1, &src); glGetProgramiv(q, 0x8B82, ok); return q; }
+    GLuint q = shader_binary_load(h, len, ok);
+    if (q) return q;
+    shd_path(path, sizeof path, h, len);
     { HS_IN(type == 0x8B31 ? "shader compile + link, vertex stage (driver)" : type == 0x91B9 ? "shader compile + link, compute stage (driver)" : "shader compile + link, fragment stage (driver)", 0); q = shd_compile_save(type, src, path, ok, &saved); HS_OUT(); }
     if (!q) { q = glCreateShaderProgramv(type, 1, &src); glGetProgramiv(q, 0x8B82, ok); return q; }     /* does not compile: the old path reports it (its log holds the compiler's messages) */
     g_shd_saved += saved;
     return q;
+}
+/* The translations made before (2026-10-31): a stage's machine code + key + the settings that shape its GLSL -> the GLSL's
+ * name (hash, length) and what the translator found in it, in <cache>/xlate_<exe>.txt (the exe by its link stamp: another
+ * build translates otherwise). A stage whose binary is there needs no translation at its first draw then: the title's first
+ * 3D frame translated 30-60 stages, 56-66 ms. TOMO_XMEMO=0: every stage translated at its first draw, as before. */
+void xmemo_load(void);
+typedef struct { uint64_t hm, h2; uint32_t src_len, cbufs, ssbos, in_attr, tex_units, ssbo_written; int stage, code_len, uses_alpha, uses_fcs, ubo; } XMemo;
+#define XM_SLOTS (1 << 16)
+static XMemo *g_xm;
+static int g_xm_n, g_xm_on = -1, g_xm_new;
+static FILE *g_xm_out;
+static LONG64 g_xm_hit;
+static uint64_t xmemo_key(uint64_t h1, const MxIn *in) { int k[4] = {in->wide, in->screen_scale, in->ubo, in->fragdebug}; return sh_hash(h1 ^ 0x584d454dULL, k, sizeof k) | 1; }
+static XMemo *xmemo_slot(uint64_t hm, int insert) {
+    for (unsigned i = (unsigned)(hm >> 20) & (XM_SLOTS - 1), k = 0; k < XM_SLOTS; i = (i + 1) & (XM_SLOTS - 1), k++) {
+        if (g_xm[i].hm == hm) return &g_xm[i];
+        if (!g_xm[i].hm) { if (!insert || g_xm_n >= XM_SLOTS / 2) return NULL; g_xm_n++; g_xm[i].hm = hm; return &g_xm[i]; }
+    }
+    return NULL;
+}
+void xmemo_load(void) {                            /* render thread, shd_init */
+    char path[320], line[256];
+    if (g_xm_on < 0) g_xm_on = !(getenv("TOMO_XMEMO") && getenv("TOMO_XMEMO")[0] == '0') && !getenv("TOMO_SHOVR");
+    if (!g_xm_on || g_shd_mode <= 0 || !(g_xm = calloc(XM_SLOTS, sizeof *g_xm))) { g_xm_on = 0; return; }
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)GetModuleHandleA(NULL);
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const uint8_t *)dos + dos->e_lfanew);
+    char exe[MAX_PATH] = "", head[96];
+    GetModuleFileNameA(NULL, exe, sizeof exe);
+    const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe;
+    snprintf(path, sizeof path, "%s/xlate_%s.txt", g_shd_dir, base);
+    snprintf(head, sizeof head, "xlate %08lx %08lx %016llx", (unsigned long)nt->FileHeader.TimeDateStamp, (unsigned long)nt->OptionalHeader.SizeOfImage, (unsigned long long)g_shd_drv);
+    FILE *f = fopen(path, "r");
+    int same = f && fgets(line, sizeof line, f) && !strncmp(line, head, strlen(head));
+    while (same && fgets(line, sizeof line, f)) {
+        XMemo m = {0};
+        unsigned long long hm, h2;
+        if (sscanf(line, "%llx %llx %x %x %x %x %x %x %d %d %d %d %d", &hm, &h2, &m.src_len, &m.cbufs, &m.ssbos, &m.in_attr, &m.tex_units, &m.ssbo_written, &m.stage, &m.code_len, &m.uses_alpha, &m.uses_fcs, &m.ubo) != 13 || !hm) continue;
+        XMemo *e = xmemo_slot(hm, 1);
+        if (e) { m.hm = hm; m.h2 = h2; *e = m; }
+    }
+    if (f) fclose(f);
+    g_xm_out = fopen(path, same ? "a" : "w");
+    if (g_xm_out && !same) fprintf(g_xm_out, "%s\n", head);
+    printf("nvn_gl: %d stage translations known from earlier runs (%s)%c", g_xm_n, path, 10);
+}
+static void xmemo_put(uint64_t hm, int stage, int code_len, uint64_t h2, uint32_t src_len, const MxOut *o) {
+    if (!g_xm_on || !hm) return;
+    XMemo *e = xmemo_slot(hm, 1);
+    if (!e || e->h2) return;
+    e->h2 = h2; e->src_len = src_len; e->stage = stage; e->code_len = code_len;
+    e->cbufs = o->cbufs; e->ssbos = o->ssbos; e->in_attr = o->in_attr; e->tex_units = o->tex_units; e->ssbo_written = o->ssbo_written; e->uses_alpha = o->uses_alpha; e->uses_fcs = o->uses_fcs; e->ubo = o->ubo;
+    if (g_xm_out) {
+        fprintf(g_xm_out, "%016llx %016llx %x %x %x %x %x %x %d %d %d %d %d\n", (unsigned long long)hm, (unsigned long long)h2, src_len, e->cbufs, e->ssbos, e->in_attr, e->tex_units, e->ssbo_written, stage, code_len, e->uses_alpha, e->uses_fcs, e->ubo);
+        if (++g_xm_new % 32 == 0) fflush(g_xm_out);
+    }
 }
 
 /* ---- compiling ahead of the first draw (P3)
@@ -3218,6 +3283,44 @@ static int stage_glsl(Prog *p, int s, const uint32_t *key) {
     in.int_attrs = key[0]; in.sint_attrs = key[1]; in.int_tex = key[2]; in.sint_tex = key[3];
     in.binding_base = (unsigned)s * 20; in.ssbo_base = 40 + (unsigned)s * 16; in.ubo = ubo_on(); in.ubo_base = (unsigned)s * 18;
     in.fragdebug = getenv("SSBU_FRAGDEBUG") != NULL; in.screen_scale = in.stage == 1 && rs_on(); in.wide = wide_k() != 1.0f ? 1 + g_wide_camera : 0;
+    uint64_t hm = h1 && g_xm_on > 0 ? xmemo_key(h1, &in) : 0;
+    if (hm) {                                           /* translated before: the GLSL's binary without translating again */
+        XMemo *m = xmemo_slot(hm, 0);
+        static int verify = -1;                         /* TEST: TOMO_XMEMO=2 translates anyway and compares */
+        if (verify < 0) verify = getenv("TOMO_XMEMO") && getenv("TOMO_XMEMO")[0] == '2';
+        if (m && m->h2 && verify) {
+            MxOut vo;
+            static LONG64 nv, nbad;
+            if (mx_translate(&in, &vo)) {
+                size_t vl = strlen(vo.glsl);
+                uint64_t vh = sh_hash(0x9E3779B97F4A7C15ULL ^ (uint64_t)s, vo.glsl, vl);
+                int bad = vh != m->h2 || vl != m->src_len || vo.cbufs != m->cbufs || vo.ssbos != m->ssbos || vo.in_attr != m->in_attr || vo.tex_units != m->tex_units ||
+                          vo.ssbo_written != m->ssbo_written || vo.uses_alpha != m->uses_alpha || vo.uses_fcs != m->uses_fcs || vo.ubo != m->ubo;
+                nv++; nbad += bad;
+                if (bad || nv % 100 == 0) printf("xmemo verify: %lld checked, %lld differ%s%c", (long long)nv, (long long)nbad, bad ? " (this one)" : "", 10);
+                free(vo.glsl);
+            }
+        }
+        if (m && m->h2 && m->stage == s && m->code_len == st->code_len) {
+            ShSrc *hit = NULL;
+            GLint mok = 0;
+            for (ShSrc *e = g_shs[m->h2 & 4095]; e && !hit; e = e->next) if (e->h == m->h2 && e->len == m->src_len) hit = e;
+            GLuint q = hit ? hit->prog : shader_binary_load(m->h2, m->src_len, &mok);
+            if (q && (hit || mok)) {
+                if (!hit) { ShSrc *e = calloc(1, sizeof *e); e->h = m->h2; e->len = m->src_len; e->prog = q; e->next = g_shs[m->h2 & 4095]; g_shs[m->h2 & 4095] = e; if (q < 65536) g_prog_src[q] = e; }
+                st->glsl = q; st->glsl_state = 1;
+                memcpy(st->glsl_key, key, sizeof st->glsl_key);
+                st->glsl_cbufs = m->cbufs; st->glsl_ssbos = m->ssbos; st->glsl_dep = m->in_attr; st->glsl_tex = m->tex_units; st->glsl_alpha = m->uses_alpha; st->glsl_fcs = m->uses_fcs; st->glsl_ubo = m->ubo; st->glsl_ssbo_w = m->ssbo_written;
+                ShEnt *e = calloc(1, sizeof *e);
+                e->h = h1; e->stage = s; e->code_len = st->code_len; memcpy(e->key, key, 16); e->prog = q;
+                e->cbufs = m->cbufs; e->ssbos = m->ssbos; e->in_attr = m->in_attr; e->tex_units = m->tex_units; e->ssbo_written = m->ssbo_written; e->uses_alpha = m->uses_alpha; e->uses_fcs = m->uses_fcs; e->ubo = m->ubo;
+                e->next = g_shc[h1 & 4095]; g_shc[h1 & 4095] = e;
+                g_xm_hit++;
+                return 1;
+            }
+            if (q && !hit) glDeleteProgram(q);
+        }
+    }
     LONG64 pf0 = pf_now();
     int xl;
     { HS_IN("shader translate (machine code to GLSL)", 0); xl = mx_translate(&in, &out); HS_OUT(); }
@@ -3313,6 +3416,7 @@ static int stage_glsl(Prog *p, int s, const uint32_t *key) {
     memcpy(st->glsl_key, key, sizeof st->glsl_key);
     st->glsl_cbufs = out.cbufs; st->glsl_ssbos = out.ssbos; st->glsl_dep = out.in_attr; st->glsl_tex = out.tex_units; st->glsl_alpha = out.uses_alpha; st->glsl_fcs = out.uses_fcs; st->glsl_ubo = out.ubo; st->glsl_ssbo_w = out.ssbo_written;
     if (out.ssbo_written) { static int nw; logf_limited(&nw, 5, "nvn_gl: program #%d %s stage writes storage buffers (mask 0x%x): kept in GL buffers and copied back to guest memory\n", p->serial, k_stage_name[s], out.ssbo_written); }
+    if (!getenv("TOMO_SHOVR")) xmemo_put(hm, s, st->code_len, h2, (uint32_t)src_len, &out);
     if (!g_shc_off) {
         ShEnt *e = calloc(1, sizeof *e);
         e->h = h1; e->stage = s; e->code_len = st->code_len; memcpy(e->key, key, 16); e->prog = st->glsl;
