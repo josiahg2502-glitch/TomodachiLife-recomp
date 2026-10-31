@@ -1,8 +1,12 @@
 #version 450
-// ASTC (LDR, 2D) decoding on the GPU (nvn_gl_astc.c): the port of tex_decode.c's astc_block, one invocation per block,
-// writing its texels into the RGBA8 image of its level. One dispatch decodes up to 8 levels of a texture (a work group
-// belongs to one level; its image is picked by a switch). Desktop GPUs have no ASTC; decoded on the CPU, a scene change
-// cost 100-460 ms of the render thread (2026-10-30). Precompiled into astc_decode_spv.h by scripts/gl_shaders.sh.
+// ASTC (LDR, 2D) decoding on the GPU (nvn_gl_astc.c): the port of tex_decode.c's astc_block, writing the texels into the
+// RGBA8 image of their level. One dispatch decodes up to 8 levels of a texture (a work group belongs to one level; its
+// image is picked by a switch). Desktop GPUs have no ASTC; decoded on the CPU, a scene change cost 100-460 ms of the
+// render thread (2026-10-30). Precompiled into astc_decode_spv.h by scripts/gl_shaders.sh.
+// A work group takes 64 blocks in two steps (2026-10-31): each invocation decodes one block's mode, endpoints and weights
+// into shared memory, then the 64 invocations share out the texels of the 64 blocks. One invocation per block for both
+// (as first written) kept ~1.3 KB of arrays per invocation and 36-144 texels in a row: the first frames' 33 MB of 6x6
+// blocks held the GPU about 190 ms.
 // Khronos Data Format Specification, chapter "ASTC Compressed Texture Image Format".
 layout(local_size_x = 64) in;
 layout(binding = 91, std430) readonly buffer Blocks { uvec4 blk[]; };
@@ -62,7 +66,20 @@ Enc astc_enc(int level) {
 }
 int astc_bit_cost(Enc e, int n) { return e.bits * n + (e.trits != 0 ? (n * 8 + 4) / 5 : e.quints != 0 ? (n * 7 + 2) / 3 : 0); }
 
-int g_m[64], g_tq[64];                       // the sequence decoded last (colour integers, then weights; at most 64)
+// The block's data for the texel step (index = the block's invocation): s_hdr = kind (0 decoded, 1 one colour in s_ep[0],
+// 2 error) | grid width << 2 | grid height << 6 | dual plane << 10 | the dual plane's channel << 11 | partitions - 1 << 13;
+// s_part = the partition function's 8 multipliers (4 bits each) and its 4 offsets (6 bits each); s_ep = the endpoints
+// (RGBA8) of each partition, e0 at 2p and e1 at 2p + 1; s_w = the unquantized weights (0..64) as bytes, in the block's
+// order (the two planes interleaved).
+shared uint s_hdr[64], s_part[64][2], s_ep[64][8], s_w[64][16];
+int g_blk, g_kind;                           // the decoded block's index in the work group; 0 colours, 1 weights for astc_bise
+int g_cv[24];
+int astc_unquant_color(Enc e, int m, int tq);
+int astc_unquant_weight(Enc e, int m, int tq);
+void bise_put(int i, Enc e, int m, int tq) {
+    if (g_kind == 0) g_cv[i] = astc_unquant_color(e, m, tq);
+    else s_w[g_blk][i >> 2] |= uint(astc_unquant_weight(e, m, tq)) << uint(8 * (i & 3));
+}
 void astc_bise(inout Rd r, Enc e, int n) {
     int i = 0;
     if (e.trits != 0) {
@@ -84,11 +101,11 @@ void astc_bise(inout Rd r, Enc e, int n) {
             if ((C & 3u) == 3u) { t2 = 2; t1 = int((C >> 4) & 1u); t0 = int((((C >> 3) & 1u) << 1) | (((C >> 2) & 1u) & ~((C >> 3) & 1u))); }
             else if (((C >> 2) & 3u) == 3u) { t2 = 2; t1 = 2; t0 = int(C & 3u); }
             else { t2 = int((C >> 4) & 1u); t1 = int((C >> 2) & 3u); t0 = int((((C >> 1) & 1u) << 1) | ((C & 1u) & ~((C >> 1) & 1u))); }
-            g_m[i] = int(m0); g_tq[i] = t0; i++;
-            if (cnt > 1) { g_m[i] = int(m1); g_tq[i] = t1; i++; }
-            if (cnt > 2) { g_m[i] = int(m2); g_tq[i] = t2; i++; }
-            if (cnt > 3) { g_m[i] = int(m3); g_tq[i] = t3; i++; }
-            if (cnt > 4) { g_m[i] = int(m4); g_tq[i] = t4; i++; }
+            bise_put(i, e, int(m0), t0); i++;
+            if (cnt > 1) { bise_put(i, e, int(m1), t1); i++; }
+            if (cnt > 2) { bise_put(i, e, int(m2), t2); i++; }
+            if (cnt > 3) { bise_put(i, e, int(m3), t3); i++; }
+            if (cnt > 4) { bise_put(i, e, int(m4), t4); i++; }
         }
     } else if (e.quints != 0) {
         while (i < n) {
@@ -107,12 +124,12 @@ void astc_bise(inout Rd r, Enc e, int n) {
                 if ((C & 7u) == 5u) { q1 = 4; q0 = int((C >> 3) & 3u); }
                 else { q1 = int((C >> 3) & 3u); q0 = int(C & 7u); }
             }
-            g_m[i] = int(m0); g_tq[i] = q0; i++;
-            if (cnt > 1) { g_m[i] = int(m1); g_tq[i] = q1; i++; }
-            if (cnt > 2) { g_m[i] = int(m2); g_tq[i] = q2; i++; }
+            bise_put(i, e, int(m0), q0); i++;
+            if (cnt > 1) { bise_put(i, e, int(m1), q1); i++; }
+            if (cnt > 2) { bise_put(i, e, int(m2), q2); i++; }
         }
     } else {
-        for (; i < n; i++) { g_m[i] = int(ar_get(r, e.bits)); g_tq[i] = 0; }
+        for (; i < n; i++) bise_put(i, e, int(ar_get(r, e.bits)), 0);
     }
 }
 
@@ -179,26 +196,26 @@ uint astc_hash52(uint p) {
     p ^= p >> 15; p -= p << 17; p += p << 7; p += p << 4; p ^= p >> 5; p += p << 16; p ^= p >> 7; p ^= p >> 3; p ^= p << 6; p ^= p >> 17;
     return p;
 }
-int g_pk[8], g_padd[4], g_pcount, g_pshift;
-void astc_partition_setup(int seed, int count, int small_block) {
-    g_pcount = count; g_pshift = small_block;
-    if (count == 1) return;
+// The partition function of a block (seed = its partition index): its 8 multipliers (4 bits each) and 4 offsets (only
+// their low 6 bits count), packed for s_part. astc_partition_at: the partition of texel (x, y).
+uvec2 astc_partition_pack(int seed, int count) {
     seed += (count - 1) * 1024;
-    uint rnum = astc_hash52(uint(seed));
+    uint rnum = astc_hash52(uint(seed)), k = 0u, a;
     int s[8];
     for (int i = 0; i < 8; i++) { int v = int((rnum >> uint(4 * i)) & 15u); s[i] = v * v; }
     int sh1, sh2;
     if ((seed & 1) != 0) { sh1 = (seed & 2) != 0 ? 4 : 5; sh2 = count == 3 ? 6 : 5; } else { sh1 = count == 3 ? 6 : 5; sh2 = (seed & 2) != 0 ? 4 : 5; }
-    for (int i = 0; i < 4; i++) { g_pk[2 * i] = s[2 * i] >> sh1; g_pk[2 * i + 1] = s[2 * i + 1] >> sh2; }
-    g_padd[0] = int(rnum >> 14); g_padd[1] = int(rnum >> 10); g_padd[2] = int(rnum >> 6); g_padd[3] = int(rnum >> 2);
+    for (int i = 0; i < 4; i++) { k |= uint(s[2 * i] >> sh1) << uint(8 * i); k |= uint(s[2 * i + 1] >> sh2) << uint(8 * i + 4); }
+    a = ((rnum >> 14) & 63u) | (((rnum >> 10) & 63u) << 6) | (((rnum >> 6) & 63u) << 12) | (((rnum >> 2) & 63u) << 18);
+    return uvec2(k, a);
 }
-int astc_partition_of(int x, int y) {
-    if (g_pcount == 1) return 0;
-    x <<= g_pshift; y <<= g_pshift;
-    int a = (g_pk[0] * x + g_pk[1] * y + g_padd[0]) & 0x3F;
-    int b = (g_pk[2] * x + g_pk[3] * y + g_padd[1]) & 0x3F;
-    int c = g_pcount < 3 ? 0 : (g_pk[4] * x + g_pk[5] * y + g_padd[2]) & 0x3F;
-    int d = g_pcount < 4 ? 0 : (g_pk[6] * x + g_pk[7] * y + g_padd[3]) & 0x3F;
+int astc_partition_at(uvec2 pp, int count, int shift, int x, int y) {
+    if (count == 1) return 0;
+    x <<= shift; y <<= shift;
+    int a = (int(pp.x & 15u) * x + int((pp.x >> 4) & 15u) * y + int(pp.y & 63u)) & 0x3F;
+    int b = (int((pp.x >> 8) & 15u) * x + int((pp.x >> 12) & 15u) * y + int((pp.y >> 6) & 63u)) & 0x3F;
+    int c = count < 3 ? 0 : (int((pp.x >> 16) & 15u) * x + int((pp.x >> 20) & 15u) * y + int((pp.y >> 12) & 63u)) & 0x3F;
+    int d = count < 4 ? 0 : (int((pp.x >> 24) & 15u) * x + int((pp.x >> 28) & 15u) * y + int((pp.y >> 18) & 63u)) & 0x3F;
     if (a >= b && a >= c && a >= d) return 0;
     if (b >= c && b >= d) return 1;
     if (c >= d) return 2;
@@ -238,38 +255,19 @@ int astc_endpoints(int cem, int v0, int v1, int v2, int v3, int v4, int v5, int 
     return 0;
 }
 
-void fill(int x0, int y0, int bw, int bh, ivec4 c) {
-    for (int y = 0; y < bh; y++) for (int x = 0; x < bw; x++)
-        if (x0 + x < g_w && y0 + y < g_h) store(x0 + x, y0 + y, vec4(c) / 255.0);
-}
+uint pack8(ivec4 c) { return uint(c.x) | (uint(c.y) << 8) | (uint(c.z) << 16) | (uint(c.w) << 24); }
+void one_colour(int b, ivec4 c) { s_hdr[b] = 1u; s_ep[b][0] = pack8(c); }
+void error_colour(int b) { s_hdr[b] = 2u; }
 
-int g_cv[18], g_wq[128];
-int g_Ds, g_Dt, g_gw, g_gh;
-int infill(int p, int x, int y) {               // the weight of texel (x, y) from the grid of plane p
-    int cs = g_Ds * x, ct = g_Dt * y, gs = (cs * (g_gw - 1) + 32) >> 6, gt = (ct * (g_gh - 1) + 32) >> 6;
-    int js = gs >> 4, fs = gs & 15, jt = gt >> 4, ft = gt & 15, w11 = (fs * ft + 8) >> 4, w10 = ft - w11, w01 = fs - w11, w00 = 16 - fs - ft + w11;
-    int v0 = js + jt * g_gw, p00 = g_wq[64 * p + v0], p01 = js + 1 < g_gw ? g_wq[64 * p + v0 + 1] : 0, p10 = jt + 1 < g_gh ? g_wq[64 * p + v0 + g_gw] : 0;
-    int p11 = js + 1 < g_gw && jt + 1 < g_gh ? g_wq[64 * p + v0 + g_gw + 1] : 0;
-    return (p00 * w00 + p01 * w01 + p10 * w10 + p11 * w11 + 8) >> 4;
-}
-int g_cem[4];
-ivec4 g_e0[4], g_e1[4];
-
-void main() {
-    int gid = int(gl_WorkGroupID.x), nl = u_lv[16].z, l = 0, first = 0, nblocks = 0;
-    for (l = 0; l < nl; l++) { first = u_lv[2 * l + 1].x; nblocks = u_lv[2 * l + 1].y; if (gid >= first && gid < first + (nblocks + 63) / 64) break; }
-    if (l >= nl) return;
-    int bi = (gid - first) * 64 + int(gl_LocalInvocationID.x);
-    if (bi >= nblocks) return;
-    g_lvl = l; g_w = u_lv[2 * l].x; g_h = u_lv[2 * l].y;
-    int wb = u_lv[2 * l].z, bw = u_lv[16].x, bh = u_lv[16].y, srgb = u_lv[16].w;
-    int x0 = (bi % wb) * bw, y0 = (bi / wb) * bh;
-    uvec4 b = blk[u_lv[2 * l + 1].z + bi];
-    Rd r; r.p = b; r.pos = 0; r.end = 128;
+// Step 1: one block (the work group's block b): its mode, partitions, endpoints and weights into shared memory.
+void decode_block(int b, uvec4 blkw, int bw, int bh) {
+    g_blk = b;
+    for (int i = 0; i < 16; i++) s_w[b][i] = 0u;
+    Rd r; r.p = blkw; r.pos = 0; r.end = 128;
     uint mode = ar_get(r, 11);
     if ((mode & 0x1FFu) == 0x1FCu) {                 // void extent
         int hdr = int((mode >> 9) & 1u);
-        if ((mode & 0x400u) == 0u || ar_get(r, 1) == 0u) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
+        if ((mode & 0x400u) == 0u || ar_get(r, 1) == 0u) { one_colour(b, ivec4(255, 0, 255, 255)); return; }
         ar_get(r, 13); ar_get(r, 13); ar_get(r, 13); ar_get(r, 13);
         ivec4 c;
         for (int i = 0; i < 4; i++) {
@@ -277,10 +275,11 @@ void main() {
             if (hdr != 0) { float f = unpackHalf2x16(v).x; c[i] = f <= 0.0 ? 0 : f >= 1.0 ? 255 : int(f * 255.0 + 0.5); }
             else c[i] = int(v >> 8);
         }
-        fill(x0, y0, bw, bh, c);
+        one_colour(b, c);
         return;
     }
     int layout_, gw, gh, R, wlevel, nparts, part_index = 0, base_cem = 0, nweights, wbits, extra = 0, ccs = 0, color_start, color_bits;
+    int cem[4];
     bool dual, high, bad = false;
     if ((mode & 0xFu) == 0u || ((mode & 3u) == 0u && (mode & 0x1C0u) == 0x1C0u)) bad = true;
     if ((mode & 3u) != 0u) {
@@ -312,20 +311,20 @@ void main() {
         if (ri < 0 || ri > 5) bad = true;
         else wlevel = high ? (ri == 0 ? 10 : ri == 1 ? 12 : ri == 2 ? 16 : ri == 3 ? 20 : ri == 4 ? 24 : 32) : (ri == 0 ? 2 : ri == 1 ? 3 : ri == 2 ? 4 : ri == 3 ? 5 : ri == 4 ? 6 : 8);
     }
-    if (bad || gw > bw || gh > bh) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
+    if (bad || gw > bw || gh > bh) { error_colour(b); return; }
     nweights = gw * gh * (dual ? 2 : 1);
     Enc wenc = astc_enc(wlevel);
     wbits = astc_bit_cost(wenc, nweights);
-    if (nweights > 64 || wbits < 24 || wbits > 96) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
+    if (nweights > 64 || wbits < 24 || wbits > 96) { error_colour(b); return; }
     nparts = int(ar_get(r, 2)) + 1;
-    if (nparts == 4 && dual) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
-    if (nparts == 1) { g_cem[0] = int(ar_get(r, 4)); color_start = 17; }
+    if (nparts == 4 && dual) { error_colour(b); return; }
+    if (nparts == 1) { cem[0] = int(ar_get(r, 4)); color_start = 17; }
     else { part_index = int(ar_get(r, 10)); base_cem = int(ar_get(r, 6)); color_start = 29; }
     if (nparts > 1 && (base_cem & 3) != 0) extra = 3 * nparts - 4;
     color_bits = 128 - wbits - extra - (dual ? 2 : 0) - color_start;
-    if (color_bits < 0) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
+    if (color_bits < 0) { error_colour(b); return; }
     {
-        Rd c2; c2.p = b; c2.pos = 128 - wbits - extra; c2.end = 128;
+        Rd c2; c2.p = blkw; c2.pos = 128 - wbits - extra; c2.end = 128;
         if (nparts > 1) {
             if ((base_cem & 3) != 0) {
                 int bits = base_cem | (int(ar_get(c2, extra)) << 6), cls = (base_cem & 3) - 1;
@@ -333,49 +332,44 @@ void main() {
                 bits >>= 2;
                 for (int i = 0; i < nparts; i++) { C[i] = bits & 1; bits >>= 1; }
                 for (int i = 0; i < nparts; i++) { Mv[i] = bits & 3; bits >>= 2; }
-                for (int i = 0; i < nparts; i++) g_cem[i] = ((cls + C[i]) << 2) | Mv[i];
-            } else for (int i = 0; i < nparts; i++) g_cem[i] = base_cem >> 2;
+                for (int i = 0; i < nparts; i++) cem[i] = ((cls + C[i]) << 2) | Mv[i];
+            } else for (int i = 0; i < nparts; i++) cem[i] = base_cem >> 2;
         }
-        if (dual) { Rd c3; c3.p = b; c3.pos = 128 - wbits - extra - 2; c3.end = 128; ccs = int(ar_get(c3, 2)); }
+        if (dual) { Rd c3; c3.p = blkw; c3.pos = 128 - wbits - extra - 2; c3.end = 128; ccs = int(ar_get(c3, 2)); }
     }
     int nvals = 0;
-    for (int i = 0; i < nparts; i++) nvals += ((g_cem[i] >> 2) + 1) * 2;
-    if (nvals > 18) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
-    int clevel = -1;
+    for (int i = 0; i < nparts; i++) nvals += ((cem[i] >> 2) + 1) * 2;
+    if (nvals > 18) { error_colour(b); return; }
     Enc cenc; cenc.bits = 0; cenc.trits = 0; cenc.quints = 0;
+    int clevel = -1;
     for (int i = 20; i >= 4 && clevel < 0; i--) {     // largest quantisation (>= 6 levels) whose encoding fits
         int lv = i == 4 ? 6 : i == 5 ? 8 : i == 6 ? 10 : i == 7 ? 12 : i == 8 ? 16 : i == 9 ? 20 : i == 10 ? 24 : i == 11 ? 32 : i == 12 ? 40 : i == 13 ? 48
                : i == 14 ? 64 : i == 15 ? 80 : i == 16 ? 96 : i == 17 ? 128 : i == 18 ? 160 : i == 19 ? 192 : 256;
         Enc e = astc_enc(lv);
         if (astc_bit_cost(e, nvals) <= color_bits) { clevel = i; cenc = e; }
     }
-    if (clevel < 0) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
-    // colour integers: the colour bits moved to the start of a zeroed block (a partial last group reads zeros)
-    {
+    if (clevel < 0) { error_colour(b); return; }
+    {   // colour integers: the colour bits moved to the start of a zeroed block (a partial last group reads zeros)
         uvec4 cb = uvec4(0u);
-        for (int i = 0; i < color_bits; i += 32) {
-            uint v = bits128(b, color_start + i, color_bits - i < 32 ? color_bits - i : 32);
-            cb[i >> 5] = v;
-        }
+        for (int i = 0; i < color_bits; i += 32) cb[i >> 5] = bits128(blkw, color_start + i, color_bits - i < 32 ? color_bits - i : 32);
         Rd cr; cr.p = cb; cr.pos = 0; cr.end = color_bits;
+        for (int i = 0; i < 24; i++) g_cv[i] = 0;
+        g_kind = 0;
         astc_bise(cr, cenc, nvals);
-        for (int i = 0; i < nvals; i++) g_cv[i] = astc_unquant_color(cenc, g_m[i], g_tq[i]);
-        for (int i = nvals; i < 18; i++) g_cv[i] = 0;
     }
     {
         int cidx = 0;
-        bool hdr = false;
         for (int i = 0; i < nparts; i++) {
-            if (astc_endpoints(g_cem[i], g_cv[cidx], g_cv[cidx + 1], g_cv[cidx + 2], g_cv[cidx + 3], g_cv[cidx + 4], g_cv[cidx + 5], g_cv[cidx + 6], g_cv[cidx + 7], g_e0[i], g_e1[i]) < 0) hdr = true;
-            cidx += ((g_cem[i] >> 2) + 1) * 2;
+            ivec4 e0, e1;
+            if (astc_endpoints(cem[i], g_cv[cidx], g_cv[cidx + 1], g_cv[cidx + 2], g_cv[cidx + 3], g_cv[cidx + 4], g_cv[cidx + 5], g_cv[cidx + 6], g_cv[cidx + 7], e0, e1) < 0) { error_colour(b); return; }
+            s_ep[b][2 * i] = pack8(e0); s_ep[b][2 * i + 1] = pack8(e1);
+            cidx += ((cem[i] >> 2) + 1) * 2;
         }
-        if (hdr) { fill(x0, y0, bw, bh, ivec4(255, 0, 255, 255)); return; }
     }
-    // weights: stored bit-reversed from the top of the block
-    {
+    {   // weights: stored bit-reversed from the top of the block
         uvec4 wbuf;
         for (int w = 0; w < 4; w++) {
-            uint v = b[3 - w];
+            uint v = blkw[3 - w];
             v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
             v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
             v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4);
@@ -384,28 +378,55 @@ void main() {
             wbuf[w] = v;
         }
         Rd wr; wr.p = wbuf; wr.pos = 0; wr.end = wbits;
+        g_kind = 1;
         astc_bise(wr, wenc, nweights);
-        for (int i = 0; i < gw * gh; i++) {
-            if (dual) { g_wq[i] = astc_unquant_weight(wenc, g_m[2 * i], g_tq[2 * i]); g_wq[64 + i] = astc_unquant_weight(wenc, g_m[2 * i + 1], g_tq[2 * i + 1]); }
-            else g_wq[i] = astc_unquant_weight(wenc, g_m[i], g_tq[i]);
-        }
     }
-    g_Ds = (1024 + bw / 2) / (bw - 1); g_Dt = (1024 + bh / 2) / (bh - 1); g_gw = gw; g_gh = gh;
-    astc_partition_setup(part_index, nparts, bw * bh < 31 ? 1 : 0);
-    for (int i = 0; i < nparts; i++)
-        for (int c = 0; c < 4; c++) {                 // endpoints widened to 16 bits
-            g_e0[i][c] = srgb != 0 ? (g_e0[i][c] << 8) | 0x80 : (g_e0[i][c] << 8) | g_e0[i][c];
-            g_e1[i][c] = srgb != 0 ? (g_e1[i][c] << 8) | 0x80 : (g_e1[i][c] << 8) | g_e1[i][c];
+    if (nparts > 1) { uvec2 pp = astc_partition_pack(part_index, nparts); s_part[b][0] = pp.x; s_part[b][1] = pp.y; }
+    s_hdr[b] = uint(gw << 2) | uint(gh << 6) | (dual ? 1u << 10 : 0u) | uint(ccs << 11) | uint((nparts - 1) << 13);
+}
+
+int weight_at(int b, int i) { return int((s_w[b][i >> 2] >> uint(8 * (i & 3))) & 0xFFu); }
+int infill(int b, int p, int dual, int gw, int gh, int Ds, int Dt, int x, int y) {      // the weight of texel (x, y) from the grid of plane p
+    int cs = Ds * x, ct = Dt * y, gs = (cs * (gw - 1) + 32) >> 6, gt = (ct * (gh - 1) + 32) >> 6;
+    int js = gs >> 4, fs = gs & 15, jt = gt >> 4, ft = gt & 15, w11 = (fs * ft + 8) >> 4, w10 = ft - w11, w01 = fs - w11, w00 = 16 - fs - ft + w11;
+    int v0 = js + jt * gw, m = dual + 1;
+    int p00 = weight_at(b, v0 * m + p), p01 = js + 1 < gw ? weight_at(b, (v0 + 1) * m + p) : 0, p10 = jt + 1 < gh ? weight_at(b, (v0 + gw) * m + p) : 0;
+    int p11 = js + 1 < gw && jt + 1 < gh ? weight_at(b, (v0 + gw + 1) * m + p) : 0;
+    return (p00 * w00 + p01 * w01 + p10 * w10 + p11 * w11 + 8) >> 4;
+}
+
+void main() {
+    int gid = int(gl_WorkGroupID.x), lid = int(gl_LocalInvocationID.x), nl = u_lv[16].z, l = 0, first = 0, nblocks = 0;
+    for (l = 0; l < nl; l++) { first = u_lv[2 * l + 1].x; nblocks = u_lv[2 * l + 1].y; if (gid >= first && gid < first + (nblocks + 63) / 64) break; }
+    if (l >= nl) return;                             // (the whole work group)
+    g_lvl = l; g_w = u_lv[2 * l].x; g_h = u_lv[2 * l].y;
+    int wb = u_lv[2 * l].z, bw = u_lv[16].x, bh = u_lv[16].y, srgb = u_lv[16].w;
+    int base = (gid - first) * 64, nb = min(64, nblocks - base);
+    if (lid < nb) decode_block(lid, blk[u_lv[2 * l + 1].z + base + lid], bw, bh);
+    barrier();
+    // Step 2: the texels of the work group's blocks, shared out among the 64 invocations
+    int per = bw * bh, Ds = (1024 + bw / 2) / (bw - 1), Dt = (1024 + bh / 2) / (bh - 1), shift = per < 31 ? 1 : 0;
+    for (int t = lid; t < nb * per; t += 64) {
+        int b = t / per, k = t - b * per, x = k % bw, y = k / bw, bi = base + b;
+        int px0 = (bi % wb) * bw + x, py0 = (bi / wb) * bh + y;
+        if (px0 >= g_w || py0 >= g_h) continue;
+        uint hd = s_hdr[b];
+        if ((hd & 3u) != 0u) {
+            uint c = (hd & 3u) == 1u ? s_ep[b][0] : 0xFFFF00FFu;      // (error: magenta)
+            store(px0, py0, vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), float(c >> 24)) / 255.0);
+            continue;
         }
-    for (int y = 0; y < bh; y++)
-        for (int x = 0; x < bw; x++) {
-            if (x0 + x >= g_w || y0 + y >= g_h) continue;
-            int part = astc_partition_of(x, y), w0 = infill(0, x, y), w1 = dual ? infill(1, x, y) : w0;
-            ivec4 px;
-            for (int c = 0; c < 4; c++) {
-                int w = dual && c == ccs ? w1 : w0, v = (g_e0[part][c] * (64 - w) + g_e1[part][c] * w + 32) >> 6;
-                px[c] = srgb != 0 ? v >> 8 : v == 65535 ? 255 : (v * 255 + 32768) >> 16;
-            }
-            store(x0 + x, y0 + y, vec4(px) / 255.0);
+        int gw = int((hd >> 2) & 15u), gh = int((hd >> 6) & 15u), dual = int((hd >> 10) & 1u), ccs = int((hd >> 11) & 3u), nparts = int((hd >> 13) & 3u) + 1;
+        int part = astc_partition_at(uvec2(s_part[b][0], s_part[b][1]), nparts, shift, x, y);
+        int w0 = infill(b, 0, dual, gw, gh, Ds, Dt, x, y), w1 = dual != 0 ? infill(b, 1, dual, gw, gh, Ds, Dt, x, y) : w0;
+        uint e0p = s_ep[b][2 * part], e1p = s_ep[b][2 * part + 1];
+        ivec4 px;
+        for (int c = 0; c < 4; c++) {
+            int a8 = int((e0p >> uint(8 * c)) & 255u), b8 = int((e1p >> uint(8 * c)) & 255u);
+            int e0 = srgb != 0 ? (a8 << 8) | 0x80 : (a8 << 8) | a8, e1 = srgb != 0 ? (b8 << 8) | 0x80 : (b8 << 8) | b8;
+            int w = dual != 0 && c == ccs ? w1 : w0, v = (e0 * (64 - w) + e1 * w + 32) >> 6;
+            px[c] = srgb != 0 ? v >> 8 : v == 65535 ? 255 : (v * 255 + 32768) >> 16;
         }
+        store(px0, py0, vec4(px) / 255.0);
+    }
 }

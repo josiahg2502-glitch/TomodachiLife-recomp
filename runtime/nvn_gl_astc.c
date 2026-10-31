@@ -58,6 +58,17 @@ static void ga_barrier(void) {
     g_ga.pending = 0; g_ga.barriers++;
 }
 #define GA_LEVELS 8                            /* levels of one layer decoded by one dispatch (one image unit each) */
+/* TEST ONLY, TOMO_GA_TIME=1: the GPU time of the decoder's dispatches per frame (a TIME_ELAPSED query around each, read
+ * when the next frame's first decode comes: it waits for the GPU) */
+static int g_gat_on = -1, g_gat_n;
+static GLuint g_gat_q[512];
+static long long g_gat_frame = -1, g_gat_blocks;
+static void ga_time_flush(void) {
+    uint64_t sum = 0, ns = 0;
+    for (int i = 0; i < g_gat_n; i++) { glGetQueryObjectui64v(g_gat_q[i], 0x8866 /* QUERY_RESULT */, &ns); sum += ns; }
+    if (g_gat_n) printf("ga-time: frame %lld: %d dispatches, %lld blocks, %.2f ms of GPU%c", g_gat_frame, g_gat_n, g_gat_blocks, (double)sum / 1e6, 10);
+    g_gat_n = 0; g_gat_blocks = 0;
+}
 typedef void (APIENTRY *ga_u4iv_t)(GLuint, GLint, GLsizei, const GLint *);
 /* The first nl levels of a layer, their deswizzled blocks at blocks + offs[l], decoded by ONE dispatch; returns nl, or 0 =
  * nothing done (decode in software). scratch: lvl_w[0] * lvl_h[0] * 4 bytes for the check mode's software decode. */
@@ -93,7 +104,15 @@ static int ga_decode_levels(Tex *t, const TexFormat *tf, const TexLayout *L, con
     glUseProgram(g_ga.prog);
     u4iv(g_ga.prog, 0, 17, &lv[0][0]);
     for (int l = 0; l < nl; l++) glBindImageTexture((GLuint)l, image, l, GL_FALSE, view ? 0 : layer, 0x88B9 /* WRITE_ONLY */, 0x8058 /* RGBA8 */);
+    if (g_gat_on < 0) g_gat_on = getenv("TOMO_GA_TIME") != NULL && gl_has(glGetQueryObjectui64v, "glGetQueryObjectui64v");
+    int timed = 0;
+    if (g_gat_on) {
+        if (g_gat_frame != (long long)g_st.frames) { ga_time_flush(); g_gat_frame = (long long)g_st.frames; }
+        if (g_gat_n < 512) { if (!g_gat_q[g_gat_n]) glGenQueries(1, &g_gat_q[g_gat_n]); glBeginQuery(0x88BF /* TIME_ELAPSED */, g_gat_q[g_gat_n]); timed = 1; }
+        for (int l = 0; l < nl; l++) g_gat_blocks += lv[2 * l + 1][1];
+    }
     glDispatchCompute((GLuint)groups, 1, 1);
+    if (timed) { glEndQuery(0x88BF); g_gat_n++; }
     for (int l = 0; l < nl; l++) glBindImageTexture((GLuint)l, 0, 0, GL_FALSE, 0, 0x88B8 /* READ_ONLY */, 0x8058);
     glUseProgram(0);
     if (view) glDeleteTextures(1, &view);          /* (the GPU keeps it until the dispatch is done) */
