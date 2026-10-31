@@ -1654,12 +1654,23 @@ static void pointer_hook(Ctx *c, void *user) {
         const float *f = (const float *)(uintptr_t)A0; const int *w = (const int *)(uintptr_t)A0;
         if (dbg && n++ % 30 == 0) printf("mouse: state flags %x 1a0 %d 1a4 %d pos %g,%g prev %g,%g 08 %x 10 %x 114 %x%c", *(const uint16_t *)(uintptr_t)(A0 + 0x14), w[0x1a0 / 4], w[0x1a4 / 4],
                                         f[0x118 / 4], f[0x11c / 4], f[0x1b0 / 4], f[0x1b4 / 4], w[2], w[4], w[0x114 / 4], 10); }
-    int up = *(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1, centred = up && *(const int *)(uintptr_t)(A0 + 0x1a0) == 1;
+    uint64_t self = A0;
+    int up = *(const uint16_t *)(uintptr_t)(self + 0x14) & 1, mode = *(const int *)(uintptr_t)(self + 0x1a0), have = up && nnhid_mouse(xy);
     if (up) { void nnhid_pointer_free(void); nnhid_pointer_free(); }
-    if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());      /* (the island: the hand stays in the middle, see isle_mouse) */
-    if (*(const int *)(uintptr_t)(A0 + 0x1a0) == 3) g_seen_buttons = 1;      /* (the title's "Press A" is one: the island marker waits for it) */
-    else if (up && nnhid_mouse(xy)) { memcpy((void *)(uintptr_t)(A0 + 0x118), xy, 8); display_mouse_hand(); }
+    if (*(const int *)(uintptr_t)(self + 0x1a0) == 3) g_seen_buttons = 1;      /* (the title's "Press A" is one: the island marker waits for it) */
+    if (have) memcpy((void *)(uintptr_t)(self + 0x118), xy, 8);
     g_pointer_update(c);
+    /* Mode 1 is the island's hand, which the game puts back in the middle every frame (the stick moves the camera,
+     * isle_mouse), and also a pen or cursor that keeps the position given (the Palette House canvas, clamped to it):
+     * only a mouse away from the middle tells them apart, so the last answer holds while it is there. */
+    static int centred = 1;
+    if (up && mode == 1) {
+        const float *pp = (const float *)(uintptr_t)(self + 0x118);
+        if (have && (fabsf(xy[0] - 640.0f) > 2.0f || fabsf(xy[1] - 360.0f) > 2.0f)) centred = fabsf(pp[0] - 640.0f) < 0.5f && fabsf(pp[1] - 360.0f) < 0.5f;
+        if (!have) centred = 1;
+        if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());
+        else display_mouse_hand();
+    } else if (have) display_mouse_hand();
 }
 /* THE MOUSE ON THE ISLAND (2026-10-31). There the hand stays in the middle of the screen (the pointer's mode 1) and the left
  * stick moves the camera: [0x710044c828] (1.0.4 0x710044b8b0; a camera controller's update: this, the target point) adds
