@@ -1666,7 +1666,7 @@ static void chatter_pick(Ctx *c, void *user) {
         if (ch == 0x0E) { k += 3 + rd16(text + (uint64_t)(k + 3) * 2) / 2; continue; }
         if (ch >= 0x80) { english = 0; break; }
     }
-    if (kind && english) {                                     /* the AI hears what Miis say */
+    if (kind && kind != 4 && english) {                        /* the AI hears what Miis say (not Mii-speak chats: it copied them) */
         char heard[160];
         if (chatter_plain(text, (int)rd32(res + 8), heard, sizeof heard)) { snprintf(g_cm.heard[g_cm.heardi++ & 7], sizeof g_cm.heard[0], "%s", heard); if (g_cm.nheard < 8) g_cm.nheard++; }
     }
