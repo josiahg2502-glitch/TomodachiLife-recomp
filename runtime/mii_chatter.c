@@ -564,29 +564,29 @@ static void kb_load_file(void) {                        /* the copy from an earl
     fclose(f);
     if (g_nkb) g_kb_state = 1;
 }
-static int kb_readable(uint64_t p, size_t n) {          /* (the AI thread keeps its own region: the pick keeps another) */
-    static uint64_t rb, re; static int rok;
-    if (p >= rb && p < re && re - p >= n) return rok;
-    MEMORY_BASIC_INFORMATION mb;
-    if (p < 0x10000 || !VirtualQuery((const void *)(uintptr_t)p, &mb, sizeof mb)) return 0;
-    rb = (uint64_t)(uintptr_t)mb.BaseAddress; re = rb + mb.RegionSize;
-    rok = mb.State == MEM_COMMIT && !(mb.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (mb.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY));
-    return rok && re - p >= n;
-}
 /* From a message the game uses (data = one of its sections, noted by the pick): its archive (the SARC that holds it),
- * then the catalogues. On the AI thread (the archive stays put once loaded). */
+ * then the catalogues. On the AI thread, from a copy (mem_copy, tomo.c: nothing here may fault or ask VirtualQuery). */
 static volatile uint64_t g_kb_hint;
 static void kb_from_game(uint64_t data) {
     if (!g_kb && !(g_kb = calloc(KB_MAX, sizeof *g_kb))) return;
-    uint64_t sarc = 0;
-    for (uint64_t k = 0; data && k < (96u << 20); k += 4) {         /* back to the archive's header */
-        uint64_t q = (data & ~3ull) - k;
-        if (!kb_readable(q, 0x20)) break;
-        if (rd32(q) == 0x43524153u && rd16(q + 4) == 0x14 && rd16(q + 6) == 0xFEFF && data < q + rd32(q + 8)) { sarc = q; break; }
+    ULONGLONG kt0 = GetTickCount64();
+    uint64_t sarc = 0, q0 = data & ~3ull, page = q0 & ~0xfffull;
+    uint32_t size = 0;
+    static uint8_t pg[0x1000 + 0x20];                   /* a page and the first bytes of the one above (a header across the boundary) */
+    for (uint64_t k = 0; data && k < (96u << 20) && !sarc; k += 0x1000) {      /* back to the archive's header */
+        uint64_t pa = page - k;
+        if (k) { memmove(pg + 0x1000, pg, 0x20); if (!mem_copy(pa, pg, 0x1000)) break; }
+        else if (!mem_copy(pa, pg, sizeof pg)) { memset(pg + 0x1000, 0, 0x20); if (!mem_copy(pa, pg, 0x1000)) break; }      /* (the page above may not exist) */
+        for (int o = k ? 0xffc : (int)(q0 - pa); o >= 0 && !sarc; o -= 4) {
+            uint32_t m, sz; uint16_t h, bom;
+            memcpy(&m, pg + o, 4); memcpy(&h, pg + o + 4, 2); memcpy(&bom, pg + o + 6, 2); memcpy(&sz, pg + o + 8, 4);
+            if (m == 0x43524153u && h == 0x14 && bom == 0xFEFF && data < pa + (uint64_t)o + sz) { sarc = pa + (uint64_t)o; size = sz; }
+        }
     }
-    uint32_t size = sarc ? rd32(sarc + 8) : 0;
-    if (!sarc || !kb_readable(sarc, size)) { printf("chatter: the game's message archive was not found in memory%c", 10); if (!g_nkb) g_kb_state = -1; return; }
-    const uint8_t *s = (const uint8_t *)(uintptr_t)sarc;
+    uint8_t *copy = sarc && size >= 0x40 && size <= (64u << 20) ? malloc(size) : NULL;
+    if (copy && !mem_copy(sarc, copy, size)) { free(copy); copy = NULL; }
+    if (!copy) { printf("chatter: the game's message archive was not found in memory%c", 10); if (!g_nkb) g_kb_state = -1; return; }
+    const uint8_t *s = copy;
     uint32_t doff; memcpy(&doff, s + 0xC, 4);
     uint16_t nn; memcpy(&nn, s + 0x14 + 6, 2);
     const uint8_t *nodes = s + 0x14 + 0xC, *names = nodes + nn * 16 + 8;
@@ -609,16 +609,17 @@ static void kb_from_game(uint64_t data) {
                 uint32_t attr, a, e; memcpy(&attr, nodes + i * 16 + 4, 4); memcpy(&a, nodes + i * 16 + 8, 4); memcpy(&e, nodes + i * 16 + 12, 4);
                 if (!(attr & 0x01000000)) continue;
                 const char *nm = (const char *)names + (attr & 0xFFFF) * 4;
-                if (strcmp(nm, want) || doff + e > size || e < a) continue;
+                if ((const uint8_t *)nm + 64 > s + size || strcmp(nm, want) || doff + e > size || e < a) continue;
                 kb_msbt(s + doff + a, e - a, si == 5 ? kb_take_tip : si == 6 ? kb_take_char : pass ? kb_take_caption : kb_take_name, &pair);
                 break;
             }
         }
+    free(copy);
     if (!g_nkb) { g_nkb = before; printf("chatter: no catalogues in the game's message archive%c", 10); return; }
     g_kb_state = 1;
     int per[7] = {0};
     for (int i = 0; i < g_nkb; i++) per[!strcmp(g_kb[i].kind, "food") ? 0 : !strcmp(g_kb[i].kind, "place") ? 1 : !strcmp(g_kb[i].kind, "thing") ? 2 : !strcmp(g_kb[i].kind, "quirk") ? 3 : !strcmp(g_kb[i].kind, "trip") ? 4 : !strcmp(g_kb[i].kind, "tip") ? 5 : 6]++;
-    printf("chatter: knows the game: %d foods, %d places, %d things, %d quirks, %d trips, %d tips, %d personality words (archive %llx, %u bytes)%c", per[0], per[1], per[2], per[3], per[4], per[5], per[6], (unsigned long long)sarc, size, 10);
+    printf("chatter: knows the game: %d foods, %d places, %d things, %d quirks, %d trips, %d tips, %d personality words (archive %llx, %u bytes, read in %llu ms)%c", per[0], per[1], per[2], per[3], per[4], per[5], per[6], (unsigned long long)sarc, size, GetTickCount64() - kt0, 10);
     kb_save();
 }
 static const KbEntry *kb_pick(const char *kind) {      /* a random entry of a kind (NULL: any catalogue's) */
@@ -1372,10 +1373,14 @@ static int ai_want_cat(int kind) {
     for (int k = 0, start = n ? (int)(chatter_rand() % (unsigned)n) : 0; k < n; k++) { int c = cats[(start + k) % n]; if (best < 0 || have[c] < have[best]) best = c; }
     return best;
 }
+static DWORD tomo_island_ms(void);                    /* tomo.c: how long since the island was first on screen (0: not yet) */
 static DWORD WINAPI ai_main(void *arg) {
     (void)arg;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
     { void display_slow_thread(void); display_slow_thread(); }      /* display.c: the efficiency cores, if any */
+    /* Nothing before the island has been up 10 s (template lines until then): the model (1 GB read, the prompt worked
+     * through by 4 threads) ran during the game's start-up loads (2026-10-31: the user's start, 24 s of it). */
+    while (tomo_island_ms() < 10000) Sleep(500);
     SYSTEM_INFO si; GetSystemInfo(&si);
     /* Threads: up to 8 (the processors less 6 for the game) when the CPU is mostly idle, 4 otherwise (TOMO_LLM_THREADS fixes it). */
     int fixed = getenv("TOMO_LLM_THREADS") ? atoi(getenv("TOMO_LLM_THREADS")) : 0, nt = fixed ? fixed : (int)si.dwNumberOfProcessors - 6;
@@ -1464,15 +1469,7 @@ static int chatter_label(uint64_t mfile, uint32_t idx, char *out, size_t n) {
     }
     return 0;
 }
-static int chatter_readable(uint64_t p, size_t n) {         /* (TEST probe only; the last region is kept) */
-    static uint64_t rb, re; static int rok;
-    if (p >= rb && p < re && re - p >= n) return rok;           /* (no p + n: it wraps for p near 2^64) */
-    MEMORY_BASIC_INFORMATION mb;
-    if (p < 0x10000 || !VirtualQuery((const void *)(uintptr_t)p, &mb, sizeof mb)) return 0;
-    rb = (uint64_t)(uintptr_t)mb.BaseAddress; re = rb + mb.RegionSize;
-    rok = mb.State == MEM_COMMIT && !(mb.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (mb.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
-    return rok && re - p >= n;
-}
+static int chatter_readable(uint64_t p, size_t n) { return mem_readable(p, n); }      /* (tomo.c: no VirtualQuery) */
 static int chatter_label_exists(uint64_t mfile, const char *name) {
     uint64_t msg = rd64(mfile);
     int li = msg ? (int)rd32(msg + 0x20) : -1;

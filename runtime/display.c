@@ -902,6 +902,10 @@ static void adapt_frame(LARGE_INTEGER now) {
             }
         }
         if (off) return;
+        /* Not before the island has been up 5 s: the loading screen, the title and the island's own load came late for the
+         * loading, which 30 fps does not help, and each such drop doubled the next stay (2026-10-31: 30 fps from the loading
+         * screen on, 2 min of it by the time the island was up). The game's own controller still picks 2 or 3 meanwhile. */
+        { int tomo_play_started(void); if (!tomo_play_started()) { window = missed = over = 0; return; } }
         /* The stay at 30 doubles (20 s, 40 s, 80 s, at most 2 min) when 60 fails again within 10 s of a try: a scene that cannot
          * hold 60 no longer switches back and forth every 20 s (each switch shows); a minute at 60 resets it. */
         static int stay = 600, at60 = 600;              /* (the first drop, often at a load, is not a failed try) */

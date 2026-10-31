@@ -17,6 +17,12 @@
 
 static void keep(Ctx *c) { (void)c; }
 static void ret0(Ctx *c) { RET(0); }
+void tomo_timeline(const char *what) {             /* the time since the process started, for start-up measurements */
+    FILETIME c0, e0, k0, u0, now;
+    if (!GetProcessTimes(GetCurrentProcess(), &c0, &e0, &k0, &u0)) return;
+    GetSystemTimeAsFileTime(&now);
+    printf("timeline: %.2f s %s%c", (double)((((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime) - (((ULONGLONG)c0.dwHighDateTime << 32) | c0.dwLowDateTime)) / 1e7, what, 10);
+}
 static void ret1(Ctx *c) { RET(1); }
 static void unavailable(Ctx *c) { RET(RESULT_UNAVAILABLE); }
 static void abort_trap(Ctx *c) { guest_trap("the game aborted (nn::diag / nn::detail abort or libc++ verbose abort)", c->x[30] - 4); }
@@ -1344,6 +1350,19 @@ static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
         for (size_t i = 0; i < sizeof v262144 / sizeof v262144[0]; i++) if (v262144[i][0] == a) at = v262144[i][1];
     return at && hook_install(at, repl, NULL, orig);
 }
+/* Guest memory that may have been given back, read through the system (ReadProcessMemory fails where a read would fault;
+ * mem_readable asks one byte a page). Not VirtualQuery: on the game's heap, one write-watched region of gigabytes, a query
+ * walks the page table to the end of the region (16-40 ms) holding the lock the render thread's GetWriteWatch needs; the
+ * chatter's search for the game's message archive froze the picture for 2.4 s (2026-10-31). A probe is about a microsecond. */
+static int mem_copy(uint64_t p, void *buf, size_t n) { SIZE_T got = 0; return p >= 0x10000 && ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)p, buf, n, &got) && got == n; }
+static int mem_readable(uint64_t p, size_t n) {
+    uint8_t b;
+    if (p < 0x10000 || p + n < p) return 0;
+    for (uint64_t a = p, last = (p + (n ? n : 1) - 1) & ~0xfffull;; a = (a & ~0xfffull) + 0x1000) {
+        if (!mem_copy(a, &b, 1)) return 0;
+        if (a >= last) return 1;
+    }
+}
 #include "mii_chatter.c"                         /* the Mii chatter mod (more for Miis to say) */
 static ImportFn g_try_alloc;
 const char *guest_thread_name_of(DWORD tid);               /* os_threads.c */
@@ -1515,17 +1534,12 @@ static int dlg_rect(uint64_t el, float r[4]) {      /* the element's pane */
  * inside the screen count. */
 static ImportFn g_pane_draw;
 static float g_pr[2][32][4]; static int g_pr_code[2][32]; static volatile LONG g_pr_n[2], g_pr_side;
-static uint64_t g_txt_base, g_txt_end;          /* (the last memory region text was read from: no system call for most) */
 static void prompt_seen(uint64_t q) {
     uint64_t t = rd64(q + 0xd8);
-    if (t < 0x10000 || (t & 1)) return;
-    if (t < g_txt_base || t + 8 > g_txt_end) {
-        MEMORY_BASIC_INFORMATION mi;
-        if (!VirtualQuery((void *)(uintptr_t)t, &mi, sizeof mi) || mi.State != MEM_COMMIT || !(mi.Protect & (PAGE_READWRITE | PAGE_READONLY))) return;
-        g_txt_base = (uint64_t)(uintptr_t)mi.BaseAddress; g_txt_end = g_txt_base + mi.RegionSize;
-    }
+    uint16_t txt[3];
+    if (t < 0x10000 || (t & 1) || !mem_copy(t, txt, sizeof txt)) return;
     for (int k = 0; k < 3; k++) {
-        uint16_t ch = rd16(t + 2 * (uint64_t)k);
+        uint16_t ch = txt[k];
         if (!ch) return;
         if (!((ch >= 0xe0e0 && ch <= 0xe0e7) || ch == 0xe0ef || ch == 0xe0f0)) continue;
         float r[4], pr[4];
@@ -1657,7 +1671,7 @@ static void pointer_hook(Ctx *c, void *user) {
     uint64_t self = A0;
     int up = *(const uint16_t *)(uintptr_t)(self + 0x14) & 1, mode = *(const int *)(uintptr_t)(self + 0x1a0), have = up && nnhid_mouse(xy);
     if (up) { void nnhid_pointer_free(void); nnhid_pointer_free(); }
-    if (*(const int *)(uintptr_t)(self + 0x1a0) == 3) g_seen_buttons = 1;      /* (the title's "Press A" is one: the island marker waits for it) */
+    if (*(const int *)(uintptr_t)(self + 0x1a0) == 3 && !g_seen_buttons) { g_seen_buttons = 1; void tomo_timeline(const char *what); tomo_timeline("buttons first on screen (the title's Press A)"); }      /* (the island marker waits for it) */
     if (have) memcpy((void *)(uintptr_t)(self + 0x118), xy, 8);
     g_pointer_update(c);
     /* Mode 1 is the island's hand, which the game puts back in the middle every frame (the stick moves the camera,
@@ -1685,8 +1699,10 @@ static void pointer_hook(Ctx *c, void *user) {
  * moves (pointer +0x120, |v|^2 > 0.01: 0x710044e9a0), so while the mouse drags or glides nnhid.c pushes the stick a little and
  * the push's own move is undone here. Found with TOMO_MEMSCAN L / M (a look-at camera's layout, then write watchpoints). */
 static ImportFn g_isle_input;
-static volatile LONG g_isle_tick;
+static volatile LONG g_isle_tick, g_isle_since;      /* g_isle_since: when the island had first been on screen 2 s (0: not yet) */
 int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
+static DWORD tomo_island_ms(void) { return g_isle_since ? GetTickCount() - (DWORD)g_isle_since : 0; }      /* (mii_chatter.c) */
+int tomo_play_started(void) { return tomo_island_ms() >= 5000; }      /* display.c: the start-up's loads are over */
 int tomo_centred(void) { return GetTickCount() - (DWORD)g_centred_tick < 250; }      /* the hand held in the middle (the island, the Island Builder) */
 int tomo_pen(void) { return GetTickCount() - (DWORD)g_pen_tick < 250; }      /* a cursor that keeps the mouse's position (the Palette House canvas's pen) */
 static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
@@ -1767,7 +1783,7 @@ static void isle_input_hook(Ctx *c, void *user) {   /* (work: +0 the controller,
             DWORD now = GetTickCount();
             if (now - last > 300) since = now;
             last = now;
-            if (!marked && g_seen_buttons && now - since >= 2000) { marked = 1; input_mark("island"); } }
+            if (!marked && g_seen_buttons && now - since >= 2000) { marked = 1; InterlockedExchange(&g_isle_since, (LONG)(now | 1)); input_mark("island"); tomo_timeline("island (2 s of it)"); } }
         isle_mouse(cam, tgt);
     }
 }
