@@ -27,7 +27,8 @@ void os_init_event(uint64_t key, int autoclear);         /* os_threads.c */
 void hid_fill_pad_state(uint64_t out, uint32_t id, int kind);   /* nnhid.c */
 static void npad_states_fullkey(Ctx *c) { if ((int)A1 < 1) { RET(0); return; } hid_fill_pad_state(A0, rd32(A2), 1); RET(1); }
 static void npad_states_other(Ctx *c) { if ((int)A1 < 1) { RET(0); return; } hid_fill_pad_state(A0, rd32(A2), 0); RET(1); }
-static void touch_states(Ctx *c) {                       /* TouchScreenState<16>: sampling, count, 16 touches: no touch */
+static void touch_states(Ctx *c) {                       /* TouchScreenState<16>: sampling, count, 16 touches: no touch (docked; the game
+                                                           * ignores touches in that mode, tried 2026-10-31) */
     if ((int)A1 < 1) { RET(0); return; }
     memset((void *)(uintptr_t)A0, 0, 0x290);
     RET(1);
@@ -417,7 +418,7 @@ static void audio_work_size(Ctx *c) { RET(0x100000); }
  * A SILENT renderer: no mixing; a playing voice consumes its wave buffers at its sample rate (240 samples a frame at
  * 48 kHz) so the game's streaming and sound-state logic run as on the console. */
 typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, seen; float frac; int32_t af; int16_t yn1, yn2, abuf[14];
-                 int bq_on[2]; double bq[2][6][4]; int heard; } SilentVoice;      /* the voice's two biquad filters: on last update, state per channel */
+                 int bq_on[2]; double bq[2][6][4]; int heard, starve; } SilentVoice;      /* the voice's two biquad filters: on last update, state per channel */
 static SilentVoice g_sv[1024];
 static int g_bq_off = -1;                                /* TOMO_AUDIO_BQ=0: the voices' biquad filters are not applied (A/B) */
 static unsigned long long g_bq_voices;                   /* voice updates with a filter on (TOMO_AUDIOLOG) */
@@ -516,6 +517,18 @@ static void adpcm_frame(SilentVoice *s, uint64_t data, int32_t f, uint64_t coef)
         s->yn2 = s->yn1; s->yn1 = (int16_t)v; s->abuf[k] = (int16_t)v;
     }
     s->af = f;
+}
+/* A PCM sample as 16-bit (nn::audio SampleFormat 1 int8, 2 int16, 3 int24, 4 int32, 5 float; frames of cc channels). */
+static int pcm_at(uint64_t data, uint32_t idx, uint32_t cc, uint32_t ch, uint32_t fmt) {
+    uint64_t k = (uint64_t)idx * cc + ch;
+    switch (fmt) {
+    case 1: return (int8_t)rd8(data + k) * 256;
+    case 2: return (int16_t)rd16(data + k * 2);
+    case 3: return (int32_t)((uint32_t)rd8(data + k * 3) << 8 | (uint32_t)rd8(data + k * 3 + 1) << 16 | (uint32_t)rd8(data + k * 3 + 2) << 24) >> 16;
+    case 4: return (int32_t)rd32(data + k * 4) >> 16;
+    case 5: { float f = rdf(data + k * 4) * 32767.0f; return f > 32767.0f ? 32767 : f < -32768.0f ? -32768 : (int)f; }
+    }
+    return 0;
 }
 static int adpcm_peek(const SilentVoice *s, uint64_t data, int32_t f, uint64_t coef) {    /* the first sample of frame f, the state untouched */
     uint64_t base = data + (uint64_t)f * 8;
@@ -907,9 +920,11 @@ static void amix_run(void) {                            /* sub-mixes into their 
         g_mix[k][0] += l * f->volume; g_mix[k][1] += r * f->volume;
     }
 }
+static volatile unsigned long long g_audio_updates;     /* renderer updates so far (5 ms each): a clock for test logs */
 static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t frames) {
     static int said;
     if (!in || !out) return 0;
+    g_audio_updates++;
     uint32_t rev = (rd32(in) >> 24) - '0';
     uint32_t vsz = rev >= 15 ? 0x188 : 0x170, esz_out = rev >= 9 ? 0x90 : 0x10;
     uint32_t npool = rd32(in + 8) / 0x20, nvoice = rd32(in + 0xc) / vsz, neffect = rd32(in + 0x14) / 0xc0, nsink = rd32(in + 0x1c) / 0x140;
@@ -945,6 +960,14 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
             s->popped += (index - s->last_index) & 3;    /* the client released that many buffers since the last update */
             s->last_index = index;
             uint32_t pending = s->consumed - s->popped, avail = count > pending ? count - pending : 0;
+            {   static int slog = -1; static unsigned long long su;      /* TOMO_AUDIOLOG=4: when a streamed voice (16-bit PCM) runs out of sound to play, and when more comes */
+                if (slog < 0) slog = getenv("TOMO_AUDIOLOG") ? atoi(getenv("TOMO_AUDIOLOG")) : 0;
+                if (slog >= 4 && i == 0) su++;
+                if (slog >= 4 && rd8(v + 0xb) == 2 && (avail == 0) != s->starve) {
+                    s->starve = avail == 0;
+                    printf("audio-stream: voice %u %s at update %llu (played %llu samples, rate %u, buffers %u)\n", id, s->starve ? "STARVES" : "fed again", (unsigned long long)g_audio_updates, (unsigned long long)s->played, rate, count);
+                }
+            }
             uint32_t fmt = rd8(v + 0xb), cc = rd32(v + 0x18);
             float step = (float)(rate ? rate : 48000) / 48000.0f * rdf(v + 0x1c), vol = rdf(v + 0x20);
             if (!(step > 0.0f && step < 16.0f)) step = (float)(rate ? rate : 48000) / 48000.0f;
@@ -1014,12 +1037,12 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 int first = vlog >= 3 && vol > 0.0f && !s->heard; if (vol > 0.0f) s->heard = 1;
                 if (vlog >= 2 && (vu % 400 == 0 || first) && vol > 0.0f) {
                     float sum = 0; for (uint32_t ch = 0; ch < cc && ch < 6; ch++) { if (routed) for (int t = 0; t < tn[ch]; t++) sum += tg[ch][t]; else sum += gl[ch] + gr[ch]; }
-                    printf("audio-voice%s: update %llu voice %u fmt %u rate %u ch %u vol %.3f gain %.3f %s mix %d splitter %d filters %d data %llx\n", first ? " START" : "", vu, id, fmt, rate, cc, vol, sum,
+                    printf("audio-voice%s: update %llu voice %u fmt %u rate %u ch %u vol %.3f gain %.3f %s mix %d splitter %d filters %d data %llx\n", first ? " START" : "", (unsigned long long)g_audio_updates, id, fmt, rate, cc, vol, sum,
                            routed ? "routed" : "direct", (int)rd32(v + (rev >= 15 ? 0x70 : 0x58)), (int)rd32(v + (rev >= 15 ? 0x74 : 0x5c)), bqn, (unsigned long long)rd64(wb));
                 }
             }
             if (vol > 0.0f && play == 0) { if (routed) g_routed++; else g_direct++; }
-            int mix = mixing && (fmt == 2 || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f);
+            int mix = mixing && ((fmt >= 1 && fmt <= 5) || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f);   /* (only 16-bit and ADPCM were mixed: other voices were silent) */
             if (mixing && fmt == 6 && coef <= 0x10000) {       /* an ADPCM voice without coefficients where they were looked for: the layout */
                 static int said_v;
                 if (said_v++ < 2) {
@@ -1044,9 +1067,9 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                     uint32_t idx = (uint32_t)start + s->pos;
                     for (uint32_t ch = 0; ch < cc; ch++) {
                         int smp = 0, nxt = 0;                    /* the samples at idx and idx + 1: linear interpolation by frac */
-                        if (fmt == 2) {
-                            smp = (int16_t)rd16(data + ((uint64_t)idx * cc + ch) * 2);
-                            nxt = (int32_t)(idx + 1) < end ? (int16_t)rd16(data + ((uint64_t)(idx + 1) * cc + ch) * 2) : smp;
+                        if (fmt != 6) {
+                            smp = pcm_at(data, idx, cc, ch, fmt);
+                            nxt = (int32_t)(idx + 1) < end ? pcm_at(data, idx + 1, cc, ch, fmt) : smp;
                         } else if (ch == 0) {
                             int32_t f = (int32_t)(idx / 14);
                             if (s->af == -1) {                       /* a new buffer: its context, else the history carried on */

@@ -1618,6 +1618,22 @@ static void chatter_pick(Ctx *c, void *user) {
      * lines are swapped 2/3 as often; a chat between two Miis is English some 50 %, lots 80 % of the time, else Mii-speak. */
     int pct = g_chatter_pct >= 0 ? g_chatter_pct : gfx_mii_chatter() == 2 ? 50 : gfx_mii_chatter() ? 30 : 0;
     int chat_pct = g_chatter_pct >= 0 ? g_chatter_pct : gfx_mii_chatter() == 2 ? 80 : 50;
+    {   static int pl = -1; static long npl;               /* TEST: TOMO_PICKLOG=1, every line the game picks with the audio clock (5 ms updates), mod or not */
+        if (pl < 0) pl = getenv("TOMO_PICKLOG") != NULL;
+        uint64_t tx = res ? rd64(res) : 0;
+        if (pl && tx && mfile && npl++ < 2000) {
+            char lb[80] = "", a[200]; int o = 0;
+            chatter_label(mfile, (uint32_t)rd64(res + 0x10), lb, sizeof lb);
+            for (int k = 0; k < 240 && o < 180; k++) {
+                uint16_t ch = rd16(tx + (uint64_t)k * 2);
+                if (!ch) break;
+                if (ch == 0x0E) { o += snprintf(a + o, sizeof a - (size_t)o, "{%u.%u}", rd16(tx + (uint64_t)(k + 1) * 2), rd16(tx + (uint64_t)(k + 2) * 2)); k += 3 + rd16(tx + (uint64_t)(k + 3) * 2) / 2; continue; }
+                a[o++] = ch < 0x80 && ch >= 0x20 ? (char)ch : '?';
+            }
+            a[o < (int)sizeof a ? o : (int)sizeof a - 1] = 0;
+            printf("picklog @%llu %s: %s\n", (unsigned long long)g_audio_updates, lb, a);
+        }
+    }
     if (!pct || !res || !mfile) return;
     uint64_t text = rd64(res);
     if (!text) return;
@@ -1642,7 +1658,7 @@ static void chatter_pick(Ctx *c, void *user) {
         }
         a[o] = 0;
         int who = chatter_speaker(c);
-        printf("chatter: pick %lld %s (kind %d, %s) args %llx %llx %llx: %s%c", (long long)g_chatter_picks, label, kind, who >= 0 ? g_cm.mii[who].name : "speaker unknown",
+        printf("chatter: pick %lld @%llu %s (kind %d, %s) args %llx %llx %llx: %s%c", (long long)g_chatter_picks, (unsigned long long)g_audio_updates, label, kind, who >= 0 ? g_cm.mii[who].name : "speaker unknown",
                (unsigned long long)arg[0], (unsigned long long)arg[1], (unsigned long long)arg[2], a, 10);
         if (who < 0 || kind == 4) { char am[1200]; chatter_args_mii(c, arg, am, sizeof am); if (am[0]) printf("chatter: args-mii %s:%s%c", label, am, 10); }   /* (a chat: the partner?) */
     }
