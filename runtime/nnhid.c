@@ -770,6 +770,20 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
             plx = g_mouse_xy[0]; ply = g_mouse_xy[1];
         } else if (pdown) { pdown = 0; if (panmode && !pdrag) tap = 4; }      /* a click without a drag: A */
     }
+    {   /* a pen (the Palette House canvas: the stick moves it, it draws while A is held): it follows the mouse's moves as on a
+         * trackpad. What the mouse moved and the pen has not yet is owed (at most 24 px, so it does not push long against the
+         * canvas's edge), and the stick pays it at the pen's speed (4.25 px a poll at full tilt, measured at the first zoom). */
+        int tomo_pen(void);
+        static float owx, owy, qx, qy; static int was;
+        if (g_mouse_on && !g_on_prompt && tomo_pen()) {
+            if (was) { owx += g_mouse_xy[0] - qx; owy += g_mouse_xy[1] - qy; } else owx = owy = 0;
+            owx = owx > 24.0f ? 24.0f : owx < -24.0f ? -24.0f : owx; owy = owy > 24.0f ? 24.0f : owy < -24.0f ? -24.0f : owy;
+            qx = g_mouse_xy[0]; qy = g_mouse_xy[1]; was = 1;
+            float sx = owx / 4.25f, sy = owy / 4.25f;
+            sx = sx > 1.0f ? 1.0f : sx < -1.0f ? -1.0f : sx; sy = sy > 1.0f ? 1.0f : sy < -1.0f ? -1.0f : sy;
+            if (!*lx && !*ly && (sx || sy)) { *lx = (int)(sx * STICK_MAX); *ly = (int)(-sy * STICK_MAX); owx -= sx * 4.25f; owy -= sy * 4.25f; }
+        } else was = 0;
+    }
     {   /* a Mii grabbed with the mouse being carried: the cursor's offset from the middle is the stick */
         float dx = g_mouse_xy[0] - 640.0f, dy = g_mouse_xy[1] - 360.0f, d = sqrtf(dx * dx + dy * dy);
         if (carry && !*lx && !*ly && d > 40.0f) { float m = (d - 40.0f) / 260.0f; if (m > 1.0f) m = 1.0f; *lx = (int)(dx / d * m * STICK_MAX); *ly = (int)(-dy / d * m * STICK_MAX); } }

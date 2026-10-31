@@ -91,7 +91,8 @@ point where to carry them and click to put them down), turn the view by dragging
 button, and zoom with the wheel. In menus and dialogs (the X menu, Settings, questions) pointing at a button selects it,
 a click presses it (a click beside the buttons does nothing) and the wheel moves the selection. Anywhere, a click on a
 button prompt shown on screen ("+ Buy", "L More info", the island's menu and residents icons, the B back arrow) presses
-that button. On the keyboard for names
+that button. On the Palette House canvas the pen follows the mouse's moves and draws while the left button is held.
+On the keyboard for names
 and words, pointing selects a key, a left click types it and a right click deletes.
 Keys and buttons can be changed in the game: PC Settings, **Controls** (pick the controller with left / right, choose a button,
 press the new one; it holds for every controller of that kind), or in `build\config\controllers.ini`, where a button can have

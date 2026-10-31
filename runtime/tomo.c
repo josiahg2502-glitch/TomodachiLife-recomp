@@ -1469,7 +1469,7 @@ static void persp_install(void) {
  * (a position put in is none), hence nnhid.c's nudge while the mouse moves. The hand is shown while bit 0 of the halfword
  * at +0x14 is set. Found 2026-10-28 with TOMO_MEMSCAN and write watchpoints. TOMO_MOUSE=0 off. */
 static ImportFn g_pointer_update;
-static volatile LONG g_centred_tick, g_seen_buttons;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
+static volatile LONG g_centred_tick, g_seen_buttons, g_pen_tick;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
 /* THE MOUSE IN MENUS AND DIALOGS (2026-10-31). The X menu, Settings, the yes / no questions... move a hand from button to
  * button with the stick: the pointer object is then in mode 3 (+0x1a0) and follows the element its FOCUS HOLDER names
  * (0x7100241508: [[hand global]] + 0x40 -> its vtable slot 0 (type id) -> + 0x28 = holder; holder + 0x58 the focused element,
@@ -1669,7 +1669,7 @@ static void pointer_hook(Ctx *c, void *user) {
         if (have && (fabsf(xy[0] - 640.0f) > 2.0f || fabsf(xy[1] - 360.0f) > 2.0f)) centred = fabsf(pp[0] - 640.0f) < 0.5f && fabsf(pp[1] - 360.0f) < 0.5f;
         if (!have) centred = 1;
         if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());
-        else display_mouse_hand();
+        else InterlockedExchange(&g_pen_tick, (LONG)GetTickCount());      /* (the Windows pointer stays: the pen follows the mouse's moves, not its place) */
     } else if (have) display_mouse_hand();
 }
 /* THE MOUSE ON THE ISLAND (2026-10-31). There the hand stays in the middle of the screen (the pointer's mode 1) and the left
@@ -1687,6 +1687,7 @@ static ImportFn g_isle_input;
 static volatile LONG g_isle_tick;
 int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
 int tomo_centred(void) { return GetTickCount() - (DWORD)g_centred_tick < 250; }      /* the hand held in the middle (the island, the Island Builder) */
+int tomo_pen(void) { return GetTickCount() - (DWORD)g_pen_tick < 250; }      /* a cursor that keeps the mouse's position (the Palette House canvas's pen) */
 static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
 static volatile LONG g_carry;                     /* a Mii grabbed with the mouse: while it is carried (another camera; the island's is idle) the
                                                    * cursor's offset from the middle steers as the stick does, a click drops it (nnhid.c) */
