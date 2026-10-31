@@ -383,7 +383,7 @@ static volatile LONG64 g_pf[PF_N], g_pfn[PF_N];
 static LONG64 g_pf_arena_bytes, g_pf_cflush_bytes, g_pf_hash_bytes;
 /* SSBU_GLSTATS=1: one more line every 300 frames with per-frame counts (render-thread waits of guest threads, compute
  * read-backs, objects created, shader work, and how many per-draw GL settings repeat the value of the previous draw). */
-static LONG64 g_gs_draws, g_gs_prog_same, g_gs_attr_set, g_gs_attr_same, g_gs_vbuf_bind, g_gs_buf_bind;
+static LONG64 g_gs_draws, g_gs_prog_same, g_gs_attr_set, g_gs_attr_same, g_gs_vbuf_bind, g_gs_buf_bind, g_gs_gl_binds;      /* (gl_binds: glBindBufferRange calls made) */
 static GLuint g_gs_last_prog[2];
 static uint32_t g_gs_last_attr[16];
 static inline LONG64 pf_now(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
@@ -1639,10 +1639,29 @@ static uint64_t handle_make(Tex *t, View v, SamplerParams p, int have_sampler, u
         Fmt cf;
         if (have_sampler && p.cmode && fmt_get((v.set & 0x84) == 0x84 && v.format ? v.format : t->b.format, &cf) && cf.kind == 0) p.cmode = 0;
     }
+    if (have_sampler) {     /* the border colour's type follows the texture's (a float 1.0 read as an integer is no allowed bindless value: a
+                             * handle of an integer texture then failed, 32 GL errors and dummy textures in the user's session, 2026-10-30) */
+        Fmt bf;
+        int intfmt = fmt_get((v.set & 0x84) == 0x84 && v.format ? v.format : t->b.format, &bf) && bf.kind == 0 &&
+                     (bf.format == 0x8D94 || bf.format == 0x8228 || bf.format == 0x8D98 || bf.format == 0x8D99);
+        if (intfmt && !p.border_kind) {
+            int32_t bi[4]; for (int k = 0; k < 4; k++) bi[k] = p.border[k] >= 0.5f;
+            memcpy(p.border, bi, 16); p.border_kind = bf.type == 0x1400 || bf.type == 0x1402 || bf.type == 0x1404 ? 2 : 1;
+        } else if (!intfmt && p.border_kind) {
+            int32_t bi[4]; memcpy(bi, p.border, 16);
+            for (int k = 0; k < 4; k++) p.border[k] = bi[k] ? 1.0f : 0.0f;
+            p.border_kind = 0;
+        }
+    }
     GLuint smp = have_sampler ? sampler_gl(&p) : 0;
     for (int i = 0; i < o->nh; i++) if (o->h[i].smp == smp) return o->h[i].h;
     uint64_t h = smp ? glGetTextureSamplerHandleARB(o->gl, smp) : glGetTextureHandleARB(o->gl);
-    if (!h) return g_dummy_handle;
+    if (!h) {
+        static int nlog;
+        logf_limited(&nlog, 8, "nvn_gl: no bindless handle for texture format 0x%x (view 0x%x) with sampler border %g %g %g %g (kind %d): the dummy texture instead\n",
+                     t->b.format, (v.set & 0x84) == 0x84 ? v.format : 0, p.border[0], p.border[1], p.border[2], p.border[3], p.border_kind);
+        return g_dummy_handle;
+    }
     glMakeTextureHandleResidentARB(h);
     o->h = realloc(o->h, sizeof *o->h * (size_t)(o->nh + 1));
     o->h[o->nh].smp = smp; o->h[o->nh++].h = h;
@@ -1765,13 +1784,13 @@ static void gs_mode(void) { if (g_gs_on < 0) g_gs_on = getenv("TOMO_GSCACHE") ? 
 static void gs_ssbo(GLuint i, GLuint buf, ptrdiff_t off, ptrdiff_t size) {
     gs_mode();
     if ((g_gs_on & 1) && i < 96 && g_gs_ssbo[i].buf == buf && g_gs_ssbo[i].off == off && g_gs_ssbo[i].size == size) return;
-    glBindBufferRange(GL_SHADER_STORAGE_BUFFER_, i, buf, off, size);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER_, i, buf, off, size); g_gs_gl_binds++;
     if (i < 96) { g_gs_ssbo[i].buf = buf; g_gs_ssbo[i].off = off; g_gs_ssbo[i].size = size; }
 }
 static void gs_ubo(GLuint i, GLuint buf, ptrdiff_t off, ptrdiff_t size) {
     if (size > 65536) size = 65536;                  /* GL_MAX_UNIFORM_BLOCK_SIZE; the hardware's constant buffers are no larger */
     if (g_gs_on && i < 40 && g_gs_ubo[i].buf == buf && g_gs_ubo[i].off == off && g_gs_ubo[i].size == size) return;
-    glBindBufferRange(GL_UNIFORM_BUFFER_, i, buf, off, size);
+    glBindBufferRange(GL_UNIFORM_BUFFER_, i, buf, off, size); g_gs_gl_binds++;
     if (i < 40) { g_gs_ubo[i].buf = buf; g_gs_ubo[i].off = off; g_gs_ubo[i].size = size; }
 }
 /* TOMO_UBO=0: the graphics stages read their constant buffers from storage buffers, as before (mx_translate.h MxIn.ubo) */
@@ -3459,9 +3478,65 @@ static Cmd *rec(Ctx *c, uint32_t op, size_t blob) {
     return m;
 }
 
+/* The lists by the command memory they occupy (2026-10-31): an invalidation (each EndRecording and AddCommandMemory, 70 to
+ * 280 a frame on the island) looked at every list (17,700): 5-17 ms a frame on the game's job threads, and their new
+ * recordings waited up to 10 ms for the lock meanwhile; the main thread waits for those jobs. Buckets of 64 KB of a pool's
+ * memory now hold the lists with a range there; an invalidation looks at its buckets only. Changed under the exclusive
+ * lock only (list_register, list_collect), read under the shared one. TOMO_LIST_INDEX=0: every list, as before. */
+#define LB_SHIFT 16
+typedef struct { uint64_t pool, bucket; int *id, n, cap, used; } LBucket;
+static LBucket *g_lb;
+static int g_lb_cap, g_lb_used, g_lb_on = -1;
+static unsigned lb_hash(uint64_t pool, uint64_t b) { return (unsigned)(((pool >> 4) * 0x9E3779B97F4A7C15ULL ^ (b + 1) * 0xC2B2AE3D27D4EB4FULL) >> 32); }
+static LBucket *lb_find(uint64_t pool, uint64_t b, int make) {
+    if (!g_lb_cap) {
+        if (!make) return NULL;
+        g_lb_cap = 4096; g_lb = calloc((size_t)g_lb_cap, sizeof *g_lb);
+        if (!g_lb) { g_lb_cap = 0; g_lb_on = 0; return NULL; }
+    }
+    if (make && (g_lb_used + 1) * 2 > g_lb_cap) {                  /* grow: rehash every bucket */
+        int cap = g_lb_cap * 2;
+        LBucket *nb = calloc((size_t)cap, sizeof *nb);
+        if (!nb) { g_lb_on = 0; return NULL; }
+        for (int i = 0; i < g_lb_cap; i++)
+            if (g_lb[i].used) { unsigned h = lb_hash(g_lb[i].pool, g_lb[i].bucket) & (unsigned)(cap - 1); while (nb[h].used) h = (h + 1) & (unsigned)(cap - 1); nb[h] = g_lb[i]; }
+        free(g_lb); g_lb = nb; g_lb_cap = cap;
+    }
+    for (unsigned h = lb_hash(pool, b) & (unsigned)(g_lb_cap - 1);; h = (h + 1) & (unsigned)(g_lb_cap - 1)) {
+        LBucket *e = &g_lb[h];
+        if (!e->used) {
+            if (!make) return NULL;
+            e->used = 1; e->pool = pool; e->bucket = b; g_lb_used++;
+            return e;
+        }
+        if (e->pool == pool && e->bucket == b) return e;
+    }
+}
+static void lb_list(int i, int add) {               /* list i into (add) or out of its buckets; the exclusive lock is held */
+    if (g_lb_on < 0) g_lb_on = !(getenv("TOMO_LIST_INDEX") && getenv("TOMO_LIST_INDEX")[0] == '0');
+    if (!g_lb_on) return;
+    const List *l = &g_lists[i];
+    for (int k = 0; k < l->r_n; k++) {
+        if (l->r_hi[k] <= l->r_lo[k]) continue;
+        if (add && ((l->r_hi[k] - 1) >> LB_SHIFT) - (l->r_lo[k] >> LB_SHIFT) >= 4096) { g_lb_on = 0; return; }      /* (a range of 256 MB: every list again) */
+        for (uint64_t b = l->r_lo[k] >> LB_SHIFT, last = (l->r_hi[k] - 1) >> LB_SHIFT; b <= last; b++) {
+            LBucket *e = lb_find(l->r_pool[k], b, add);
+            if (!e) { if (add) return; continue; }
+            if (add) {
+                if (e->n && e->id[e->n - 1] == i) continue;          /* (two ranges of the list in one bucket) */
+                if (e->n == e->cap) { int cap = e->cap ? e->cap * 2 : 8; int *id = realloc(e->id, sizeof *id * (size_t)cap); if (!id) { g_lb_on = 0; return; } e->id = id; e->cap = cap; }
+                e->id[e->n++] = i;
+            } else for (int j = 0; j < e->n; j++) if (e->id[j] == i) { e->id[j] = e->id[--e->n]; break; }
+        }
+    }
+}
+static volatile LONG64 g_lp_inv_n, g_lp_inv_t, g_lp_inv_wait, g_lp_reg_n, g_lp_reg_wait;      /* TOMO_LISTPROF=1 (TEST): list table costs */
+static int g_lp_on = -1;
 static uint64_t list_register(uint8_t *data, size_t len, uint32_t model_cmd, uint32_t model_ctrl, uint32_t dispatches, const CmdBuf *cb) {
     if (!data) data = malloc(8);                       /* an empty recording is still a valid handle */
+    LONG64 lp0 = g_lp_on > 0 ? pf_now() : 0;
     AcquireSRWLockExclusive(&g_list_lock);
+    if (g_lp_on > 0) { InterlockedIncrement64(&g_lp_reg_n); InterlockedExchangeAdd64(&g_lp_reg_wait, pf_now() - lp0); }
     int i;
     if (g_list_free_n) i = g_list_free[--g_list_free_n];
     else {
@@ -3477,6 +3552,7 @@ static uint64_t list_register(uint8_t *data, size_t len, uint32_t model_cmd, uin
     g_lists[i].model_cmd = model_cmd; g_lists[i].model_ctrl = model_ctrl; g_lists[i].dispatches = dispatches; g_lists[i].finalized = 0;
     g_lists[i].inval = 0; g_lists[i].r_n = cb->r_n;
     for (int k = 0; k < cb->r_n; k++) { g_lists[i].r_pool[k] = cb->r_pool[k]; g_lists[i].r_lo[k] = cb->r_lo[k]; g_lists[i].r_hi[k] = cb->r_hi[k]; }
+    lb_list(i, 1);
     g_list_bytes += (LONG64)len;
     uint64_t h = ((uint64_t)(g_lists[i].gen & 0x7fffffff) << 32) | (uint32_t)(i + 1);
     ReleaseSRWLockExclusive(&g_list_lock);
@@ -3502,19 +3578,29 @@ static uint8_t *list_lookup(uint64_t h, size_t *len) {
  * display lists of its models (gsys ShapeDL) once and calls them whenever the model is drawn: dropping lists after two
  * seconds without a call (as before) lost the Mii's, the palm trees' and the shrubs' draws for good once they had been out of
  * sight (blank Mii in the editor and the resident view of a new game; 235 calls of dropped lists a frame). */
+static void list_hit(int i, uint64_t pool, uint64_t off, uint64_t size) {      /* list i, if it occupies that memory: marked given out again */
+    List *l = &g_lists[i];
+    if (!l->data || l->inval) return;
+    for (int k = 0; k < l->r_n; k++)
+        if (l->r_pool[k] == pool && l->r_lo[k] < off + size && off < l->r_hi[k]) {
+            InterlockedCompareExchange64(&l->inval, g_st.frames + 1, 0);
+            if (g_listlog_dbg) { l->inv_off = off; l->inv_size = size; l->inv_k = k; }
+            return;
+        }
+}
 static void list_invalidate(uint64_t pool, uint64_t off, uint64_t size) {
+    if (g_lp_on < 0) g_lp_on = getenv("TOMO_LISTPROF") != NULL;
+    LONG64 t0 = g_lp_on > 0 ? pf_now() : 0;
     AcquireSRWLockShared(&g_list_lock);                   /* shared: lookups go on meanwhile; only this marks inval */
-    for (int i = 0; i < g_list_count; i++) {
-        List *l = &g_lists[i];
-        if (!l->data || l->inval) continue;
-        for (int k = 0; k < l->r_n; k++)
-            if (l->r_pool[k] == pool && l->r_lo[k] < off + size && off < l->r_hi[k]) {
-                InterlockedCompareExchange64(&l->inval, g_st.frames + 1, 0);
-                if (g_listlog_dbg) { l->inv_off = off; l->inv_size = size; l->inv_k = k; }
-                break;
-            }
-    }
+    LONG64 t1 = g_lp_on > 0 ? pf_now() : 0;
+    if (g_lb_on > 0 && size && size <= ((uint64_t)64 << LB_SHIFT)) {
+        for (uint64_t b = off >> LB_SHIFT, last = (off + size - 1) >> LB_SHIFT; b <= last; b++) {
+            const LBucket *e = lb_find(pool, b, 0);
+            if (e) for (int j = 0; j < e->n; j++) list_hit(e->id[j], pool, off, size);
+        }
+    } else for (int i = 0; i < g_list_count; i++) list_hit(i, pool, off, size);
     ReleaseSRWLockShared(&g_list_lock);
+    if (g_lp_on > 0) { InterlockedIncrement64(&g_lp_inv_n); InterlockedExchangeAdd64(&g_lp_inv_wait, t1 - t0); InterlockedExchangeAdd64(&g_lp_inv_t, pf_now() - t1); }
 }
 void nvn_gl_lists_pool_gone(uint64_t pool) { list_invalidate(pool, 0, ~0ull >> 1); }      /* nvn_stub.c: nvnMemoryPoolFinalize */
 /* Render thread, once per frame: drop the lists whose memory the game reused or released (a few frames later: replays queued
@@ -3533,6 +3619,7 @@ static void list_collect(void) {
         LONG64 last = l->used >= 0 ? l->used : l->created;
         if (l->finalized || (l->inval && g_st.frames + 1 - l->inval > 4) || (!l->r_n && g_st.frames - last > 120) || (over && g_st.frames - last > 600)) {
             g_list_bytes -= (LONG64)l->len;
+            lb_list(i, 0);
             free(l->data); l->data = NULL; l->gen++; g_list_free[g_list_free_n++] = i;
         }
     }
@@ -6478,6 +6565,14 @@ static void pf_frame_mark(LONG64 frame) {
         for (int k = 0; k < 32 && g_cfl_site[k].line; k++) { printf(" %d:%lld", g_cfl_site[k].line, (long long)g_cfl_site[k].n); g_cfl_site[k].n = 0; }
         printf("\n");
     }
+    if (g_lp_on > 0) {
+        static LONG64 p[5];
+        LONG64 v[5] = {g_lp_inv_n, g_lp_inv_t, g_lp_inv_wait, g_lp_reg_n, g_lp_reg_wait};
+        printf("nvn_perf: list table: %d lists; per frame: %.1f invalidations taking %.2f ms (+ %.2f ms waiting for the lock), %.1f registrations waiting %.2f ms%c", g_list_count,
+               (double)(v[0] - p[0]) / 300.0, (double)(v[1] - p[1]) * 1000.0 / (double)freq / 300.0, (double)(v[2] - p[2]) * 1000.0 / (double)freq / 300.0,
+               (double)(v[3] - p[3]) / 300.0, (double)(v[4] - p[4]) * 1000.0 / (double)freq / 300.0, 10);
+        memcpy(p, v, sizeof p);
+    }
     if (g_pp_on > 0) {
         static LONG64 ps[10];
         printf("nvn_perf: draw_prepare parts ms/frame:");
@@ -6527,16 +6622,16 @@ static void pf_frame_mark(LONG64 frame) {
     b0[0] = g_pf_arena_bytes; b0[1] = g_pf_cflush_bytes; b0[2] = g_pf_hash_bytes;
     {
         static int on = -1;
-        static LONG64 z[16];
+        static LONG64 z[17];
         if (on < 0) on = getenv("SSBU_GLSTATS") != NULL;
         if (on) {
-            LONG64 v[16] = {g_gs_draws, g_gs_prog_same, g_gs_attr_set, g_gs_attr_same, g_gs_vbuf_bind, g_gs_buf_bind, g_st.tex_created, g_st.tex_uploads, g_st.fbo_made, g_st.views,
-                            g_st.handles, g_shc_compiled, g_shd_loaded, g_shc_hit, g_pfn[PF_CFLUSH], g_pfn[PF_WAIT_SUBMIT] + g_pfn[PF_WAIT_PRESENT] + g_pfn[PF_WAIT_OTHER]};
-            double d[16];
-            for (int k = 0; k < 16; k++) { d[k] = (double)(v[k] - z[k]) / 300.0; z[k] = v[k]; }
+            LONG64 v[17] = {g_gs_draws, g_gs_prog_same, g_gs_attr_set, g_gs_attr_same, g_gs_vbuf_bind, g_gs_buf_bind, g_st.tex_created, g_st.tex_uploads, g_st.fbo_made, g_st.views,
+                            g_st.handles, g_shc_compiled, g_shd_loaded, g_shc_hit, g_pfn[PF_CFLUSH], g_pfn[PF_WAIT_SUBMIT] + g_pfn[PF_WAIT_PRESENT] + g_pfn[PF_WAIT_OTHER], g_gs_gl_binds};
+            double d[17];
+            for (int k = 0; k < 17; k++) { d[k] = (double)(v[k] - z[k]) / 300.0; z[k] = v[k]; }
             printf("nvn_glstats: per frame: guest waits for the render thread %.1f | compute read-backs (glGetNamedBufferSubData) %.1f | created: textures %.3f, uploads %.3f, framebuffers %.3f, views %.3f, bindless handles %.3f | "
-                   "shader stages: built %.3f (from disk %.3f), reused %.3f | draws %.1f: same two programs as the previous draw %.1f; vertex attribute formats set %.1f, unchanged since last set %.1f; vertex buffer binds %.1f; uniform/constant buffer binds %.1f\n",
-                   d[15], d[14], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[0], d[1], d[2], d[3], d[4], d[5]);
+                   "shader stages: built %.3f (from disk %.3f), reused %.3f | draws %.1f: same two programs as the previous draw %.1f; vertex attribute formats set %.1f, unchanged since last set %.1f; vertex buffer binds %.1f; uniform/constant buffer binds %.1f (glBindBufferRange calls %.1f)\n",
+                   d[15], d[14], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[0], d[1], d[2], d[3], d[4], d[5], d[16]);
         }
     }
     {   /* P3 round 2: the snapshot of all threads (CreateToolhelp32Snapshot) took 30-70 ms on the render thread: one long
