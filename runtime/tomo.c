@@ -1670,7 +1670,8 @@ static void pointer_hook(Ctx *c, void *user) {
         if (!have) centred = 1;
         if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());
         else InterlockedExchange(&g_pen_tick, (LONG)GetTickCount());      /* (the Windows pointer stays: the pen follows the mouse's moves, not its place) */
-    } else if (have) display_mouse_hand();
+    } else if (have && mode != 3) display_mouse_hand();      /* (the hand is on the mouse: no second pointer; in menus it jumps between buttons, so the
+                                                                * Windows pointer stays to show where the mouse is) */
 }
 /* THE MOUSE ON THE ISLAND (2026-10-31). There the hand stays in the middle of the screen (the pointer's mode 1) and the left
  * stick moves the camera: [0x710044c828] (1.0.4 0x710044b8b0; a camera controller's update: this, the target point) adds
