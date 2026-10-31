@@ -333,12 +333,14 @@ static double win_aspect(void) {                      /* the window's shape: 16:
     if (a < 0) a = (double)go->width / (double)go->height;
     return a > (double)ASPECT_W / ASPECT_H * 1.01 ? a : (double)ASPECT_W / ASPECT_H;
 }
+static volatile LONG g_pic[4];                    /* where the picture was last placed in the window (display_mouse) */
 void display_fit(int sw, int sh, int dw, int dh, int out[4]) {      /* the largest rectangle of sw:sh in dw x dh, centred: x, y, w, h */
     out[0] = 0; out[1] = 0; out[2] = dw; out[3] = dh;
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
     if ((long long)dw * sh > (long long)dh * sw) { out[2] = (int)((long long)dh * sw / sh); out[0] = (dw - out[2]) / 2; }      /* wider: bars left and right */
     else if ((long long)dw * sh < (long long)dh * sw) { out[3] = (int)((long long)dw * sh / sw); out[1] = (dh - out[3]) / 2; }  /* taller: bars above and below */
     if (dw - out[2] <= 2 && dh - out[3] <= 2) { out[0] = 0; out[1] = 0; out[2] = dw; out[3] = dh; }   /* within 2 px of 16:9 (1366x768): fill, no bars */
+    for (int i = 0; i < 4; i++) InterlockedExchange(&g_pic[i], out[i]);
     {   static int last[4] = {-1, -1, -1, -1}, said;
         if (memcmp(last, out, sizeof last) && said++ < 20) { memcpy(last, out, sizeof last); printf("display: picture %dx%d at %d,%d in %dx%d\n", out[2], out[3], out[0], out[1], dw, dh); fflush(stdout); }
     }
@@ -452,11 +454,16 @@ int display_mouse(float *x, float *y, int *buttons) {
     POINT p; RECT rc; int fit[4];
     HWND h = g_hwnd;
     if (!h || GetForegroundWindow() != h || !GetCursorPos(&p) || !ScreenToClient(h, &p) || !GetClientRect(h, &rc)) return 0;
-    fit[0] = 0; fit[1] = 0; fit[2] = rc.right; fit[3] = rc.bottom;           /* as display_fit (without its log): the 16:9 picture, centred */
-    if ((long long)rc.right * ASPECT_H > (long long)rc.bottom * ASPECT_W) { fit[2] = rc.bottom * ASPECT_W / ASPECT_H; fit[0] = (rc.right - fit[2]) / 2; }
-    else if ((long long)rc.right * ASPECT_H < (long long)rc.bottom * ASPECT_W) { fit[3] = rc.right * ASPECT_H / ASPECT_W; fit[1] = (rc.bottom - fit[3]) / 2; }
+    fit[0] = g_pic[0]; fit[1] = g_pic[1]; fit[2] = g_pic[2]; fit[3] = g_pic[3];      /* the picture as presented: 16:9, or wider (widescreen),
+                                                                                     * maybe with bars; the game's 2D stays 16:9 in its middle */
+    if (fit[2] <= 0 || fit[3] <= 0 || fit[0] + fit[2] > rc.right + 2 || fit[1] + fit[3] > rc.bottom + 2) {      /* (none presented yet in this size) */
+        fit[0] = 0; fit[1] = 0; fit[2] = rc.right; fit[3] = rc.bottom;
+        if ((long long)rc.right * ASPECT_H > (long long)rc.bottom * ASPECT_W) { fit[2] = rc.bottom * ASPECT_W / ASPECT_H; fit[0] = (rc.right - fit[2]) / 2; }
+        else if ((long long)rc.right * ASPECT_H < (long long)rc.bottom * ASPECT_W) { fit[3] = rc.right * ASPECT_H / ASPECT_W; fit[1] = (rc.bottom - fit[3]) / 2; }
+    }
     if (fit[2] <= 0 || fit[3] <= 0 || p.x < fit[0] || p.y < fit[1] || p.x >= fit[0] + fit[2] || p.y >= fit[1] + fit[3]) return 0;
-    *x = (float)(p.x - fit[0]) * 1280.0f / (float)fit[2];
+    float uw = (float)fit[3] * 16.0f / 9.0f, ux = (float)fit[0] + ((float)fit[2] - uw) * 0.5f;      /* the 16:9 middle: 0..1280 (the wide sides beyond) */
+    *x = ((float)p.x - ux) * 1280.0f / uw;
     *y = (float)(p.y - fit[1]) * 720.0f / (float)fit[3];
     *buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) | ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
     return 1;
