@@ -463,12 +463,13 @@ int display_mouse(float *x, float *y, int *buttons) {
 }
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (la_wndproc(h, m, w)) return 0;
-    /* the pointer over the picture: hidden while the mouse moves the hand, and after 2 s without moving (mouse controls are off
-     * by default, so it stayed in view, 2026-10-30) unless PC Settings is open; a timer looks again twice a second */
-    {   static DWORD moved; int menu_is_open(void);
+    /* the pointer over the picture: hidden while the mouse moves the hand (but not over the name keyboard, which hides the
+     * hand), and after 2 s without moving (mouse controls are off by default, so it stayed in view, 2026-10-30) unless PC
+     * Settings is open; a timer looks again twice a second */
+    {   static DWORD moved; int menu_is_open(void); int osk_blocks_input(void);
         if (m == WM_MOUSEMOVE) moved = GetTickCount();
         if (m == WM_TIMER && w == 0x7A11) { POINT p; if (GetCursorPos(&p) && WindowFromPoint(p) == h) SendMessageA(h, WM_SETCURSOR, (WPARAM)h, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)); return 0; }
-        if (m == WM_SETCURSOR && LOWORD(l) == HTCLIENT && (GetTickCount() - (DWORD)g_mouse_hand_tick < 300 || (GetTickCount() - moved > 2000 && !menu_is_open()))) { SetCursor(NULL); return TRUE; }
+        if (m == WM_SETCURSOR && LOWORD(l) == HTCLIENT && ((GetTickCount() - (DWORD)g_mouse_hand_tick < 300 && !osk_blocks_input()) || (GetTickCount() - moved > 2000 && !menu_is_open()))) { SetCursor(NULL); return TRUE; }
     }
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
         { static LONG once; if (!InterlockedExchange(&once, 1)) CloseHandle(CreateThread(NULL, 0, close_watchdog, NULL, 0, NULL)); }

@@ -620,6 +620,8 @@ static volatile LONG g_dlg_state, g_dlg_tick, g_dlg_focus_tick, g_mouse_left, g_
 static SRWLOCK g_dlg_lock = SRWLOCK_INIT;
 static float g_dlg_rect[64][4]; static int g_dlg_n, g_dlg_cur;      /* the buttons (screen 1280x720) and the focused one */
 int nnhid_dialog_wheel(void) { return (int)InterlockedExchange(&g_dlg_wheel, 0); }
+static volatile LONG g_dlg_page;                    /* tomo.c: the wheel went past the last (+1) / first (-1) button: ZR / ZL (the next page) */
+void nnhid_dialog_page(int dir) { InterlockedExchange(&g_dlg_page, dir); }
 static int dialog_buttons(void) { return GetTickCount() - (DWORD)g_dlg_tick < 250 && g_dlg_state != 0; }
 void nnhid_dialog_mouse(int state, int moved_focus) {
     LONG now = (LONG)GetTickCount();
@@ -633,6 +635,8 @@ void nnhid_dialog_rects(const float (*r)[4], int n, int cur) {
     ReleaseSRWLockExclusive(&g_dlg_lock);
 }
 int nnhid_mouse_left(void) { return g_mouse_on && g_mouse_left; }
+static volatile LONG g_mouse_right;
+int nnhid_mouse_buttons(void) { return g_mouse_on ? (int)(g_mouse_left | (g_mouse_right << 1)) : 0; }      /* (osk.c under TOMO_MOUSE_TEST) */
 static int dialog_click_ok(float x, float y) {    /* a click presses A only on the focused button under the mouse (where it is now) */
     DWORD now = GetTickCount();
     if (now - (DWORD)g_dlg_tick > 250 || g_dlg_state == 0) return 1;      /* no buttons on screen lately */
@@ -681,7 +685,7 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *ry) {
         if (moved || (px > -1e8f && b)) InterlockedExchange(&g_mouse_on, 1);
         if (moved) nudge = 30;
         px = x; py = y; g_mouse_xy[0] = x; g_mouse_xy[1] = y;
-        InterlockedExchange(&g_mouse_left, b & 1);
+        InterlockedExchange(&g_mouse_left, b & 1); InterlockedExchange(&g_mouse_right, (b >> 1) & 1);
         if (g_mouse_on) { if ((b & 1) && dialog_click_ok(x, y)) *buttons |= 1ull << BTN_A; if (b & 2) *buttons |= 1ull << BTN_B; }
     }
     if (wheel && !zoom && !flick && !input_held()) {
@@ -690,6 +694,11 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *ry) {
         else { flick_dir = wheel > 0 ? -1 : 1; flick = 4; }
     }
     if (zoom) { zoom--; if (!*ry) *ry = zoom_dir * STICK_MAX; }
+    {   static int page, page_bit;
+        LONG d = InterlockedExchange(&g_dlg_page, 0);
+        if (d && !page) { page_bit = d > 0 ? BTN_ZR : BTN_ZL; page = 4; }
+        if (page) { page--; *buttons |= 1ull << page_bit; }
+    }
     if (flick && !*lx && !*ly) { flick--; *lx = flick_dir * STICK_MAX; }
     else if (g_mouse_on && free_hand && nudge > 0 && !*lx && !*ly) { nudge--; *lx = (nudge & 1) ? STICK_MAX / 6 : -STICK_MAX / 6; }
 }

@@ -536,10 +536,37 @@ int osk_inline_open(const wchar_t *initial, int max_len) {      /* game thread (
     InterlockedExchange(&g_on, 1);                 /* the window's keys come here, the game gets none */
     return 1;
 }
+/* The key under a point of the screen, in draw_inline's design units (1920 x 1080; the picture covers the screen): its row
+ * (ROWS = the bottom row) and column (the function key there); 0 = no key. */
+static int inline_hit(double ux, double uy, int *row, int *col) {
+    const double kx0 = 100, ky0 = 1080 - 516, kh = 82, rowh = 92, kw = 1720.0 / COLS;
+    if (ux < kx0 || ux >= kx0 + COLS * kw || uy < ky0) return 0;
+    int r = (int)((uy - ky0) / rowh), c = (int)((ux - kx0) / kw);
+    if (r > ROWS || uy - ky0 - r * rowh > kh) return 0;
+    if (r == ROWS) { int f = 0, x = 0; while (f < F_N - 1 && x + k_fspan[f] <= c) x += k_fspan[f++]; c = f; }
+    *row = r; *col = c;
+    return 1;
+}
 /* game thread, once a frame (Calc): 0 nothing new, 1 the text or the cursor changed, 2 OK, 3 cancelled */
 int osk_inline_step(wchar_t *text_out, int cap, int *len, int *cursor) {
     if (!g_in_open) return 0;
     int done = 0, result = 0, changed = step(&g_in, &g_in_pad, &done, &result);
+    {   /* the mouse (PC Settings, Mouse controls): the key under it takes the focus when it moves; a left click types it, a
+         * right click deletes (as B) */
+        int gfx_mouse(void); int display_mouse(float *x, float *y, int *buttons); int nnhid_mouse(float xy[2]); int nnhid_mouse_buttons(void);
+        static float px = -1.0f, py = -1.0f; static int pb = -1, test = -1;
+        float mx, my, xy[2]; int mb, r, c, got;
+        if (test < 0) test = getenv("TOMO_MOUSE_TEST") != NULL;      /* (a scripted mouse: the one nnhid.c plays) */
+        if (test) { got = nnhid_mouse(xy); mx = xy[0]; my = xy[1]; mb = nnhid_mouse_buttons(); }
+        else got = gfx_mouse() && display_mouse(&mx, &my, &mb);
+        if (!done && got) {
+            int hit = inline_hit(mx * 1.5, my * 1.5, &r, &c), click = (mb & 1) && pb >= 0 && !(pb & 1);
+            if (hit && (mx != px || my != py || click) && (g_in.row != r || g_in.col != c)) { g_in.row = r; g_in.col = c; changed = 1; }
+            if (hit && click) { g_in.note = NULL; press(&g_in, &done, &result); changed = 1; }
+            if ((mb & 2) && pb >= 0 && !(pb & 2)) { g_in.note = NULL; del_back(&g_in); changed = 1; }
+            px = mx; py = my; pb = mb;
+        } else pb = -1;                             /* (a button already down when the mouse comes in does not click) */
+    }
     if (changed) g_in_ver++;
     int n = g_in.len < cap - 1 ? g_in.len : cap - 1;
     memcpy(text_out, g_in.text, (size_t)n * sizeof(wchar_t)); text_out[n] = 0;

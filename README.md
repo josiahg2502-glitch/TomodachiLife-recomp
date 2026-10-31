@@ -81,8 +81,13 @@ The game is played as on a docked Switch.
 | Right stick (camera) | right stick | J / I / L / K |
 | D-pad | D-pad | number pad 4 / 8 / 6 / 2 |
 
+Keys move the hand like a stick: a tap nudges it (half speed for the first 0.3 s, for small targets), a held key crosses
+the screen, and diagonals are no faster than straight moves.
+
 **Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B; the
-wheel acts as ZL / ZR (in menus it moves the selection).
+wheel zooms the camera on the island. In menus and dialogs (the X menu, Settings, questions) pointing at a button selects it,
+a click presses it (a click beside the buttons does nothing) and the wheel moves the selection; on the keyboard for names
+and words, pointing selects a key, a left click types it and a right click deletes.
 Keys and buttons can be changed in the game: PC Settings, **Controls** (pick the controller with left / right, choose a button,
 press the new one; it holds for every controller of that kind), or in `build\config\controllers.ini`, where a button can have
 up to three keys (`A = ENTER, SPACE`). A keyboard section still holding the old default keys (Z / X / C / V) is moved to the

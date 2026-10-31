@@ -134,7 +134,7 @@ int osk_key(UINT msg, WPARAM w);
 static int ik_use_ours(void) {
     const char *t = getenv("TOMO_IK");
     if (getenv("TOMO_IK_TEST")) return 1;
-    if (t && !strcmp(t, "dialog")) return 0;
+    if (t) return strcmp(t, "dialog") != 0;               /* TOMO_IK=dialog: the host's text prompt; anything else: ours */
     return !getenv("SSBU_SWKBD") && !getenv("SSBU_SEQ") && !getenv("SSBU_PRESS") && !getenv("SSBU_SCRIPT");
 }
 void nvn_front_shot_step(int step);                       /* nvn_gl.c: the next frame as step_<n>.bmp (SSBU_SHOT_STEPS) */
@@ -1544,10 +1544,12 @@ static void dialog_mouse(Ctx *c) {
         if (!next || (next & 7)) break;
         el = next - 8;
     } while (el != cur && n < 256);
-    if (wheel && n > 1 && at == 0) {                /* the wheel: the next enabled button towards the user (down), or back; no wrap */
+    if (wheel && at == 0) {                         /* the wheel: the next enabled button towards the user (down), or back; no wrap */
+        void nnhid_dialog_page(int dir);
         int end = sent < 0 ? n : sent;              /* ring[1 .. end) come after the focused one, ring[end .. n) before it */
         if (wheel < 0) { for (int k = 1; k < end; k++) if (dlg_enabled(c, ad, holder, ring[k])) { dlg_focus(c, ad, holder, ring[k]); focused = 1; break; } }
         else for (int k = n - 1; k >= (sent < 0 ? 1 : end); k--) if (dlg_enabled(c, ad, holder, ring[k])) { dlg_focus(c, ad, holder, ring[k]); focused = 1; break; }
+        if (!focused && sent >= 0) nnhid_dialog_page(wheel < 0 ? 1 : -1);      /* past the end: the next / previous page (ZR / ZL), as lists turn them */
     }
     int moved = mouse && (fabsf(xy[0] - last[0]) >= 1.0f || fabsf(xy[1] - last[1]) >= 1.0f);
     if (mouse) { last[0] = xy[0]; last[1] = xy[1]; }
