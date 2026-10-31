@@ -1586,7 +1586,8 @@ static void pointer_hook(Ctx *c, void *user) {
  * inside the island and moves its look-at camera toward it ([[[work] + 0xf0] + 0x30]: position +0x38, target +0x44, up
  * +0x50; tan(fovy / 2) of its projection at +0x13c). With the mouse a drag holds the ground under the cursor (the target
  * moves by the difference of the ground points the cursor's rays hit), a click glides the point clicked to the middle (there
- * the game names what it picked), a click on the hand or that name presses A, and the middle button turns the camera
+ * the game names what it picked), a click on the hand or that name presses A, a press held still there for 0.3 s holds A
+ * (the game's "hold to grab" a Mii; then the cursor steers it and a click drops it), and the middle button turns the camera
  * (nnhid.c). A camera that follows a walking Mii (as the island often opens) puts the target back each frame until the stick
  * moves (pointer +0x120, |v|^2 > 0.01: 0x710044e9a0), so while the mouse drags or glides nnhid.c pushes the stick a little and
  * the push's own move is undone here. Found with TOMO_MEMSCAN L / M (a look-at camera's layout, then write watchpoints). */
@@ -1594,6 +1595,9 @@ static ImportFn g_isle_input;
 static volatile LONG g_isle_tick;
 int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
 static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
+static volatile LONG g_carry;                     /* a Mii grabbed with the mouse: while it is carried (another camera; the island's is idle) the
+                                                   * cursor's offset from the middle steers as the stick does, a click drops it (nnhid.c) */
+int tomo_carry(void) { return g_carry && GetTickCount() - (DWORD)g_centred_tick < 250 && !tomo_island(); }
 int tomo_island_busy(void) { return g_isle_busy && tomo_island(); }
 static int isle_ground(uint64_t cam, float sx, float sy, float out[2]) {     /* the ground (the target's height) under a point of the 1280x720 screen */
     const float *p = (const float *)(uintptr_t)(cam + 0x38), *t = (const float *)(uintptr_t)(cam + 0x44);
@@ -1610,17 +1614,27 @@ static int isle_ground(uint64_t cam, float sx, float sy, float out[2]) {     /* 
     out[0] = p[0] + k * d[0]; out[1] = p[2] + k * d[2];
     return k > 0.0f;
 }
+static int isle_on_hand(float x, float y) { return (fabsf(x - 640.0f) < 90.0f && y > 260.0f && y < 410.0f) || (fabsf(x - 640.0f) < 200.0f && y > 190.0f && y <= 260.0f); }      /* the hand or the name above it */
 static void isle_mouse(uint64_t cam, uint64_t tgt) {
-    int nnhid_mouse(float xy[2]); int nnhid_mouse_buttons(void); void nnhid_tap_a(void);
-    static int down, drag, glide; static float px, py, last[2], goal[2];
+    int nnhid_mouse(float xy[2]); int nnhid_mouse_buttons(void); void nnhid_tap_a(void); void nnhid_hold_a(int on);
+    static int down, drag, glide, hold; static float px, py, last[2], goal[2]; static DWORD pressed;
     float xy[2], g0[2], g1[2];
+    {   static const char *to = (const char *)-1; static long long done = -1;      /* TEST ONLY: TOMO_ISLE_GOTO="<poll>:x,z ...": glide there at that input poll */
+        long long nnhid_seq_polls(void), now = nnhid_seq_polls();
+        if (to == (const char *)-1) to = getenv("TOMO_ISLE_GOTO");
+        for (const char *p = to; p && *p; p = strchr(p, ' '), p = p ? p + 1 : NULL) {
+            long long at; float gx, gz;
+            if (sscanf(p, "%lld:%f,%f", &at, &gx, &gz) != 3 || at > now) break;
+            if (at > done) { done = at; goal[0] = gx; goal[1] = gz; glide = 80; printf("island: glide to %g,%g (TOMO_ISLE_GOTO)%c", gx, gz, 10); }
+        } }
     int got = nnhid_mouse(xy), b = got ? nnhid_mouse_buttons() : 0;
     {   static const char *dbg = (const char *)-1; static int was = -1; if (dbg == (const char *)-1) dbg = getenv("TOMO_MOUSE_DEBUG");      /* TEST ONLY */
         if (dbg && got && (b != was || (b & 1))) { float g[2] = {0, 0}; int h = isle_ground(cam, xy[0], xy[1], g);
             printf("island mouse: %g,%g buttons %d drag %d ground %d %g,%g target %g,%g%c", xy[0], xy[1], b, drag, h, g[0], g[1], rdf(tgt), rdf(tgt + 8), 10); }
         was = b; }
     if (b & 1) {
-        if (!down) { down = 1; drag = glide = 0; px = last[0] = xy[0]; py = last[1] = xy[1]; }
+        if (!down) { down = 1; drag = glide = hold = 0; px = last[0] = xy[0]; py = last[1] = xy[1]; pressed = GetTickCount(); }
+        if (!drag && !hold && isle_on_hand(px, py) && GetTickCount() - pressed >= 300) { hold = 1; nnhid_hold_a(1); InterlockedExchange(&g_carry, 1); }      /* held still on the hand: A held (the game's hold to grab) */
         if (!drag && fabsf(xy[0] - px) + fabsf(xy[1] - py) > 6.0f) drag = 1;
         if (drag && isle_ground(cam, last[0], last[1], g0) && isle_ground(cam, xy[0], xy[1], g1)) {
             wrf(tgt, rdf(tgt) + g0[0] - g1[0]); wrf(tgt + 8, rdf(tgt + 8) + g0[1] - g1[1]);
@@ -1628,12 +1642,14 @@ static void isle_mouse(uint64_t cam, uint64_t tgt) {
         if (drag) { last[0] = xy[0]; last[1] = xy[1]; }
     } else if (down) {
         down = 0;
-        if (!drag) {
-            if ((fabsf(px - 640.0f) < 90.0f && py > 260.0f && py < 410.0f) || (fabsf(px - 640.0f) < 200.0f && py > 190.0f && py <= 260.0f)) nnhid_tap_a();      /* on the hand or the name above it */
+        if (hold) { hold = 0; nnhid_hold_a(0); }       /* (let go: dropped) */
+        else if (!drag) {
+            if (isle_on_hand(px, py)) nnhid_tap_a();
             else if (isle_ground(cam, px, py, goal)) glide = 40;
         }
     }
     InterlockedExchange(&g_isle_busy, (down && drag) || glide);
+    if (!down && !hold) InterlockedExchange(&g_carry, 0);      /* (the island's camera again: put down) */
     if (glide) {                                   /* a quarter of the way each frame */
         float dx = goal[0] - rdf(tgt), dz = goal[1] - rdf(tgt + 8);
         wrf(tgt, rdf(tgt) + dx * 0.25f); wrf(tgt + 8, rdf(tgt + 8) + dz * 0.25f);

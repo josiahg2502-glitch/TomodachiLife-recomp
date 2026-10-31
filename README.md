@@ -86,7 +86,8 @@ the screen, and diagonals are no faster than straight moves.
 
 **Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B. On
 the island, drag with the left button to move around (the ground stays under the cursor), click a place to bring it to the
-middle (the game names what is there), click the hand or that name to go in, turn the view by dragging with the middle
+middle (the game names what is there), click the hand or that name to go in, hold the button on a Mii to grab them (then
+point where to carry them and click to put them down), turn the view by dragging with the middle
 button, and zoom with the wheel. In menus and dialogs (the X menu, Settings, questions) pointing at a button selects it,
 a click presses it (a click beside the buttons does nothing) and the wheel moves the selection; on the keyboard for names
 and words, pointing selects a key, a left click types it and a right click deletes.

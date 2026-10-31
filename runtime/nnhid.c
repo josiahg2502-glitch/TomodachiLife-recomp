@@ -116,6 +116,7 @@ static int g_seq_count = -1, g_seq_index, g_seq_left, g_seq_holding, g_seq_run;
 static char g_marks[MARK_MAX][40];
 static volatile LONG g_mark_count, g_frame_draws_seen = -1;
 static LONG64 g_seq_polls;
+long long nnhid_seq_polls(void) { return (long long)g_seq_polls; }      /* (tomo.c TOMO_ISLE_GOTO) */
 
 void input_mark(const char *what) {                       /* any thread: something the sequence can wait for has happened */
     LONG i = InterlockedIncrement(&g_mark_count) - 1;
@@ -668,8 +669,9 @@ static int mouse_test(float *x, float *y, int *b, int *wheel) {
 /* While the mouse moves (and half a second after) the left stick gets a nudge too small to move anything else, its sign
  * flipping every poll: the game hides its hand 2-3 s after the last stick input, and a position put in by tomo.c is not
  * one. The hand itself stays on the mouse (tomo.c puts the position in before every update). */
-static volatile LONG g_tap_a;                       /* tomo.c (the island: a click on the hand): A for a few polls */
+static volatile LONG g_tap_a, g_hold_a;            /* tomo.c (the island: a click on the hand): A for a few polls / A held until let go */
 void nnhid_tap_a(void) { InterlockedExchange(&g_tap_a, 1); }
+void nnhid_hold_a(int on) { InterlockedExchange(&g_hold_a, on); }
 static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
     static float px = -1e9f, py = -1e9f;
     static int nudge, zoom, zoom_dir, flick, flick_dir, tap;
@@ -709,8 +711,13 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
         if (island && tomo_island_busy() && !*lx && !*ly) *lx = STICK_MAX / 3; }
     if (InterlockedExchange(&g_tap_a, 0)) tap = 4;
     if (tap) { tap--; *buttons |= 1ull << BTN_A; }
+    if (g_hold_a && island && g_mouse_left) *buttons |= 1ull << BTN_A;
+    int tomo_carry(void), carry = g_mouse_on && tomo_carry();
+    {   /* a Mii grabbed with the mouse being carried: the cursor's offset from the middle is the stick */
+        float dx = g_mouse_xy[0] - 640.0f, dy = g_mouse_xy[1] - 360.0f, d = sqrtf(dx * dx + dy * dy);
+        if (carry && !*lx && !*ly && d > 40.0f) { float m = (d - 40.0f) / 260.0f; if (m > 1.0f) m = 1.0f; *lx = (int)(dx / d * m * STICK_MAX); *ly = (int)(-dy / d * m * STICK_MAX); } }
     if (flick && !*lx && !*ly) { flick--; *lx = flick_dir * STICK_MAX; }
-    else if (g_mouse_on && free_hand && !island && nudge > 0 && !*lx && !*ly) { nudge--; *lx = (nudge & 1) ? STICK_MAX / 6 : -STICK_MAX / 6; }
+    else if (g_mouse_on && free_hand && !island && !carry && nudge > 0 && !*lx && !*ly) { nudge--; *lx = (nudge & 1) ? STICK_MAX / 6 : -STICK_MAX / 6; }
 }
 /* Keys as a stick: a diagonal lies on the circle like a stick's (not 1.41 x as fast). While the game's free hand is up, a
  * key first moves it at half the stick, the full stick after 0.3 s held: a tap nudges the hand onto a small target, a
