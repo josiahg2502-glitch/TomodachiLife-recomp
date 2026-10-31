@@ -1639,12 +1639,31 @@ void tomo_memscan_step(int step) {
         p++;
     }
     if (!op) return;
-    if (op == 'w' || op == 'W') {                  /* watch: write watchpoints (debug_mode.c) on up to 4 survivors that look like screen x, y (W: any) */
+    if (op == 'D') {                               /* describe: for up to 60 small-integer survivors, the nearest word before them that
+                                                    * points into the game's data (a vtable: the owning object) and its offset */
+        int shown = 0;
+        for (size_t i = 0; i < g_ms_n && shown < 60; i++) {
+            uint32_t vw; memcpy(&vw, &g_ms[i].v, 4);
+            if (vw > 64 || g_ms[i].i0 > 64) continue;
+            uint64_t a = g_ms[i].a, obj = 0, vt = 0;
+            for (uint64_t p = (a & ~7ull); p + 0x800 > a && p >= 8; p -= 8) {
+                MEMORY_BASIC_INFORMATION mi;
+                if ((p & 0xfff) == 0xff8 || p == (a & ~7ull)) if (!VirtualQuery((void *)(uintptr_t)p, &mi, sizeof mi) || mi.State != MEM_COMMIT) break;
+                uint64_t w = *(const uint64_t *)(uintptr_t)p;
+                if (w >= 0x7103000000ull && w < 0x7106000000ull && (w & 7) == 0) { obj = p; vt = w; break; }
+            }
+            shown++;
+            printf("memscan:   %llx = %u (snap %u): object %llx + 0x%llx, vtable %llx%c", (unsigned long long)a, vw, g_ms[i].i0, (unsigned long long)obj, (unsigned long long)(obj ? a - obj : 0), (unsigned long long)vt, 10);
+        }
+        return;
+    }
+    if (op == 'w' || op == 'W' || op == 'I') {    /* watch: write watchpoints (debug_mode.c) on up to 4 survivors that look like screen x, y (W: any; I: small integers, now and at the snap) */
         void debug_watch(const uint64_t *addrs, int n);
         uint64_t w[4]; int n = 0;
         for (size_t i = 0; i < g_ms_n && n < 4; i++) {
             float y = *(const float *)(uintptr_t)(g_ms[i].a + 4);
-            if (op == 'W' || (g_ms[i].v >= 10.0f && g_ms[i].v <= 1280.0f && y >= 0.0f && y <= 720.0f)) { w[n++] = g_ms[i].a; printf("memscan: watching %llx%c", (unsigned long long)g_ms[i].a, 10); }
+            uint32_t vw; memcpy(&vw, &g_ms[i].v, 4);
+            if (op == 'I' ? vw <= 64 && g_ms[i].i0 <= 64 : op == 'W' || (g_ms[i].v >= 10.0f && g_ms[i].v <= 1280.0f && y >= 0.0f && y <= 720.0f)) { w[n++] = g_ms[i].a; printf("memscan: watching %llx%c", (unsigned long long)g_ms[i].a, 10); }
         }
         if (n) debug_watch(w, n);
         return;
@@ -1674,8 +1693,9 @@ void tomo_memscan_step(int step) {
     if (g_ms_nsnap) {                              /* first compare: against the copy */
         for (int i = 0; i < g_ms_nsnap; i++) {
             const float *was = (const float *)g_ms_snap[i].copy, *now = (const float *)(uintptr_t)g_ms_snap[i].a;
+            extern uint64_t g_main_stack_base, g_main_stack_size;      /* (the main thread's stack: return addresses and spills, never the state) */
             for (uint64_t w = 0; w < g_ms_snap[i].n / 4; w++)
-                if (ms_keep(was[w], now[w], op)) {
+                if (ms_keep(was[w], now[w], op) && g_ms_snap[i].a + w * 4 - g_main_stack_base >= g_main_stack_size) {
                     if (k == cap) { cap = cap ? cap * 2 : 1 << 20; g_ms = realloc(g_ms, cap * sizeof *g_ms); }
                     g_ms[k].a = g_ms_snap[i].a + w * 4; memcpy(&g_ms[k].i0, &was[w], 4); g_ms[k++].v = now[w];
                 }
@@ -1698,11 +1718,18 @@ void tomo_memscan_step(int step) {
     }
     g_ms_n = k;
     printf("memscan: step %d %c: %llu candidates%c", step, op, (unsigned long long)k, 10);
-    for (size_t i = 0; i < k && i < 40; i++)
-        if (op == 'C' || op == 'K' || op == 'O') { uint32_t vw; memcpy(&vw, &g_ms[i].v, 4); printf("memscan:   %llx = %d (snap %d; next %d %d)%c", (unsigned long long)g_ms[i].a, (int)vw, (int)g_ms[i].i0,
-                                                        *(const int *)(uintptr_t)(g_ms[i].a + 4), *(const int *)(uintptr_t)(g_ms[i].a + 8), 10); }
-        else printf("memscan:   %llx = %g (next %g %g)%c", (unsigned long long)g_ms[i].a, g_ms[i].v,
-                    *(const float *)(uintptr_t)(g_ms[i].a + 4), *(const float *)(uintptr_t)(g_ms[i].a + 8), 10);
+    if (op == 'C' || op == 'K' || op == 'O')      /* small integers first (an index, a state), then a few others */
+        for (int pass = 0, shown = 0; pass < 2; pass++)
+            for (size_t i = 0; i < k && shown < (pass ? 50 : 40); i++) {
+                uint32_t vw; memcpy(&vw, &g_ms[i].v, 4);
+                if ((vw <= 64 && g_ms[i].i0 <= 64) != !pass) continue;
+                shown++;
+                printf("memscan:   %llx = %d (snap %d; next %d %d)%c", (unsigned long long)g_ms[i].a, (int)vw, (int)g_ms[i].i0,
+                       *(const int *)(uintptr_t)(g_ms[i].a + 4), *(const int *)(uintptr_t)(g_ms[i].a + 8), 10);
+            }
+    else
+        for (size_t i = 0; i < k && i < 40; i++) printf("memscan:   %llx = %g (next %g %g)%c", (unsigned long long)g_ms[i].a, g_ms[i].v,
+                                                        *(const float *)(uintptr_t)(g_ms[i].a + 4), *(const float *)(uintptr_t)(g_ms[i].a + 8), 10);
 }
 
 static void ret7(Ctx *c) { RET(7); }
