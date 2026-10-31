@@ -1375,6 +1375,7 @@ static int ai_want_cat(int kind) {
 static DWORD WINAPI ai_main(void *arg) {
     (void)arg;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    { void display_slow_thread(void); display_slow_thread(); }      /* display.c: the efficiency cores, if any */
     SYSTEM_INFO si; GetSystemInfo(&si);
     /* Threads: up to 8 (the processors less 6 for the game) when the CPU is mostly idle, 4 otherwise (TOMO_LLM_THREADS fixes it). */
     int fixed = getenv("TOMO_LLM_THREADS") ? atoi(getenv("TOMO_LLM_THREADS")) : 0, nt = fixed ? fixed : (int)si.dwNumberOfProcessors - 6;

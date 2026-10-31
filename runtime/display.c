@@ -124,7 +124,8 @@ static LONG64 g_ps_phase[10];                          /* where in the refresh t
  * off = high quality of service) and the threads that make a frame (the game's main thread, the render thread, the
  * refresh clock) are restricted to the CPU sets of the highest efficiency class. SSBU_PCORES=0: as before.
  * The report says on which class of core the game's thread was seen at each present. */
-static ULONG g_pc_ids[128], g_pc_core[128], g_pc_lp[128];
+static ULONG g_pc_ids[128], g_pc_core[128], g_pc_lp[128], g_slow_ids[128];
+static int g_slow_n;
 static int g_pc_n = -1, g_pc_on = 1;
 static uint8_t g_cpu_class[256], g_class_max;
 static volatile LONG64 g_pc_frames, g_pc_frames_slow;
@@ -145,7 +146,7 @@ static void pcore_init(void) {
             if (s->Type == CpuSetInformation) {
                 if (!pass) { if (s->CpuSet.EfficiencyClass > g_class_max) g_class_max = s->CpuSet.EfficiencyClass; g_cpu_class[s->CpuSet.LogicalProcessorIndex] = s->CpuSet.EfficiencyClass; ncpu++; }
                 else if (s->CpuSet.EfficiencyClass == g_class_max) { if (g_pc_n < 128) { g_pc_core[g_pc_n] = s->CpuSet.CoreIndex; g_pc_lp[g_pc_n] = s->CpuSet.LogicalProcessorIndex; g_pc_ids[g_pc_n++] = s->CpuSet.Id; } }
-                else nslow++;
+                else { nslow++; if (g_slow_n < 128) g_slow_ids[g_slow_n++] = s->CpuSet.Id; }
             }
             at += s->Size;
         }
@@ -164,6 +165,14 @@ static void pcore_init(void) {
 /* Linux build: CPU sets and ProcessPowerThrottling are Windows calls; the scheduler is left to choose the cores */
 static void pcore_init(void) { g_pc_n = 0; printf("display: CPU: the cores are left to the system (performance-core pinning is a Windows feature of this build)%c", 10); }
 #endif
+/* the calling thread: the efficiency cores only, where the CPU has them (the Mii chatter's AI: it then never shares a
+ * performance core, nor its other hardware thread, with the game's threads) */
+void display_slow_thread(void) {
+    if (g_pc_n < 0) pcore_init();
+#ifdef _WIN32
+    if (g_pc_on && g_slow_n > 0) SetThreadSelectedCpuSets(GetCurrentThread(), g_slow_ids, (ULONG)g_slow_n);
+#endif
+}
 /* the calling thread: performance cores only (once per thread is enough; cheap to repeat) */
 void display_perf_thread(void) {
     if (g_pc_n < 0) pcore_init();

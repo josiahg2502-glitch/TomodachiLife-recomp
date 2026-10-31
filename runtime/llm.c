@@ -134,6 +134,7 @@ __attribute__((target("xsave"))) static int llm_has_avx2(void) {
 typedef struct { Llm *m; int t; } LlmW;
 static DWORD WINAPI llm_worker(void *p) {
     LlmW w = *(LlmW *)p; free(p);
+    { void display_slow_thread(void); display_slow_thread(); }      /* display.c: the efficiency cores, if any */
     for (;;) {
         WaitForSingleObject(w.m->go[w.t], INFINITE);
         if (w.m->stop) return 0;
