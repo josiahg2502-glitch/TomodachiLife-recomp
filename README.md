@@ -84,8 +84,10 @@ The game is played as on a docked Switch.
 Keys move the hand like a stick: a tap nudges it (half speed for the first 0.3 s, for small targets), a held key crosses
 the screen, and diagonals are no faster than straight moves.
 
-**Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B; the
-wheel zooms the camera on the island. In menus and dialogs (the X menu, Settings, questions) pointing at a button selects it,
+**Mouse** (off by default; PC Settings, **Mouse controls**): the hand follows the mouse. Left click = A, right click = B. On
+the island, drag with the left button to move around (the ground stays under the cursor), click a place to bring it to the
+middle (the game names what is there), click the hand or that name to go in, turn the view by dragging with the middle
+button, and zoom with the wheel. In menus and dialogs (the X menu, Settings, questions) pointing at a button selects it,
 a click presses it (a click beside the buttons does nothing) and the wheel moves the selection; on the keyboard for names
 and words, pointing selects a key, a left click types it and a right click deletes.
 Keys and buttons can be changed in the game: PC Settings, **Controls** (pick the controller with left / right, choose a button,

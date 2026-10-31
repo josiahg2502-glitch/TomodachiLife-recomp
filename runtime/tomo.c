@@ -438,6 +438,7 @@ void nnaudio_set_volume(int percent);
 int tomo_audio_volume(void) { return g_audio_out ? (int)(SDL_GetAudioStreamGain(g_audio_out) * 100.0f + 0.5f) : -1; }
 int tomo_audio_set_volume(int percent) { return g_audio_out && SDL_SetAudioStreamGain(g_audio_out, (float)percent / 100.0f); }
 static float rdf(uint64_t a) { uint32_t u = rd32(a); float f; memcpy(&f, &u, 4); return f; }
+static void wrf(uint64_t a, float f) { uint32_t u; memcpy(&u, &f, 4); wr32(a, u); }
 static int audio_out_open(void) {
     if (g_audio_on >= 0) return g_audio_on;
     const char *e = getenv("TOMO_AUDIO");
@@ -1336,7 +1337,7 @@ int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportF
 static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
     static const uint64_t v262144[][2] = {{0x71008ce838ull, 0x7100897d48ull}, {0x71006ec3c0ull, 0x71006ce020ull},
         {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull},
-        {0x710028b2b8ull, 0x710027f474ull}};
+        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}};
     uint64_t at = 0;
     if (g_main.text_size == 0x25ce6a0) at = a;
     else if (g_main.text_size == 0x256d250)
@@ -1468,6 +1469,7 @@ static void persp_install(void) {
  * (a position put in is none), hence nnhid.c's nudge while the mouse moves. The hand is shown while bit 0 of the halfword
  * at +0x14 is set. Found 2026-10-28 with TOMO_MEMSCAN and write watchpoints. TOMO_MOUSE=0 off. */
 static ImportFn g_pointer_update;
+static volatile LONG g_centred_tick;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
 /* THE MOUSE IN MENUS AND DIALOGS (2026-10-31). The X menu, Settings, the yes / no questions... move a hand from button to
  * button with the stick: the pointer object is then in mode 3 (+0x1a0) and follows the element its FOCUS HOLDER names
  * (0x7100241508: [[hand global]] + 0x40 -> its vtable slot 0 (type id) -> + 0x28 = holder; holder + 0x58 the focused element,
@@ -1572,9 +1574,83 @@ static void pointer_hook(Ctx *c, void *user) {
         const float *f = (const float *)(uintptr_t)A0; const int *w = (const int *)(uintptr_t)A0;
         if (dbg && n++ % 30 == 0) printf("mouse: state flags %x 1a0 %d 1a4 %d pos %g,%g prev %g,%g 08 %x 10 %x 114 %x%c", *(const uint16_t *)(uintptr_t)(A0 + 0x14), w[0x1a0 / 4], w[0x1a4 / 4],
                                         f[0x118 / 4], f[0x11c / 4], f[0x1b0 / 4], f[0x1b4 / 4], w[2], w[4], w[0x114 / 4], 10); }
-    if (*(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1) { void nnhid_pointer_free(void); nnhid_pointer_free(); }
-    if ((*(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1) && nnhid_mouse(xy)) { memcpy((void *)(uintptr_t)(A0 + 0x118), xy, 8); display_mouse_hand(); }
+    int up = *(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1, centred = up && *(const int *)(uintptr_t)(A0 + 0x1a0) == 1;
+    if (up) { void nnhid_pointer_free(void); nnhid_pointer_free(); }
+    if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());      /* (the island: the hand stays in the middle, see isle_mouse) */
+    else if (up && nnhid_mouse(xy)) { memcpy((void *)(uintptr_t)(A0 + 0x118), xy, 8); display_mouse_hand(); }
     g_pointer_update(c);
+}
+/* THE MOUSE ON THE ISLAND (2026-10-31). There the hand stays in the middle of the screen (the pointer's mode 1) and the left
+ * stick moves the camera: [0x710044c828] (1.0.4 0x710044b8b0; a camera controller's update: this, the target point) adds
+ * the stick's move to the target (x, y, z on the ground) in [0x710044d090] (1.0.4 0x710044c118; its work, 0), then keeps it
+ * inside the island and moves its look-at camera toward it ([[[work] + 0xf0] + 0x30]: position +0x38, target +0x44, up
+ * +0x50; tan(fovy / 2) of its projection at +0x13c). With the mouse a drag holds the ground under the cursor (the target
+ * moves by the difference of the ground points the cursor's rays hit), a click glides the point clicked to the middle (there
+ * the game names what it picked), a click on the hand or that name presses A, and the middle button turns the camera
+ * (nnhid.c). A camera that follows a walking Mii (as the island often opens) puts the target back each frame until the stick
+ * moves (pointer +0x120, |v|^2 > 0.01: 0x710044e9a0), so while the mouse drags or glides nnhid.c pushes the stick a little and
+ * the push's own move is undone here. Found with TOMO_MEMSCAN L / M (a look-at camera's layout, then write watchpoints). */
+static ImportFn g_isle_input;
+static volatile LONG g_isle_tick;
+int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
+static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
+int tomo_island_busy(void) { return g_isle_busy && tomo_island(); }
+static int isle_ground(uint64_t cam, float sx, float sy, float out[2]) {     /* the ground (the target's height) under a point of the 1280x720 screen */
+    const float *p = (const float *)(uintptr_t)(cam + 0x38), *t = (const float *)(uintptr_t)(cam + 0x44);
+    float tn = rdf(cam + 0x13c);
+    if (!(tn > 0.05f && tn < 2.0f)) tn = 0.2773f;                            /* (31 degrees, as measured) */
+    float f[3] = {t[0] - p[0], t[1] - p[1], t[2] - p[2]}, fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]), rl = sqrtf(f[0] * f[0] + f[2] * f[2]);
+    if (!(fl > 1e-3f && rl > 1e-3f)) return 0;
+    for (int i = 0; i < 3; i++) f[i] /= fl;
+    float r[3] = {-f[2] / rl * fl, 0.0f, f[0] / rl * fl}, u[3] = {-r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1]};
+    float a = (sx - 640.0f) / 360.0f * tn, b = (360.0f - sy) / 360.0f * tn;      /* (the projection's aspect is the screen's, wide or not) */
+    float d[3]; for (int i = 0; i < 3; i++) d[i] = f[i] + a * r[i] + b * u[i];
+    if (d[1] > -1e-4f) return 0;                                              /* above the horizon */
+    float k = (t[1] - p[1]) / d[1];
+    out[0] = p[0] + k * d[0]; out[1] = p[2] + k * d[2];
+    return k > 0.0f;
+}
+static void isle_mouse(uint64_t cam, uint64_t tgt) {
+    int nnhid_mouse(float xy[2]); int nnhid_mouse_buttons(void); void nnhid_tap_a(void);
+    static int down, drag, glide; static float px, py, last[2], goal[2];
+    float xy[2], g0[2], g1[2];
+    int got = nnhid_mouse(xy), b = got ? nnhid_mouse_buttons() : 0;
+    {   static const char *dbg = (const char *)-1; static int was = -1; if (dbg == (const char *)-1) dbg = getenv("TOMO_MOUSE_DEBUG");      /* TEST ONLY */
+        if (dbg && got && (b != was || (b & 1))) { float g[2] = {0, 0}; int h = isle_ground(cam, xy[0], xy[1], g);
+            printf("island mouse: %g,%g buttons %d drag %d ground %d %g,%g target %g,%g%c", xy[0], xy[1], b, drag, h, g[0], g[1], rdf(tgt), rdf(tgt + 8), 10); }
+        was = b; }
+    if (b & 1) {
+        if (!down) { down = 1; drag = glide = 0; px = last[0] = xy[0]; py = last[1] = xy[1]; }
+        if (!drag && fabsf(xy[0] - px) + fabsf(xy[1] - py) > 6.0f) drag = 1;
+        if (drag && isle_ground(cam, last[0], last[1], g0) && isle_ground(cam, xy[0], xy[1], g1)) {
+            wrf(tgt, rdf(tgt) + g0[0] - g1[0]); wrf(tgt + 8, rdf(tgt + 8) + g0[1] - g1[1]);
+        }
+        if (drag) { last[0] = xy[0]; last[1] = xy[1]; }
+    } else if (down) {
+        down = 0;
+        if (!drag) {
+            if ((fabsf(px - 640.0f) < 90.0f && py > 260.0f && py < 410.0f) || (fabsf(px - 640.0f) < 200.0f && py > 190.0f && py <= 260.0f)) nnhid_tap_a();      /* on the hand or the name above it */
+            else if (isle_ground(cam, px, py, goal)) glide = 40;
+        }
+    }
+    InterlockedExchange(&g_isle_busy, (down && drag) || glide);
+    if (glide) {                                   /* a quarter of the way each frame */
+        float dx = goal[0] - rdf(tgt), dz = goal[1] - rdf(tgt + 8);
+        wrf(tgt, rdf(tgt) + dx * 0.25f); wrf(tgt + 8, rdf(tgt + 8) + dz * 0.25f);
+        if (--glide == 0 || fabsf(dx) + fabsf(dz) < 0.02f) glide = 0;
+    }
+}
+static void isle_input_hook(Ctx *c, void *user) {   /* (work: +0 the controller, +8 the target, +0x60 the hand in the middle) */
+    (void)user;
+    uint64_t work = A0, t0 = rd64(work + 8);
+    float bx = t0 ? rdf(t0) : 0, bz = t0 ? rdf(t0 + 8) : 0;
+    g_isle_input(c);
+    if (g_isle_busy && t0 && tomo_island()) { wrf(t0, bx); wrf(t0 + 8, bz); }      /* (the push's own move is undone) */
+    uint64_t ctl = rd64(work), tgt = rd64(work + 8), holder = ctl ? rd64(ctl + 0xf0) : 0, cam = holder ? rd64(holder + 0x30) : 0;
+    if (rd8(work + 0x60) && tgt && cam && GetTickCount() - (DWORD)g_centred_tick < 250 && rdf(cam + 0x50) == 0.0f && rdf(cam + 0x54) == 1.0f && rdf(cam + 0x58) == 0.0f) {
+        InterlockedExchange(&g_isle_tick, (LONG)GetTickCount());
+        isle_mouse(cam, tgt);
+    }
 }
 /* The game's own frame-rate controller [0x710028b2b8] (controller, framework) picks its present interval each frame from
  * the framework's frame time (+0x118, system ticks): interval = int(time x 60 / 19.2 MHz + bias) + 1. That time runs from
@@ -1603,6 +1679,7 @@ static void rate_install(void) {
 static void pointer_install(void) {
     if (getenv("TOMO_MOUSE") && getenv("TOMO_MOUSE")[0] == '0') return;
     if (!tomo_hook(0x710022dce0ull, pointer_hook, &g_pointer_update)) printf("mouse: the hand pointer hook is not installed (the mouse cannot move the hand)%c", 10);
+    if (!tomo_hook(0x710044d090ull, isle_input_hook, &g_isle_input)) printf("mouse: the island camera hook is not installed (the mouse cannot move the island)%c", 10);
 }
 static void heaplog_install(void) {
     trace_install();
@@ -1639,12 +1716,52 @@ void tomo_memscan_step(int step) {
         p++;
     }
     if (!op) return;
-    if (op == 'D') {                               /* describe: for up to 60 small-integer survivors, the nearest word before them that
-                                                    * points into the game's data (a vtable: the owning object) and its offset */
+    if (op == 'L' || op == 'M') {                  /* look-at cameras: a vtable, a 3x4 view matrix with unit rows, then position, target and
+                                                    * up (0, 1, 0) (sead::LookAtCamera's layout); prints each with its vtable; M: and watches
+                                                    * the writes to the first one placed above the ground (its position x, target x) */
+        uint64_t first = 0;
+        uint64_t base[64], size[64]; int nr = nvn_ww_regions(base, size, 64), found = 0;
+        for (int r = 0; r < nr && found < 30; r++)
+            for (uint64_t a = base[r]; a < base[r] + size[r] && found < 30;) {
+                MEMORY_BASIC_INFORMATION mi;
+                if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) break;
+                uint64_t end = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+                if (end > base[r] + size[r]) end = base[r] + size[r];
+                if (mi.State == MEM_COMMIT && mi.Protect == PAGE_READWRITE)
+                    for (uint64_t o = a; o + 0x60 <= end && found < 30; o += 8) {
+                        const float *f = (const float *)(uintptr_t)o;
+                        if (f[0x50 / 4] != 0.0f || f[0x54 / 4] != 1.0f || f[0x58 / 4] != 0.0f) continue;
+                        uint64_t vt = *(const uint64_t *)(uintptr_t)o;
+                        if (vt < 0x7103000000ull || vt >= 0x7106000000ull) continue;
+                        int unit = 1;
+                        for (int row = 0; row < 3; row++) { const float *m = f + 2 + row * 4; float l = m[0] * m[0] + m[1] * m[1] + m[2] * m[2]; if (!(l > 0.98f && l < 1.02f)) unit = 0; }
+                        if (!unit) continue;
+                        found++;
+                        printf("memscan: camera %llx vtable %llx pos %g %g %g at %g %g %g%c", (unsigned long long)o, (unsigned long long)vt, f[0x38 / 4], f[0x3c / 4], f[0x40 / 4], f[0x44 / 4], f[0x48 / 4], f[0x4c / 4], 10);
+                        if (!first && f[0x3c / 4] != 0.0f) first = o;
+                    }
+                a = end;
+            }
+        printf("memscan: step %d L: %d cameras%c", step, found, 10);
+        if (op == 'M' && first) { void debug_watch(const uint64_t *addrs, int n); uint64_t w[2] = {first + 0x38, first + 0x44}; debug_watch(w, 2); }
+        if (op == 'L' && first)                    /* (the words around it: a projection near it?) */
+            for (int o = -0x100; o < 0x300; o += 16) { const float *f = (const float *)(uintptr_t)(first + o); const uint32_t *u = (const uint32_t *)f;
+                printf("memscan:   %+5x: %08x %08x %08x %08x | %g %g %g %g%c", o, u[0], u[1], u[2], u[3], f[0], f[1], f[2], f[3], 10); }
+        return;
+    }
+    if (op == 'G') {                               /* ground: keep the survivors followed by -1.0 (a point on the island's ground: x, -1, z) */
+        size_t k = 0;
+        for (size_t i = 0; i < g_ms_n; i++) if (*(const float *)(uintptr_t)(g_ms[i].a + 4) == -1.0f) g_ms[k++] = g_ms[i];
+        g_ms_n = k;
+        printf("memscan: step %d G: %llu candidates%c", step, (unsigned long long)k, 10);
+        return;
+    }
+    if (op == 'D' || op == 'E') {                  /* describe: for up to 60 small-integer survivors (E: any), the nearest word before them
+                                                    * that points into the game's data (a vtable: the owning object) and its offset */
         int shown = 0;
         for (size_t i = 0; i < g_ms_n && shown < 60; i++) {
             uint32_t vw; memcpy(&vw, &g_ms[i].v, 4);
-            if (vw > 64 || g_ms[i].i0 > 64) continue;
+            if (op == 'D' && (vw > 64 || g_ms[i].i0 > 64)) continue;
             uint64_t a = g_ms[i].a, obj = 0, vt = 0;
             for (uint64_t p = (a & ~7ull); p + 0x800 > a && p >= 8; p -= 8) {
                 MEMORY_BASIC_INFORMATION mi;
@@ -1653,7 +1770,7 @@ void tomo_memscan_step(int step) {
                 if (w >= 0x7103000000ull && w < 0x7106000000ull && (w & 7) == 0) { obj = p; vt = w; break; }
             }
             shown++;
-            printf("memscan:   %llx = %u (snap %u): object %llx + 0x%llx, vtable %llx%c", (unsigned long long)a, vw, g_ms[i].i0, (unsigned long long)obj, (unsigned long long)(obj ? a - obj : 0), (unsigned long long)vt, 10);
+            printf("memscan:   %llx = %u / %g (snap %u): object %llx + 0x%llx, vtable %llx%c", (unsigned long long)a, vw, g_ms[i].v, g_ms[i].i0, (unsigned long long)obj, (unsigned long long)(obj ? a - obj : 0), (unsigned long long)vt, 10);
         }
         return;
     }

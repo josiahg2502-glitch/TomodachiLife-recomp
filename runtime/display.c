@@ -458,7 +458,7 @@ int display_mouse(float *x, float *y, int *buttons) {
     if (fit[2] <= 0 || fit[3] <= 0 || p.x < fit[0] || p.y < fit[1] || p.x >= fit[0] + fit[2] || p.y >= fit[1] + fit[3]) return 0;
     *x = (float)(p.x - fit[0]) * 1280.0f / (float)fit[2];
     *y = (float)(p.y - fit[1]) * 720.0f / (float)fit[3];
-    *buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0);
+    *buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) | ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
     return 1;
 }
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
