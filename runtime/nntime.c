@@ -615,7 +615,9 @@ static void steady_now(int64_t *seconds, uint8_t id[16]) {
         ready = 2;
     }
     while (ready != 2) SwitchToThread();
-    *seconds = (int64_t)(GetTickCount64() / 1000);
+    static int64_t shift = -1;      /* TOMO_STEADY_SHIFT=<seconds>: test aid, the time since the last save as the game measures it (the same scene each run) */
+    if (shift == -1) shift = getenv("TOMO_STEADY_SHIFT") ? _atoi64(getenv("TOMO_STEADY_SHIFT")) : 0;
+    *seconds = (int64_t)(GetTickCount64() / 1000) + shift;
     memcpy(id, source, 16);
 }
 #ifdef _WIN32

@@ -733,7 +733,7 @@ static int rsy(const Tex *t, int v) { return t->rh ? (int)floorf((float)v * (flo
 
 #define SPARE_KEY (offsetof(TexBuilder, layout))        /* flags .. has_layout, swz: what tex_realize makes the storage from */
 #define SPARE_MAX 96
-static struct { TexBuilder b; TexObj o; VNode *views; int glevels; Tex *crop; } g_spare[SPARE_MAX];
+static struct { TexBuilder b; TexObj o; VNode *views; int glevels; Tex *crop, *scratch; } g_spare[SPARE_MAX];
 static int g_spare_n;
 static LONG64 g_spare_hits, g_spare_kept, g_spare_full;
 static LONG64 g_spare_same_mem, g_spare_cleared;
@@ -766,6 +766,7 @@ static int tex_take_spare(Tex *t) {
     int same = g_spare[pick].b.pool == t->b.pool && g_spare[pick].b.offset == t->b.offset;
     t->o = g_spare[pick].o; t->views = g_spare[pick].views; t->glevels = g_spare[pick].glevels;
     t->crop = g_spare[pick].crop; t->crop_gen = t->rt_gen + 1;      /* (its 16:9 part, tex_crop: copied again at the first use) */
+    t->scratch = g_spare[pick].scratch;                              /* (its feedback copy, tex_scratch: copied before every use) */
     memmove(&g_spare[pick], &g_spare[pick + 1], sizeof g_spare[0] * (size_t)(g_spare_n - 1 - pick)); g_spare_n--;
     g_spare_hits++;
     if (same) g_spare_same_mem++;
@@ -1612,15 +1613,16 @@ static void tex_free_gl(Tex *t) {
         if (drop >= 0) {
             for (VNode *n = g_spare[drop].views, *next; n; n = next) { next = n->next; texobj_free(&n->o, 1); free(n); }
             texobj_free(&g_spare[drop].o, 0);
-            tex_crop_free(g_spare[drop].crop);
+            tex_crop_free(g_spare[drop].crop); tex_crop_free(g_spare[drop].scratch);
             memmove(&g_spare[drop], &g_spare[drop + 1], sizeof g_spare[0] * (size_t)(g_spare_n - 1 - drop)); g_spare_n--;
             g_spare_full++;
         }
         if (g_spare_n < SPARE_MAX) {
             g_spare[g_spare_n].b = t->b; g_spare[g_spare_n].o = t->o; g_spare[g_spare_n].views = t->views; g_spare[g_spare_n].glevels = t->glevels;
             g_spare[g_spare_n].crop = t->crop;     /* the 16:9 part goes with it: made anew for every remade target, its creation waited for NVIDIA's GL thread */
+            g_spare[g_spare_n].scratch = t->scratch;
             g_spare_n++; g_spare_kept++;
-            memset(&t->o, 0, sizeof t->o); t->views = NULL; t->crop = NULL;
+            memset(&t->o, 0, sizeof t->o); t->views = NULL; t->crop = NULL; t->scratch = NULL;
             tex_release_packaged(t);
             return;
         }
@@ -1630,6 +1632,7 @@ static void tex_free_gl(Tex *t) {
     t->views = NULL;
     texobj_free(&t->o, 0);
     tex_crop_free(t->crop); t->crop = NULL;
+    tex_crop_free(t->scratch); t->scratch = NULL;    /* (once never freed: a texture and its handles per remade target, until the driver's residency limit) */
     tex_release_packaged(t);
 }
 
@@ -4147,6 +4150,7 @@ static Tex *tex_scratch(Tex *t) {
         int w = lvl(tw(t), l), h = lvl(th(t), l), d = t->b.target == 2 ? lvl(t->b.depth, l) : layers;
         glCopyImageSubData(t->o.gl, tg, l, 0, 0, 0, sc->o.gl, tg, l, 0, 0, 0, w, h, d);
     }
+    sc->rt_gen++;                                  /* its own view copies (a reinterpreted format) refresh too */
     pf_add(PF_FEEDBACK, pf0);
     return sc;
 }
@@ -4245,18 +4249,35 @@ static void feedback_guard(void) {
     feedback_restore();
     wide_crop_guard();
     if (!S.have_fbo) return;
-    if (!feedback_copy_mode()) {                 /* GL's own rule for a draw that samples its render target: a texture barrier before it */
-        static int said;
+    if (feedback_copy_mode() <= 0) {             /* GL's own rule for a draw that samples its render target: a texture barrier before it (TEST: -1 = only that) */
+        static int said, said_copy;
+        int barrier_done = 0;
         for (int s = 0; s < 5; s++) {
             for (uint32_t m = units_sampled(s), u = 0; m; m >>= 1, u++) {
-                Tex *t;
+                Tex *t, *sc;
                 if (!(m & 1) || !(t = unit_tex(s, u)) || t->dead) continue;
-                int hit = t == S.depth_tex;
-                for (int i = 0; i < 8 && !hit; i++) hit = t == S.color[i];
+                int col = 0, hit = t == S.depth_tex;
+                for (int i = 0; i < 8 && !hit; i++) hit = col = t == S.color[i];
                 if (!hit) continue;
-                if (gl_has(glTextureBarrier, "glTextureBarrier")) glTextureBarrier();
+                /* A 2D colour target its own draw samples: the draw reads a copy made just before it. The barrier orders draws
+                 * only; texels the same draw writes are undefined to read in GL (the Mii face pictures, 128x128 with mips, are
+                 * drawn this way every frame). The copies go with the spare targets (tex_take_spare), ~0.01 ms a frame. Cube
+                 * and array mip chains (each level drawn from the one before) keep the barrier. (Tried 2026-11-01 for the
+                 * centre line in Melissa's room: not its cause.) */
+                if (col && t->b.target == 1 && !feedback_copy_mode() && (sc = tex_scratch(t)) != NULL) {
+                    View v; SamplerParams p; Tex *t2;
+                    int hs = handle_lookup(S.tpool, S.spool, S.nvn_tex[s][u], &t2, &v, &p);
+                    uint32_t dims[4] = {0, 0, 0, 0};
+                    int isint = 0;
+                    g_fb_saved[s][u] = S.gl_tex[s][4 + u];
+                    S.gl_tex[s][4 + u] = handle_make(sc, v, p, hs, S.nvn_tex[s][u], dims, &isint);
+                    for (VNode *n = sc->views; n; n = n->next) if (n->is_copy && n->copy_gen != sc->rt_gen) view_copy_fill(sc, n);
+                    g_fb_mask[s] |= 1u << u; S.tex_dirty[s] = 1; g_fb_active = 1;
+                    if (!said_copy++) printf("nvn_gl: feedback: a draw samples its own render target (2D %dx%d format 0x%x): it samples a copy made before it\n", t->b.width, t->b.height, t->b.format);
+                    continue;
+                }
+                if (!barrier_done && gl_has(glTextureBarrier, "glTextureBarrier")) { glTextureBarrier(); barrier_done = 1; }
                 if (!said++) printf("nvn_gl: feedback: a draw samples its own render target (texture target %d %dx%d format 0x%x): a texture barrier before each such draw (TOMO_FEEDBACK_COPY=1 samples a copy instead)\n", t->b.target, t->b.width, t->b.height, t->b.format);
-                return;
             }
         }
         return;
@@ -5800,6 +5821,23 @@ static void job_drawtag(void *arg) { int n = *(int *)arg; if (g_draw_tag != n) {
 int nvn_front_draw_tag(void) { return g_draw_tag; }
 int nvn_front_draw_tag_next(void) { return g_dt_idx++; }
 void nvn_front_draw_tag_clear(void) { if (g_draw_tag) { printf("DT end: fight frame %d, %d draw commands\n", g_draw_tag, g_dt_idx); g_draw_tag = 0; } }
+static volatile LONG64 g_drawshot_at;
+static int seam_rows(GLuint fbo, int fw, int h) {      /* TEST (SSBU_DRAWSHOT_SEAM): rows of a target with a step between its two centre columns that the neighbours lack */
+    int w = 8, x0 = fw / 2 - 4, rows = 0;
+    uint8_t *px = x0 >= 0 ? malloc((size_t)w * h * 4) : NULL;
+    if (!px) return -1;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER_, fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x0, 0, w, h, 0x1908 /* GL_RGBA */, GL_UNSIGNED_BYTE, px);
+    for (int y = 0; y < h; y++) {
+        int s[7];
+        for (int j = 0; j < 7; j++) { const uint8_t *a = px + ((size_t)y * w + j) * 4; s[j] = abs(a[0] - a[4]) + abs(a[1] - a[5]) + abs(a[2] - a[6]); }
+        int nb = (s[1] + s[2] + s[4] + s[5]) / 4;
+        rows += s[3] > nb + 6 && s[3] > 2 * nb;
+    }
+    free(px);
+    return rows;
+}
 /* Debug aid SSBU_DRAWSHOT=<frame>: the colour target after every draw of that frame, as draw_<n>.bmp. */
 static void draw_shot(void) {
     static int want = -2;
@@ -5816,7 +5854,14 @@ static void draw_shot(void) {
         fake.b.depth = -1; snprintf(path, sizeof path, "dlrt_%03d_a.bmp", g_dlrt_n); save_bmp(path, &fake);
         return;
     }
-    if ((g_st.frames != want && !(g_draw_tag && getenv("SSBU_DRAWSHOT_BOX"))) || !S.fbo_w) return;      /* round 17: with SSBU_DRAWTAG the box aid follows the tagged fight frame */
+    if ((g_st.frames != want && g_st.frames != g_drawshot_at && !(g_draw_tag && getenv("SSBU_DRAWSHOT_BOX"))) || !S.fbo_w) return;      /* round 17: with SSBU_DRAWTAG the box aid follows the tagged fight frame */
+    if (getenv("SSBU_DRAWSHOT_SEAM")) {     /* TEST: no files; per draw into a big target, the rows with a step between its two centre
+                                             * columns that the neighbours lack (the centre line, user 2026-11-01) */
+        if (S.fbo_w < 1280) return;
+        printf("  SEAM: frame %lld draw %d fbo %u (%dx%d gl %u) fs #%d tag %08x: %d rows\n", (long long)g_st.frames, g_frame_draw_index - 1, S.fbo, S.fbo_w, S.fbo_h,
+               S.color[0] ? S.color[0]->o.gl : 0, S.prog[1] ? S.prog[1]->serial : -1, S.prog[1] ? code_tag(&S.prog[1]->st[1]) : 0, seam_rows(S.fbo, S.fbo_w, S.fbo_h));
+        return;
+    }
     {   /* SSBU_DRAWSHOT_BOX=x,y,w,h (in 1920x1080 picture coordinates): no files; one line per draw that CHANGED the mean
          * colour of that box of its colour target (finds the draws that paint a given place of the screen) */
         static int box[4] = {-1, 0, 0, 0};
@@ -6580,12 +6625,15 @@ static void exec(const Cmd *m, int depth) {
              * the colour pass after the depth pre-pass and tests it for equality: cleared there, no Mii was drawn (2026-10-24).
              * TOMO_CLEAR_ONCE=0: every conditional clear runs. */
             static int once = -1; if (once < 0) once = !getenv("TOMO_CLEAR_ONCE") || atoi(getenv("TOMO_CLEAR_ONCE"));
+            int mem_eq = eq;
             if (!eq && once && a[2] && g_tsrep[(a[2] >> 5) & 255].addr == a[2] && g_tsrep[(a[2] >> 5) & 255].frame == (long long)g_st.frames + 1) eq = 1;
             S.render_off = a[1] == 1 ? !eq : eq;
+            {   static long long from = -2; static int left;      /* TEST ONLY: TOMO_CONDLOG=<from frame>:<count> */
+                if (from == -2) { const char *e = getenv("TOMO_CONDLOG"); from = -1; if (e) { from = atoll(e); left = strchr(e, ':') ? atoi(strchr(e, ':') + 1) : 400; } }
+                if (from >= 0 && (long long)g_st.frames + 1 >= from && left > 0) { left--;
+                    printf("condexec: frame %lld draw %d mode %d at %llx: %llx | %llx mem_eq %d forced %d -> %s%c", (long long)g_st.frames + 1, g_frame_draw_index, (int)a[1] - 1, (unsigned long long)a[2],
+                           (unsigned long long)rd64(a[2]), (unsigned long long)rd64(a[2] + 16), mem_eq, eq && !mem_eq, S.render_off ? "OFF" : "on", 10); } }
         }
-        {   static int on = -1, n; if (on < 0) on = getenv("TOMO_CONDLOG") != NULL;      /* TEST ONLY */
-            if (on && a[1] && a[2] && n++ < 400) printf("condexec: frame %lld mode %d at %llx: %llx %llx | %llx %llx -> %s%c", (long long)g_st.frames + 1, (int)a[1] - 1, (unsigned long long)a[2],
-                (unsigned long long)rd64(a[2]), (unsigned long long)rd64(a[2] + 8), (unsigned long long)rd64(a[2] + 16), (unsigned long long)rd64(a[2] + 24), S.render_off ? "OFF" : "on", 10); }
         if (drawlog_now()) printf("render enable: %s mode %d counters %llu %llu -> %s\n", a[1] ? "conditional" : "switch", (int)a[1] - 1,
                                   a[1] && a[2] ? (unsigned long long)rd64(a[2]) : 0ull, a[1] && a[2] ? (unsigned long long)rd64(a[2] + 16) : 0ull, S.render_off ? "OFF" : "on");
         break;
@@ -6886,9 +6934,12 @@ static void bl_update(void) {                                /* render thread, b
         { void *z = calloc(BL_SLOTS, 16); glNamedBufferSubData(g_bl_buf, 0, (ptrdiff_t)BL_SLOTS * 16, z); free(z); }
         glNamedBufferSubData(g_bl_buf, (ptrdiff_t)BL_SLOTS * 16, 32, tail);
     }
-    {   /* again once 1/8 of the capacity was added since, or after 10 s: the pairs that could not be dropped stay */
+    {   /* from 98,304 pairs (the old table's 3/4) on, again once 32,768 were added since or after 60 s: the walk below and the
+         * whole-table upload of an eviction stay as cheap as before; the bigger table (MX_BL_BITS) only takes the pairs that
+         * could not be dropped instead of refusing new ones (a full table: those sampled the dummy, objects flickered) */
         static int after; static uint32_t when;
-        if (g_bl_n >= g_bl_cap - g_bl_cap / 4 && (g_bl_n >= after + g_bl_cap / 8 || g_bl_now >= when + 10)) { bl_evict(); after = g_bl_n; when = g_bl_now; }
+        int from = g_bl_cap < 131072 ? g_bl_cap - g_bl_cap / 4 : 98304, step = g_bl_cap / 8 < 32768 ? g_bl_cap / 8 : 32768;      /* (TOMO_BL_CAP: smaller) */
+        if (g_bl_n >= from && (g_bl_n >= after + step || g_bl_now >= when + 60)) { bl_evict(); after = g_bl_n; when = g_bl_now; }
     }
     if (miss_log < 0) miss_log = mx_bl_misslog();
     if (miss_log && GetTickCount64() >= miss_next) {             /* test only: a read-back stall every 10 s */
@@ -7343,6 +7394,15 @@ static int swap_midbatch_ok(void) { return g_dx.state != 1 || g_dx.checks >= 3; 
  * log of the two frames after them (every draw: targets, programs, textures; the frozen-scene restores) to the session log,
  * so a flicker seen on a player's PC can be looked at frame by frame. TOMO_FLICKER_SAMPLE_AT=<frame>: the same in a test. */
 static volatile LONG g_flk_req;
+static volatile LONG g_rtdump_step;               /* TEST: SSBU_RTDUMP_STEP=<step>: the render targets dumped at that input step's frame */
+static volatile LONG64 g_drawshot_at = -1;        /* (declared above) TEST: SSBU_DRAWSHOT_STEP=<step>: the draws of the frame after that step's, as SSBU_DRAWSHOT */
+static int step_listed(const char *name, int step) {      /* TEST: <name>=<step>[,<step>...] */
+    const char *e = getenv(name);
+    char k[16], l[256];
+    if (!e) return 0;
+    snprintf(l, sizeof l, ",%s,", e); snprintf(k, sizeof k, ",%d,", step);
+    return strstr(l, k) != NULL;
+}
 void nvn_front_flicker_sample(void) { InterlockedExchange(&g_flk_req, 1); }
 static void job_present(void *arg) {
     if (g_rbp_n) rb_land(0);
@@ -7430,7 +7490,11 @@ static void job_present(void *arg) {
         if (wflip) glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], d4[0], r.bottom - d4[1], d4[0] + d4[2], r.bottom - d4[1] - d4[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
         else glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], d4[0], d4[1], d4[0] + d4[2], d4[1] + d4[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (g_drawlog_frame >= 0 && frame == g_drawlog_frame + 1) save_bmp("frame_drawlog.bmp", t);      /* the frame the draw log describes */
-        { int step = nvn_front_take_step_shot(); if (step) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sstep_%03d.bmp", dir ? dir : "", dir ? "/" : "", step - 1); save_bmp(path, t); } }
+        { int step = nvn_front_take_step_shot(); if (step) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sstep_%03d.bmp", dir ? dir : "", dir ? "/" : "", step - 1); save_bmp(path, t);
+            if (getenv("SSBU_DRAWSHOT_SEAM")) printf("  SEAM: step %d shot, frame %lld, gl %u: %d rows\n", step - 1, (long long)frame, t->o.gl, seam_rows(g_fbo_read, tw(t), th(t)));
+            if (step_listed("SSBU_RTDUMP_STEP", step - 1)) InterlockedExchange(&g_rtdump_step, 1);
+            if (step_listed("SSBU_DRAWSHOT_STEP", step - 1)) InterlockedExchange64(&g_drawshot_at, frame);
+            if (step_listed("SSBU_DRAWLOG_STEP", step - 1)) { g_dl_force[0] = frame; g_dl_force[1] = frame; } } }      /* (TEST: and its draw log) */      /* (TEST: the targets dumped at that step's frame too) */
         nvn_front_draw_tag_clear();
         if (j->shot_fight) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sfight_%05d.bmp", dir ? dir : "", dir ? "/" : "", j->shot_fight); save_bmp(path, t); printf("shot: fight frame %d saved at presented frame %lld (OpenGL)\n", j->shot_fight, (long long)frame); }
         {   static int left; static long long at = -2;
@@ -7638,7 +7702,7 @@ static void job_present(void *arg) {
                 }
             }
         }
-        if (getenv("SSBU_RTDUMP") && frame == atoi(getenv("SSBU_RTDUMP"))) {       /* debug: every colour target in use, as rt_<n>.bmp */
+        if ((getenv("SSBU_RTDUMP") && frame == atoi(getenv("SSBU_RTDUMP"))) || InterlockedExchange(&g_rtdump_step, 0)) {       /* debug: every colour target in use, as rt_<n>.bmp */
             for (int k = 0; k < NFBO; k++) {
                 Tex fake;
                 char path[64];
@@ -7649,9 +7713,11 @@ static void job_present(void *arg) {
                 glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
                 glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
                 if (w <= 0 || h <= 0 || (w < 64 && h < 64)) continue;
+                {   int fw, fh; const char *e = getenv("SSBU_RTDUMP_SIZE");      /* TEST: <w>x<h>, only targets of that size */
+                    if (e && sscanf(e, "%dx%d", &fw, &fh) == 2 && (fw != w || fh != h)) continue; }
                 memset(&fake, 0, sizeof fake);
                 fake.b.width = w; fake.b.height = h;
-                snprintf(path, sizeof path, "rt_%03d_gl%u.bmp", k, g_fbos[k].k.color[0]);
+                snprintf(path, sizeof path, "rt_%03d_gl%u_f%lld.bmp", k, g_fbos[k].k.color[0], (long long)frame);
                 save_bmp(path, &fake);
                 if (getenv("SSBU_RTDUMP_ALPHA")) { fake.b.depth = -1; snprintf(path, sizeof path, "rt_%03d_gl%u_a.bmp", k, g_fbos[k].k.color[0]); save_bmp(path, &fake); }
             }
