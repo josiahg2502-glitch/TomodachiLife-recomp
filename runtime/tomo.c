@@ -1849,11 +1849,13 @@ static void pointer_install(void) {
     if (!tomo_hook(0x710044d090ull, isle_input_hook, &g_isle_input)) printf("mouse: the island camera hook is not installed (the mouse cannot move the island)%c", 10);
     if (!tomo_hook(0x710026dca0ull, pane_draw_hook, &g_pane_draw)) printf("mouse: the pane draw hook is not installed (button prompts cannot be clicked)%c", 10);
 }
-/* TEST ONLY, TOMO_PICKLOG=1 (1.0.4): every line the game picks for a balloon ([game 0x71004bbb20]: message file, candidate
- * labels, ...; returns {UTF-16 text, length, index | file id << 32} through x8) with its label and the audio clock (5 ms
- * updates), to match shown lines against the speech that should follow (scratchpad speechmatch.py; from the removed Mii
- * chatter mod). The label: the file's LMS message (+0x18 section table, 0x18 bytes an entry; +0x20 the LBL1 index); LBL1 =
- * bucket count, {count, offset} per bucket, then {length, label, index}. */
+/* Line log (1.0.4; on in every build since 2026-11-01, TOMO_PICKLOG=0: off): every line the game picks for a balloon
+ * ([game 0x71004bbb20]: message file, candidate labels, ...; returns {UTF-16 text, length, index | file id << 32} through x8)
+ * with its label, the audio clock (5 ms updates) and the local time, so a line the user saw without its voice (a Mii News
+ * line, 2026-11-01) can be matched against the speech log (speech_end) of the same session (scratchpad speechmatch.py;
+ * from the removed Mii chatter mod, whose hook ran in every build). The label: the file's LMS message (+0x18 section
+ * table, 0x18 bytes an entry; +0x20 the LBL1 index); LBL1 = bucket count, {count, offset} per bucket, then {length,
+ * label, index}. */
 static ImportFn g_pick_orig;
 static int pick_label(uint64_t mfile, uint32_t idx, char *out, size_t n) {
     uint64_t msg = rd64(mfile);
@@ -1877,7 +1879,7 @@ static void pick_log(Ctx *c, void *user) {
     (void)user;
     g_pick_orig(c);
     uint64_t tx = res ? rd64(res) : 0;
-    if (!tx || !mfile || n++ >= 4000) return;
+    if (!tx || !mfile || n++ >= 20000) return;
     char lb[80] = "", a[200]; int o = 0;
     pick_label(mfile, (uint32_t)rd64(res + 0x10), lb, sizeof lb);
     for (int k = 0; k < 240 && o < 180; k++) {
@@ -1887,11 +1889,13 @@ static void pick_log(Ctx *c, void *user) {
         a[o++] = ch < 0x80 && ch >= 0x20 ? (char)ch : '?';
     }
     a[o < (int)sizeof a ? o : (int)sizeof a - 1] = 0;
-    printf("picklog @%llu %s: %s\n", (unsigned long long)g_audio_updates, lb, a);
+    time_t now = time(NULL); struct tm *lt = localtime(&now);
+    printf("picklog @%llu %s: %s [%02d:%02d:%02d]\n", (unsigned long long)g_audio_updates, lb, a, lt ? lt->tm_hour : 0, lt ? lt->tm_min : 0, lt ? lt->tm_sec : 0);
 }
 static void heaplog_install(void) {
     trace_install();
-    if (getenv("TOMO_PICKLOG") && g_main.text_size == 0x256d250) printf("picklog: hook %s\n", hook_install(0x71004bbb20ull, pick_log, NULL, &g_pick_orig) ? "installed" : "NOT installed");
+    if (!(getenv("TOMO_PICKLOG") && getenv("TOMO_PICKLOG")[0] == '0') && g_main.text_size == 0x256d250)
+        printf("picklog: line log hook %s\n", hook_install(0x71004bbb20ull, pick_log, NULL, &g_pick_orig) ? "installed" : "NOT installed");
     if (getenv("TOMO_TASKLOG")) printf("tasklog: hook %s\n", tomo_hook(0x71005e1ffcull, tasklog_step, &g_task_step) ? "installed" : "NOT installed");
     if (!getenv("TOMO_HEAPLOG")) return;
     printf("heaplog: hook %s\n", tomo_hook(0x71001e68c0ull, heaplog_try_alloc, &g_try_alloc) ? "installed" : "NOT installed");
