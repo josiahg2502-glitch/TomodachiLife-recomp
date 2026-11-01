@@ -1350,12 +1350,11 @@ static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
         for (size_t i = 0; i < sizeof v262144 / sizeof v262144[0]; i++) if (v262144[i][0] == a) at = v262144[i][1];
     return at && hook_install(at, repl, NULL, orig);
 }
-/* Guest memory that may have been given back, read through the system (ReadProcessMemory fails where a read would fault;
- * mem_readable asks one byte a page). Not VirtualQuery: on the game's heap, one write-watched region of gigabytes, a query
- * walks the page table to the end of the region (16-40 ms) holding the lock the render thread's GetWriteWatch needs; the
- * chatter's search for the game's message archive froze the picture for 2.4 s (2026-10-31). A probe is about a microsecond.
- * Windows: a copy that catches the fault, no system call (the prompt hook reads every shown text pane's first characters,
- * on the game's job threads: ReadProcessMemory there was 0.9 % of a job thread, 2026-11-01). */
+/* Guest memory that may have been given back. Not VirtualQuery: on the game's heap, one write-watched region of gigabytes, a
+ * query walks the page table to the end of the region (16-40 ms) holding the lock the render thread's GetWriteWatch needs
+ * (a search with it froze the picture for 2.4 s, 2026-10-31). Windows: a copy that catches the fault, no system call (the
+ * prompt hook reads every shown text pane's first characters, on the game's job threads: ReadProcessMemory there was 0.9 %
+ * of a job thread, 2026-11-01). */
 static int mem_copy(uint64_t p, void *buf, size_t n) {
     if (p < 0x10000) return 0;
 #ifdef _WIN32
@@ -1366,15 +1365,6 @@ static int mem_copy(uint64_t p, void *buf, size_t n) {
     return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)p, buf, n, &got) && got == n;
 #endif
 }
-static int mem_readable(uint64_t p, size_t n) {
-    uint8_t b;
-    if (p < 0x10000 || p + n < p) return 0;
-    for (uint64_t a = p, last = (p + (n ? n : 1) - 1) & ~0xfffull;; a = (a & ~0xfffull) + 0x1000) {
-        if (!mem_copy(a, &b, 1)) return 0;
-        if (a >= last) return 1;
-    }
-}
-#include "mii_chatter.c"                         /* the Mii chatter mod (more for Miis to say) */
 static ImportFn g_try_alloc;
 const char *guest_thread_name_of(DWORD tid);               /* os_threads.c */
 static const char *heap_name(uint64_t heap) {
@@ -1712,7 +1702,7 @@ static void pointer_hook(Ctx *c, void *user) {
 static ImportFn g_isle_input;
 static volatile LONG g_isle_tick, g_isle_since;      /* g_isle_since: when the island had first been on screen 2 s (0: not yet) */
 int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
-static DWORD tomo_island_ms(void) { return g_isle_since ? GetTickCount() - (DWORD)g_isle_since : 0; }      /* (mii_chatter.c) */
+static DWORD tomo_island_ms(void) { return g_isle_since ? GetTickCount() - (DWORD)g_isle_since : 0; }
 int tomo_play_started(void) { return tomo_island_ms() >= 5000; }      /* display.c: the start-up's loads are over */
 int tomo_centred(void) { return GetTickCount() - (DWORD)g_centred_tick < 250; }      /* the hand held in the middle (the island, the Island Builder) */
 int tomo_pen(void) { return GetTickCount() - (DWORD)g_pen_tick < 250; }      /* a cursor that keeps the mouse's position (the Palette House canvas's pen) */
@@ -2008,7 +1998,6 @@ void register_tomo_imports(void) {
     persp_install();
     rate_install();
     pointer_install();
-    chatter_install();
     audio_volume_selftest();                     /* SSBU_AUDIO_VOLUME_SELFTEST=<expected startup percent>, -1 for no device */
     for (size_t i = 0; i < sizeof tomo_imports / sizeof tomo_imports[0]; i++)
         if (!import_lookup(tomo_imports[i].name)) register_imports(&tomo_imports[i], 1);

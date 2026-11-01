@@ -711,7 +711,7 @@ static float wide_k(void) {
             else a = (float)o->width / (float)o->height;
         }
         float k = a > 0 ? a / (16.0f / 9.0f) : 1.0f;
-        g_wide_k = k > 1.01f ? (k > 4.0f ? 4.0f : k) : 1.0f;
+        g_wide_k = k > 1.01f ? (k > 1.35f ? 1.35f : k) : 1.0f;      /* 21:9 (2.4:1) at most: no 32:9 (user 2026-11-01) */
         if (g_wide_k != 1.0f) printf("nvn_gl: widescreen: %.3f:1, the screen-sized targets %.3f times as wide as the game's (OpenGL)%c", 16.0f / 9.0f * g_wide_k, g_wide_k, 10);
     }
     return g_wide_k;

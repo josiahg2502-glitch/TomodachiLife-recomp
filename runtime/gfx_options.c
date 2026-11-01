@@ -39,14 +39,8 @@ int gfx_ff_speed(void) { gfx_options(); return g_gfx_ff; }
 void gfx_ff_set(int n) { gfx_options(); g_gfx_ff = n < 2 ? 2 : n > 4 ? 4 : n; }
 static int g_gfx_mouse;                             /* mouse = off 0 | on 1: the mouse steers the game's hand (nnhid.c mouse_poll); user 2026-10-30: off by default */
 int gfx_mouse(void) { gfx_options(); return g_gfx_mouse; }
-static int g_gfx_chatter;                           /* mii_chatter = off 0 | some 1 | lots 2: the Mii chatter mod (mii_chatter.c) */
-int gfx_mii_chatter(void) { gfx_options(); return g_gfx_chatter; }
-void gfx_mii_chatter_set(int level) { gfx_options(); g_gfx_chatter = level < 0 ? 0 : level > 2 ? 2 : level; }
-static int g_gfx_chat_en = 1;                       /* mii_chat_english = on 1 | off 0: chats between Miis in English (mii_chatter.c) */
-int gfx_mii_chat_english(void) { gfx_options(); return g_gfx_chat_en; }
-void gfx_mii_chat_english_set(int on) { gfx_options(); g_gfx_chat_en = on != 0; }
 void gfx_mouse_set(int on) { gfx_options(); g_gfx_mouse = on != 0; }
-static float g_gfx_wide = -1.0f;                           /* widescreen = off 0 | auto -1 | an aspect ratio (21:9 -> 2.333) */
+static float g_gfx_wide;                                   /* widescreen = off 0 | auto -1 (user 2026-11-01: 16:9 by default; no fixed 21:9 / 32:9) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
 int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
@@ -173,21 +167,10 @@ static const char *const k_default_ini =
 ";   on: the mouse moves the game's hand (left click = A, right click = B, the wheel = ZL / ZR). PC Settings can change it.\r\n"
 "mouse = off\r\n"
 "\r\n"
-"; mii_chatter = off | some | lots\r\n"
-";   some / lots: the Mii chatter mod. Miis say or think new lines about your island (who lives there, who moved\r\n"
-";   away, the words you taught them), in their own voice. What it learns is kept in userdata\\chatter_memory.txt.\r\n"
-";   With a language model file (*.gguf) in the ai folder next to work, it writes the lines (free, offline).\r\n"
-"mii_chatter = off\r\n"
-"\r\n"
-"; mii_chat_english = on | off\r\n"
-";   on (with mii_chatter and the AI model): when two Miis chat, they talk in English instead of Mii-speak once the AI\r\n"
-";   has written a chat for that pair.\r\n"
-"mii_chat_english = on\r\n"
-"\r\n"
-"; widescreen = auto | off | 21:9 | 32:9 | <width:height>\r\n"
-";   Wider than 16:9 (OpenGL): the 3D picture shows more at the sides, menus and text stay 16:9 in the middle.\r\n"
-";   auto: the monitor's shape (borderless, fullscreen) or width:height (windowed). off: 16:9. TOMO_WIDESCREEN wins.\r\n"
-"widescreen = auto\r\n"
+"; widescreen = off | auto\r\n"
+";   off: 16:9. auto: as wide as an ultrawide monitor (up to 21:9; borderless and full screen), the 3D picture showing\r\n"
+";   more at the sides, menus and text staying 16:9 in the middle; 16:9 on a 16:9 monitor.\r\n"
+"widescreen = off\r\n"
 "\r\n"
 "; frame_time_overlay = off | on\r\n"
 ";   on: the average frame time of the last second in the window title ('.. fps - 16.67 ms per frame') and as a\r\n"
@@ -285,9 +268,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "present_api")) g_gfx_present_api = !_stricmp(val, "dxgi") ? 1 : !_stricmp(val, "opengl") ? 2 : 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "mouse")) g_gfx_mouse = !_stricmp(val, "on") || !strcmp(val, "1");
-        else if (!_stricmp(key, "mii_chatter")) g_gfx_chatter = !_stricmp(val, "lots") || !strcmp(val, "2") ? 2 : !_stricmp(val, "on") || !_stricmp(val, "some") || !strcmp(val, "1") ? 1 : 0;
-        else if (!_stricmp(key, "mii_chat_english")) g_gfx_chat_en = !(!_stricmp(val, "off") || !strcmp(val, "0"));
-        else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : strchr(val, ':') && atof(strchr(val, ':') + 1) > 0 ? (float)(atof(val) / atof(strchr(val, ':') + 1)) : (float)atof(val);
+        else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : 0.0f;      /* (an old 21:9 / 32:9: 16:9) */
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */
         else if (!_stricmp(key, "volume")) { g_gfx_volume = -1; if (_stricmp(val, "auto")) { int v = atoi(val); g_gfx_volume = v < 0 ? 0 : v > 100 ? 100 : v; } }

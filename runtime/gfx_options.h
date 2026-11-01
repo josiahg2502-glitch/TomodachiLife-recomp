@@ -23,15 +23,11 @@ int gfx_latency(void);                    /* latency = normal 0 | low 1 | lowest
 int gfx_runahead(void);                   /* runahead = off 0 | on 1 */
 int gfx_frame_rate(void);                 /* frame_rate = 30 | 60 (display.c: the present interval, halved and adaptive at 60) */
 int gfx_present_api(void);               /* present_api = auto 0 | dxgi 1 | opengl 2 (nvn_gl_dxgi.c: how the picture reaches the screen) */
-float gfx_widescreen(void);
+float gfx_widescreen(void);               /* widescreen = off 0 | auto -1 (nvn_gl.c wide_k, display.c) */
 int gfx_ff_speed(void);                   /* fast_forward = 2 | 3 | 4: the speed while the fast-forward key is held */
 void gfx_ff_set(int n);                   /* changed while running (PC Settings) */
 int gfx_mouse(void);                      /* mouse = off 0 | on 1 (nnhid.c: the mouse steers the hand) */
 void gfx_mouse_set(int on);               /* changed while running (PC Settings) */
-int gfx_mii_chatter(void);                /* mii_chatter = off 0 | some 1 | lots 2 (mii_chatter.c: new lines for Miis) */
-void gfx_mii_chatter_set(int level);      /* changed while running (PC Settings) */
-int gfx_mii_chat_english(void);           /* mii_chat_english = on 1 | off 0: Mii-to-Mii chats in English */
-void gfx_mii_chat_english_set(int on);    /* changed while running (PC Settings) */               /* widescreen = off 0 | auto -1 | an aspect ratio (nvn_gl.c wide_k, display.c) */
 int gfx_stats_overlay(void);              /* stats_overlay = off 0 | on 1 (menu.cpp, F2) */
 int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game settings menu, F1) */
 int gfx_volume(void);                     /* volume = auto -1 | 0..100 (the copies a person plays; nnaudio.c) */

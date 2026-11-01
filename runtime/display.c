@@ -165,14 +165,6 @@ static void pcore_init(void) {
 /* Linux build: CPU sets and ProcessPowerThrottling are Windows calls; the scheduler is left to choose the cores */
 static void pcore_init(void) { g_pc_n = 0; printf("display: CPU: the cores are left to the system (performance-core pinning is a Windows feature of this build)%c", 10); }
 #endif
-/* the calling thread: the efficiency cores only, where the CPU has them (the Mii chatter's AI: it then never shares a
- * performance core, nor its other hardware thread, with the game's threads) */
-void display_slow_thread(void) {
-    if (g_pc_n < 0) pcore_init();
-#ifdef _WIN32
-    if (g_pc_on && g_slow_n > 0) SetThreadSelectedCpuSets(GetCurrentThread(), g_slow_ids, (ULONG)g_slow_n);
-#endif
-}
 /* the calling thread: performance cores only (once per thread is enough; cheap to repeat) */
 void display_perf_thread(void) {
     if (g_pc_n < 0) pcore_init();
@@ -351,6 +343,7 @@ static double win_aspect(void) {                      /* the window's shape: 16:
     const GfxOptions *go = gfx_options();
     double a = gfx_widescreen();
     if (a < 0) a = (double)go->width / (double)go->height;
+    if (a > 2.4) a = 2.4;                             /* (21:9 at most: no 32:9, user 2026-11-01; nvn_gl.c wide_k the same) */
     return a > (double)ASPECT_W / ASPECT_H * 1.01 ? a : (double)ASPECT_W / ASPECT_H;
 }
 static volatile LONG g_pic[4];                    /* where the picture was last placed in the window (display_mouse) */

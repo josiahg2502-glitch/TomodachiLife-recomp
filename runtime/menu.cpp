@@ -1623,18 +1623,18 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_CHATTER, T_CHATEN, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
 static const float k_res[] = {1.0f, 1.5f, 2.0f, 3.0f};
 static const char *const k_res_name[] = {"1080p", "1620p", "4K", "Above 4K (3240p)"};
-static const char *const k_wide[] = {"auto", "off", "21:9", "32:9"};
-static const char *const k_wide_name[] = {"Fit the screen", "Off (16:9)", "21:9", "32:9"};
+static const char *const k_wide[] = {"off", "auto"};
+static const char *const k_wide_name[] = {"Off (16:9)", "Fit the screen"};
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Mii chatter (mod)", "English Mii chats (mod)", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
@@ -1649,7 +1649,7 @@ static int classic(void) {
 }
 static void t_init(void) {
     float w = gfx_widescreen();
-    g_t_wide0 = g_t_wide = w < 0 ? 0 : w == 0 ? 1 : w < 3.0f ? 2 : 3;
+    g_t_wide0 = g_t_wide = w < 0 ? 1 : 0;
     g_t_fps0 = g_t_fps = gfx_frame_rate();
     g_t_ff = gfx_ff_speed();
 }
@@ -1677,8 +1677,6 @@ static void t_value(int r, char *v, int n) {
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
     case T_MOUSE: snprintf(v, (size_t)n, "%s", gfx_mouse() ? "On" : "Off"); break;
-    case T_CHATTER: snprintf(v, (size_t)n, "%s", gfx_mii_chatter() == 2 ? "Lots" : gfx_mii_chatter() ? "Some" : "Off"); break;
-    case T_CHATEN: snprintf(v, (size_t)n, "%s", gfx_mii_chat_english() ? "On" : "Off"); break;
     case T_CTRL: snprintf(v, (size_t)n, "%s", tc_device_name()); break;
     default: v[0] = 0;
     }
@@ -1699,8 +1697,6 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
     case T_FF: g_t_ff = 2 + (g_t_ff - 2 + dir + 3) % 3; snprintf(v, sizeof v, "%d", g_t_ff); ini("fast_forward", v); gfx_ff_set(g_t_ff); break;
     case T_MOUSE: gfx_mouse_set(!gfx_mouse()); ini("mouse", gfx_mouse() ? "on" : "off"); break;
-    case T_CHATTER: { static const char *const lv[3] = {"off", "some", "lots"}; gfx_mii_chatter_set((gfx_mii_chatter() + (dir < 0 ? 2 : 1)) % 3); ini("mii_chatter", lv[gfx_mii_chatter()]); } break;
-    case T_CHATEN: gfx_mii_chat_english_set(!gfx_mii_chat_english()); ini("mii_chat_english", gfx_mii_chat_english() ? "on" : "off"); break;
     case T_CTRL: tc_open(); return;
     }
     char now[64]; t_value(r, now, sizeof now);

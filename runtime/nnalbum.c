@@ -115,12 +115,15 @@ static int write_bmp(const char *path, const uint8_t *rgba, int w, int h) {
     fclose(f);
     return bad;
 }
-static uint32_t save_screenshot(const uint8_t *pixels, uint64_t size, const void *user, uint64_t user_size, const char *what) {
+/* The picture's size comes from ImageSize (0 1280x720, 1 1920x1080); the buffer may be longer: Tomodachi Life's trip photos
+ * come in a 1280x768 RGBA buffer, the rows past 720 unused (refused as "not exactly 1280x720", the game said the photos
+ * could not be saved, 2026-11-01). */
+static uint32_t save_screenshot(const uint8_t *pixels, uint64_t size, uint64_t image_size, const void *user, uint64_t user_size, const char *what) {
     int w, h;
-    if (size == 1280ull * 720 * 4) { w = 1280; h = 720; }
-    else if (size == 1920ull * 1080 * 4) { w = 1920; h = 1080; }
+    if (image_size == 1 && size >= 1920ull * 1080 * 4) { w = 1920; h = 1080; }
+    else if (size >= 1280ull * 720 * 4) { w = 1280; h = 720; }
     else {
-        printf("%s: unexpected pixel data size %llu (neither 1280x720 nor 1920x1080 RGBA8): not saved\n", what, (unsigned long long)size);
+        printf("%s: pixel data of %llu bytes, less than a 1280x720 RGBA8 picture: not saved\n", what, (unsigned long long)size);
         return CAPS_OUT_OF_RANGE;
     }
     if (!pixels) return CAPS_OUT_OF_RANGE;
@@ -143,14 +146,14 @@ static uint32_t save_screenshot(const uint8_t *pixels, uint64_t size, const void
     return 0;
 }
 /* (const void *data, size_t size, ImageSize, AlbumReportOption) */
-static void album_SaveScreenshot(Ctx *c) { RET(save_screenshot((const uint8_t *)(uintptr_t)A0, A1, NULL, 0, "nn::album::SaveScreenshot")); }
+static void album_SaveScreenshot(Ctx *c) { RET(save_screenshot((const uint8_t *)(uintptr_t)A0, A1, A2, NULL, 0, "nn::album::SaveScreenshot")); }
 /* (data, size, ImageSize, ImageOrientation, AlbumReportOption, const void *userData, size_t userDataSize) */
 static void album_SaveScreenshotWithUserData(Ctx *c) {
-    RET(save_screenshot((const uint8_t *)(uintptr_t)A0, A1, (const void *)(uintptr_t)A5, A6, "nn::album::SaveScreenshotWithUserData"));
+    RET(save_screenshot((const uint8_t *)(uintptr_t)A0, A1, A2, (const void *)(uintptr_t)A5, A6, "nn::album::SaveScreenshotWithUserData"));
 }
 /* (data, size, ImageSize, AlbumReportOption, const account::Uid &, const char *text) */
 static void album_SaveAndShareScreenshot(Ctx *c) {
-    uint32_t r = save_screenshot((const uint8_t *)(uintptr_t)A0, A1, NULL, 0, "nn::album::SaveAndShareScreenshot");
+    uint32_t r = save_screenshot((const uint8_t *)(uintptr_t)A0, A1, A2, NULL, 0, "nn::album::SaveAndShareScreenshot");
     if (!r) printf("nn::album::SaveAndShareScreenshot: sharing needs a network; the picture was only saved\n");
     RET(r);
 }
@@ -880,9 +883,9 @@ int nnalbum_selftest(Ctx *c) {
     strcpy(saved_dir, g_album_dir);
     GetTempPathA(MAX_PATH, tmp);
     snprintf(g_album_dir, MAX_PATH, "%sssbu_album_selftest", tmp);
-    uint8_t *px = malloc(1280 * 720 * 4);
+    uint8_t *px = malloc(1280 * 768 * 4);           /* (the game's buffer: 1280x768, the rows past 720 unused) */
     for (int i = 0; i < 1280 * 720; i++) { px[i * 4] = (uint8_t)i; px[i * 4 + 1] = (uint8_t)(i >> 8); px[i * 4 + 2] = (uint8_t)(i >> 16); px[i * 4 + 3] = 0xff; }
-    c->x[0] = P(px); c->x[1] = 1280 * 720 * 4; c->x[2] = 0; c->x[3] = 0; album_SaveScreenshot(c);
+    c->x[0] = P(px); c->x[1] = 1280 * 768 * 4; c->x[2] = 0; c->x[3] = 0; album_SaveScreenshot(c);
     ok = c->x[0] == 0;
     snprintf(pattern, MAX_PATH, "%s\\*.bmp", g_album_dir);
     WIN32_FIND_DATAA fd;

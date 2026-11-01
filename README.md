@@ -107,35 +107,6 @@ Put each mod in its own folder in `build\mods` (made at the first start). Mods m
 same file, the one whose folder name comes first wins. To turn a mod off, move its folder out. `exefs` code patches cannot
 work here: the game's code is translated ahead of time.
 
-## Mii chatter (mod)
-
-**Mii chatter** (PC Settings, **Mii chatter (mod)**: Off, Some or Lots; off by default) gives the Miis more to say, in
-their own voice and way of talking, while the game's own lines stay most of what they say:
-
-- When a Mii talks to you, it says its usual line and may add a new one in a second balloon.
-- Miis walking around sometimes think a new thought, and what they say while busy (stretching, aerobics, painting...)
-  sometimes comes in a new version.
-- When two Miis chat (**English Mii chats (mod)**, on by default), some conversations are in English instead of Mii-speak.
-
-It learns your island as you play: who lives there, who just moved in (a new Mii is learned once the game saves), who
-moved away, and the words you taught the Miis. It knows which Mii is speaking, so a thought, or what a Mii tells you when you check on
-them, can be about another resident by name, never about the one speaking. It also knows each Mii as the game does: their personality (worked out from
-their personality sliders the way the game does, with the game's own names and descriptions), their pronouns, their
-birthday and who they are to each other (partners, family, friends), so thoughts and chats fit who is talking, birthdays
-coming up get mentioned and Miis gossip about the island's couples and families. Everything it learns and writes is kept in `build\userdata`
-(`chatter_memory.txt`, `chatter_lines.txt`, `chatter_knowledge.txt`); delete those files to make it forget. The library of
-new lines keeps growing as you play, and lines that were said often make way for new ones. English text and game
-version 1.0.4 only.
-
-**Free AI for the Miis (optional):** put a language model file in `build\ai` and the new lines are written by it, on your
-PC and offline. It was made for Qwen2.5 1.5B Instruct (`qwen2.5-1.5b-instruct-q4_k_m.gguf`, 1.12 GB, Apache 2.0, from
-huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF). It knows Tomodachi Life from the game's own catalogues (its foods,
-facilities, goods, quirks and trips, read from your game files), the real calendar (the weekday, holidays coming up) and
-the real world, and it writes from what the mod learned about your island. It runs on a few low-priority CPU threads,
-only while the CPU has room to spare (it waits while the game loads), and keeps lines ready, so the game never waits for
-it. Every line is checked before a Mii may say it. Without a model file the mod writes from its own templates, and Miis
-chat in Mii-speak as usual.
-
 ## Local Play (Mii exchange)
 
 The game shares Miis through Local Play. Here Local Play runs over the network: in the launcher's SETTINGS, **LOCAL PLAY
