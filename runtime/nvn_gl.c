@@ -894,20 +894,42 @@ static uint64_t mem_hash(const uint8_t *p, size_t n, int full) {
  * NVN textures on the same storage), so every written page gets a stamp in a table and a texture compares the newest stamp
  * of its pages with the stamp it saw last. Memory that is not write-watched (the image's own data, host heap) is hashed
  * as before. SSBU_NO_WRITEWATCH=1 restores the old behaviour everywhere. Render thread only. */
-#define WW_SLOTS (1u << 20)
-static struct { uint64_t page; uint64_t stamp; } *g_ww_tab;
-static uint64_t g_ww_stamp, g_ww_used, g_ww_floor;       /* g_ww_floor: stamp given to every page when the table had to be emptied */
+/* The stamps sit in a 4 KB array per 2 MB chunk (512 pages), found through a small table of the chunks, with the chunk's
+ * newest stamp beside it: a range's pages are read in a row, and a chunk with nothing newer than what the caller saw last is
+ * not read at all. (A table of single pages, 16 MB of scattered reads, was 5-7 % of the render thread at the title,
+ * 2026-11-01.) At most ~9 MB for a 4.5 GB heap; nothing is ever emptied. */
+#define WWK_SLOTS (1u << 14)
+static struct { uint64_t chunk, stamp; uint64_t *pages; } g_wwk[WWK_SLOTS];
+static uint64_t g_ww_stamp, g_ww_floor;                  /* g_ww_floor: a stamp every page counts as having (raised when a scan found too much) */
 static int g_ww_off = -1;
 static LONG64 g_ww_clean, g_ww_dirty, g_ww_unwatched;
-static uint64_t *ww_slot(uint64_t page, int insert) {
-    for (unsigned h = (unsigned)((page * 0x9E3779B97F4A7C15ULL) >> 44);; h = (h + 1) & (WW_SLOTS - 1)) {
-        if (g_ww_tab[h].page == page) return &g_ww_tab[h].stamp;
-        if (!g_ww_tab[h].page) {
-            if (!insert) return NULL;
-            g_ww_tab[h].page = page; g_ww_used++;
-            return &g_ww_tab[h].stamp;
+static int wwk_find(uint64_t ch, int insert) {           /* the chunk's slot, or -1 */
+    for (unsigned h = (unsigned)((ch * 0x9E3779B97F4A7C15ULL) >> 50), k = 0; k < WWK_SLOTS; h = (h + 1) & (WWK_SLOTS - 1), k++) {
+        if (g_wwk[h].chunk == ch) return (int)h;
+        if (!g_wwk[h].chunk) {
+            if (!insert || !(g_wwk[h].pages = calloc(512, sizeof(uint64_t)))) return -1;
+            g_wwk[h].chunk = ch;
+            return (int)h;
         }
     }
+    return -1;
+}
+static void ww_stamp(uint64_t page, uint64_t stamp) {
+    int i = wwk_find(page >> 9, 1);
+    if (i < 0) { g_ww_floor = stamp; return; }           /* (no room: everything counts as written now) */
+    g_wwk[i].pages[page & 511] = stamp;
+    if (stamp > g_wwk[i].stamp) g_wwk[i].stamp = stamp;
+}
+/* newest: the floor; seen: the stamp the caller saw last (0: none). Above `seen`, the answer is exact. */
+static uint64_t ww_pages_newest(uint64_t first, uint64_t last, uint64_t newest, uint64_t seen) {
+    for (uint64_t ch = first >> 9; ch <= last >> 9; ch++) {
+        int i = wwk_find(ch, 0);
+        if (i < 0 || g_wwk[i].stamp <= newest) continue;
+        if (seen && g_wwk[i].stamp <= seen) { newest = g_wwk[i].stamp; continue; }
+        const uint64_t *pg = g_wwk[i].pages;
+        for (uint64_t k = ch == first >> 9 ? first & 511 : 0, hi = ch == last >> 9 ? last & 511 : 511; k <= hi; k++) if (pg[k] > newest) newest = pg[k];
+    }
+    return newest;
 }
 /* Newest write stamp of the pages of [p, p+n), or 0 when the memory is not write-watched. Never returns less than 1 otherwise. */
 static void hot_mark(void *const *pages, ULONG_PTR count, int all);
@@ -915,20 +937,18 @@ static uint64_t ww_newest(const uint8_t *p, size_t n) {
     static void *pages[16384];
     ULONG_PTR count = 16384;
     DWORD gran = 0;
-    if (g_ww_off < 0) { g_ww_off = getenv("SSBU_NO_WRITEWATCH") != NULL; g_ww_tab = calloc(WW_SLOTS, sizeof *g_ww_tab); g_ww_stamp = 1; }
+    if (g_ww_off < 0) { g_ww_off = getenv("SSBU_NO_WRITEWATCH") != NULL; g_ww_stamp = 1; }
     if (g_ww_off || !n || GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)p, n, pages, &count, &gran)) return 0;
     uint64_t first = (uint64_t)(uintptr_t)p >> 12, last = ((uint64_t)(uintptr_t)p + n - 1) >> 12, newest = g_ww_floor ? g_ww_floor : 1;
-    if (g_ww_used > WW_SLOTS / 2) { memset(g_ww_tab, 0, WW_SLOTS * sizeof *g_ww_tab); g_ww_used = 0; g_ww_floor = ++g_ww_stamp; newest = g_ww_floor; }      /* forget: everything counts as written once */
     if (count) {
         uint64_t stamp = ++g_ww_stamp;
         hot_mark(pages, count, count == 16384);
         if (count == 16384) {                      /* more written pages than the list holds: stamp the whole range */
             ResetWriteWatch((void *)p, n);
-            for (uint64_t pg = first; pg <= last; pg++) *ww_slot(pg, 1) = stamp;
-        } else for (ULONG_PTR i = 0; i < count; i++) *ww_slot((uint64_t)(uintptr_t)pages[i] >> 12, 1) = stamp;
+            for (uint64_t pg = first; pg <= last; pg++) ww_stamp(pg, stamp);
+        } else for (ULONG_PTR i = 0; i < count; i++) ww_stamp((uint64_t)(uintptr_t)pages[i] >> 12, stamp);
     }
-    for (uint64_t pg = first; pg <= last; pg++) { uint64_t *s = ww_slot(pg, 0); if (s && *s > newest) newest = *s; }
-    return newest;
+    return ww_pages_newest(first, last, newest, 0);
 }
 /* Uploads kept across batches (arena_put): a guest range streamed into the arena stays there while no page of it is
  * written. Once per batch every write-watched region is asked which pages were written (ww_scan_regions; they get a
@@ -1093,18 +1113,15 @@ static void ww_scan_apply(uint64_t seq) {           /* render thread, at the sta
                   if (wn % 900 == 0) { printf("wwwait: %.3f ms a batch on average, %lld of 900 batches over 0.5 ms%c", (double)wt / 1e4 / 900.0, (long long)wbig, 10); wt = 0; wbig = 0; } } }
     AcquireSRWLockExclusive(&g_wws_lock);
     if (g_wws_all) g_ww_floor = ++g_ww_stamp;
-    if (g_wws_n) { uint64_t stamp = ++g_ww_stamp; for (size_t i = 0; i < g_wws_n; i++) *ww_slot(g_wws_pg[i], 1) = stamp; }
+    if (g_wws_n) { uint64_t stamp = ++g_ww_stamp; for (size_t i = 0; i < g_wws_n; i++) ww_stamp(g_wws_pg[i], stamp); }
     g_wws_n = 0; g_wws_all = 0;
     ReleaseSRWLockExclusive(&g_wws_lock);
-    if (g_ww_used > WW_SLOTS / 2) { memset(g_ww_tab, 0, WW_SLOTS * sizeof *g_ww_tab); g_ww_used = 0; g_ww_floor = ++g_ww_stamp; }
 }
-static uint64_t ww_range_stamp(uint64_t addr, uint64_t size) {      /* newest stamp of the range's pages; 0 = not write-watched */
+static uint64_t ww_range_stamp(uint64_t addr, uint64_t size, uint64_t seen) {      /* newest stamp of the range's pages; 0 = not write-watched */
     int r = 0;
     while (r < g_wwr_n && !(addr >= g_wwr_base[r] && addr + size <= g_wwr_base[r] + g_wwr_size[r])) r++;
     if (r == g_wwr_n || !size) return 0;
-    uint64_t newest = g_ww_floor ? g_ww_floor : 1;
-    for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) { uint64_t *s = ww_slot(pg, 0); if (s && *s > newest) newest = *s; }
-    return newest;
+    return ww_pages_newest(addr >> 12, (addr + size - 1) >> 12, g_ww_floor ? g_ww_floor : 1, seen);
 }
 static uint32_t g_arena_gen;
 static volatile LONG64 g_emu_serial;                     /* writes of ours into guest memory (ww_note), counted (SnapSet) */
@@ -1115,9 +1132,9 @@ static void ww_note(uint64_t addr, uint64_t size) {      /* the emulator wrote g
     g_arena_gen++;
     if (size) { LONG64 v = g_emu_serial + 1; g_emu_ring[v % EMU_RING].addr = addr; g_emu_ring[v % EMU_RING].size = size; InterlockedExchange64(&g_emu_serial, v);
                 for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) g_emu_page[(pg * 0x9E3779B97F4A7C15ULL) >> 48] = v; }
-    if (!g_ww_tab || !size) return;
+    if (g_ww_off != 0 || !size) return;
     uint64_t stamp = ++g_ww_stamp;
-    for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) *ww_slot(pg, 1) = stamp;
+    for (uint64_t pg = addr >> 12, last = (addr + size - 1) >> 12; pg <= last; pg++) ww_stamp(pg, stamp);
 }
 /* Round 16 (nvn_vk_draw.c, SSBU_VK_CBKEEP): the same question for any guest range: has the CPU written a page of it since
  * the stamp the caller remembers? 0 = the memory is not write-watched. Render thread only. */
@@ -1331,7 +1348,7 @@ static GLuint twin_copy(Tex *t, uint64_t key) {   /* the GL texture copied from,
 static uint64_t tex_ww_newest(Tex *t, const uint8_t *src) {
     static int on = -1;
     if (on < 0) on = !(getenv("TOMO_TEX_WWSCAN") && getenv("TOMO_TEX_WWSCAN")[0] == '0');
-    if (on && t->ww_marked && !g_wws_sync) { uint64_t s = ww_range_stamp((uint64_t)(uintptr_t)src, t->data_size); if (s) return s; }
+    if (on && t->ww_marked && !g_wws_sync) { uint64_t s = ww_range_stamp((uint64_t)(uintptr_t)src, t->data_size, t->uploaded && !t->dirty && t->ww_hashed ? t->ww_seen : 0); if (s) return s; }
     uint64_t r = ww_newest(src, t->data_size);
     if (on && r && !g_wws_sync && !t->b.packaged) { ww_chunk_mark((uint64_t)(uintptr_t)src, t->data_size); t->ww_marked = 1; }
     return r;
@@ -1453,10 +1470,17 @@ static TexObj *tex_view_obj(Tex *t, const View *v) {
             while (glGetError()) {}
         }
     }
-    while (glGetError()) {}
+    /* Whether the driver takes a view of this kind is asked once (glGetError waits for NVIDIA's own GL thread: views made
+     * while the title runs were 2 % of the render thread, 2026-11-01); a kind it took before is not asked again. */
+    static uint64_t vok[1024];
+    uint64_t vkey = ((uint64_t)t->b.format << 40 | (uint64_t)e.format << 24 | (uint64_t)e.target << 16 | (uint64_t)t->b.target << 8 | (t->b.samples > 1)) + 1;
+    unsigned vi = (unsigned)((vkey * 0x9E3779B97F4A7C15ULL) >> 54);
+    int known = vok[vi] == vkey;
+    if (!known) while (glGetError()) {}
     glGenTextures(1, &n->o.gl);
     glTextureView(n->o.gl, tg, t->o.gl, f.internal, (GLuint)e.lvl0, (GLuint)e.nlvl, (GLuint)e.lay0, (GLuint)e.nlay);
-    GLenum err = glGetError();
+    GLenum err = known ? 0 : glGetError();
+    if (!err) vok[vi] = vkey;
     if (err) {
         logf_limited(&nlog, 30, "nvn_gl: view (target %d format 0x%x levels %d+%d layers %d+%d) of texture (target %d format 0x%x %dx%d) refused: GL error 0x%x\n",
                      e.target, e.format, e.lvl0, e.nlvl, e.lay0, e.nlay, t->b.target, t->b.format, t->b.width, t->b.height, err);
@@ -2198,7 +2222,7 @@ static size_t arena_put_slow(uint64_t addr, uint64_t size) {
     }
     static int keep = -1; if (keep < 0) keep = !(getenv("TOMO_ARENA_KEEP") && getenv("TOMO_ARENA_KEEP")[0] == '0');
     unsigned h = (unsigned)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 2654435761u) >> 19, pick = 8192;
-    uint64_t now = keep ? ww_range_stamp(addr, size) : 0;
+    uint64_t now = keep ? ww_range_stamp(addr, size, 0) : 0;
     if (now) ww_chunk_mark(addr, size);             /* its pages are asked for at every batch from now on (ww_scan_regions) */
     for (int probe = 0; probe < 8; probe++) {
         unsigned i = (h + (unsigned)probe) & 8191;
@@ -4652,8 +4676,14 @@ static CBuf *cbuf_get(uint64_t addr, uint64_t size);
  * used to go back to guest memory first (compute_flush: a wait for the GPU) and be streamed in again; some island scenes
  * did that 11 times a frame (3.7-4.3 ms of the render thread waiting, 2026-10-31). TOMO_VB_DIRECT=0: as before. */
 static int vb_direct_on(void) { static int on = -1; if (on < 0) on = !(getenv("TOMO_VB_DIRECT") && getenv("TOMO_VB_DIRECT")[0] == '0'); return on; }
+/* (Asked for every vertex stream of every draw while one is live: 5 % of the render thread at the title. The span of the live
+ * ones and the highest slot used answer most of them at once.) */
+static uint64_t g_cbuf_lo = ~0ull, g_cbuf_hi;
+static int g_cbuf_top;
+static void cbuf_none(void) { g_cbuf_live = 0; g_cbuf_lo = ~0ull; g_cbuf_hi = 0; g_cbuf_top = 0; }
 static CBuf *cbuf_holding(uint64_t addr, uint64_t size) {
-    for (int k = 0; k < 64; k++) if (g_cbuf[k].live && addr >= g_cbuf[k].addr && addr + size <= g_cbuf[k].addr + g_cbuf[k].size) return &g_cbuf[k];
+    if (addr < g_cbuf_lo || addr + size > g_cbuf_hi) return NULL;
+    for (int k = 0; k < g_cbuf_top; k++) if (g_cbuf[k].live && addr >= g_cbuf[k].addr && addr + size <= g_cbuf[k].addr + g_cbuf[k].size) return &g_cbuf[k];
     return NULL;
 }
 static int g_dbg_noscissor, g_dbg_skipdraw = -1, g_frame_draw_index;
@@ -5237,11 +5267,13 @@ static struct { int serial; LONG64 calls, run, groups; } g_chist[64];
  * command that reads guest memory (a draw, a copy, the end of the batch): compute_flush() then copies the written ones back to
  * guest memory, once, however many dispatches wrote into them (a fighter's meshes are skinned by ~10 dispatches into one buffer). */
 static CBuf *cbuf_find(uint64_t addr, uint64_t size) {
-    for (int k = 0; k < 64; k++) if (g_cbuf[k].live && g_cbuf[k].addr == addr && g_cbuf[k].size == size) return &g_cbuf[k];
+    if (addr < g_cbuf_lo || addr + size > g_cbuf_hi) return NULL;
+    for (int k = 0; k < g_cbuf_top; k++) if (g_cbuf[k].live && g_cbuf[k].addr == addr && g_cbuf[k].size == size) return &g_cbuf[k];
     return NULL;
 }
 static int cbuf_conflict(uint64_t addr, uint64_t size) {      /* overlaps a buffer held in GL without being that buffer */
-    for (int k = 0; k < 64; k++)
+    if (addr >= g_cbuf_hi || addr + size <= g_cbuf_lo) return 0;
+    for (int k = 0; k < g_cbuf_top; k++)
         if (g_cbuf[k].live && addr < g_cbuf[k].addr + g_cbuf[k].size && g_cbuf[k].addr < addr + size && !(g_cbuf[k].addr == addr && g_cbuf[k].size == size)) return 1;
     return 0;
 }
@@ -5266,7 +5298,7 @@ static void compute_flush_at(int line) {
         }
         b->live = b->dirty = 0;
     }
-    g_cbuf_live = 0;
+    cbuf_none();
     if (any && g_listlog_dbg) { int k = 0; while (k < 31 && g_cfl_site[k].line && g_cfl_site[k].line != line) k++; g_cfl_site[k].line = line; g_cfl_site[k].n++; }
     nvn_front_ccmp_landed();
     if (any) g_arena_gen++;                      /* guest memory changed: later draws must stream it again */
@@ -5311,7 +5343,7 @@ static void compute_flush_async(void) {
         { HS_IN("batch end: compute results: glFlush", 0); glFlush(); HS_OUT(); }
     }
     if (rest) { HS_IN("batch end: compute results read back at once (no staging)", 0); compute_flush(); HS_OUT(); }      /* what found no staging memory (lands the pending ones first) */
-    else { g_cbuf_live = 0; nvn_front_ccmp_landed(); }
+    else { cbuf_none(); nvn_front_ccmp_landed(); }
 }
 static CBuf *cbuf_get(uint64_t addr, uint64_t size) {
     CBuf *b = cbuf_find(addr, size);
@@ -5324,6 +5356,9 @@ static CBuf *cbuf_get(uint64_t addr, uint64_t size) {
     b->snap = realloc(b->snap, (size_t)size); if (b->snap) memcpy(b->snap, P(addr), (size_t)size);
     b->addr = addr; b->size = size; b->live = 1; b->dirty = 0; b->frag = 0;
     g_cbuf_live++;
+    if (addr < g_cbuf_lo) g_cbuf_lo = addr;
+    if (addr + size > g_cbuf_hi) g_cbuf_hi = addr + size;
+    if ((int)(b - g_cbuf) >= g_cbuf_top) g_cbuf_top = (int)(b - g_cbuf) + 1;
     return b;
 }
 static int crange_hit(uint64_t addr, uint64_t size) {

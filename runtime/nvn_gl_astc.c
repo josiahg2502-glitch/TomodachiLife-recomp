@@ -79,7 +79,7 @@ static void ga_time_flush(void) {
 static void ga_flush(void) {
     if (!g_gq_n) return;
     HS_IN("ASTC decode of the queued levels (dispatch, uploads)", 0);
-    while (glGetError()) {}
+    GL_ERR_CLEAR_SOFT();                           /* (glGetError waits for NVIDIA's own GL thread: 0.7 % of the render thread at the title) */
     if (!g_ga_stage) glCreateBuffers(1, &g_ga_stage);
     glNamedBufferData(g_ga.ssbo, (ptrdiff_t)g_gq_n * 48, g_gq_lv, 0x88E0 /* STREAM_DRAW */);
     glNamedBufferData(g_ga_stage, (ptrdiff_t)(g_gq_texels * 4), NULL, 0x88E6 /* STREAM_COPY */);
@@ -126,7 +126,7 @@ static void ga_flush(void) {
         }
         free(cpu); free(gpu);
     }
-    GLenum err = glGetError();
+    GLenum err = GL_ERR_SOFT();
     if (err) { static int nlog; logf_limited(&nlog, 5, "nvn_gl: GPU ASTC decode of %d levels failed with GL error 0x%x\n", g_gq_n, (unsigned)err); }
     g_ga.dispatches++; g_ga.barriers++;
     g_gq_n = 0; g_gq_groups = 0; g_gq_texels = 0;
