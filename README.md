@@ -1,10 +1,10 @@
-# Tomodachi Life: Living the Dream, native PC port (beta)
+# Tomodachi Life: Living the Dream, native PC port
 
 A static recompilation of *Tomodachi Life: Living the Dream* (Nintendo Switch) into a native Windows program. The game's
 own code is translated to C and compiled for your PC: no emulator runs underneath.
 
-**This is a beta (0.1.0-beta).** You can play it from start to finish as far as we know, but expect rough edges: see
-[Known issues](#known-issues).
+**Version 1.0.0.** You can play it from start to finish as far as we know; see [Known issues](#known-issues) for what is
+still open.
 
 **Nothing of the game is in this repository or in the release downloads.** You build it on your own PC from your own copy
 of the game, dumped from your own Switch, with your own console keys. Not affiliated with or endorsed by Nintendo.
@@ -20,7 +20,7 @@ of the game, dumped from your own Switch, with your own console keys. Not affili
 ## What you need
 
 - Windows 10 or 11, 64-bit; about 15 GB free on the drive you install to; 8 GB of RAM or more (16 GB recommended).
-- A GPU with OpenGL 4.5.
+- A GPU with OpenGL 4.5. Developed and tested on NVIDIA (RTX 3060); AMD and Intel GPUs run it but are less tested.
 - Your game files, dumped from your Switch:
   - **the base game** (`.nsp`, `.nsz` or `.xci`; title id `010051F0207B2000`), and optionally
   - **the update 1.0.4** (`.nsp` or `.nsz`; `010051F0207B2800`, version `v262144`). Without it you get version 1.0.0.
@@ -39,21 +39,25 @@ Both 1.0.0 and 1.0.4 run. Other updates are not supported yet.
 3. The window looks for your game files and keys (Downloads, Desktop, Documents and emulator folders). Check what it
    found, choose anything it missed, then press **Install**. A dump you already made (a folder with `exefs\` and
    `romfs\` inside) works too: the base game row's **Folder...** button; no keys are needed then.
-4. Wait. The first install takes about 30 minutes to an hour: it unpacks your game, translates its code and compiles it.
-   You can stop it and press **Resume** later; finished steps are not repeated.
+4. Wait. The first install takes about 45 minutes to an hour and a half: it unpacks your game, translates its code,
+   compiles it, and at the end compiles every shader of the game for your graphics card (10-30 minutes of that, with
+   progress lines). You can stop it and press **Resume** later; finished steps are not repeated.
 5. Start the game with the **Tomodachi Life** shortcut on your desktop, or `Play Tomodachi Life.bat`.
 
 The installer downloads only what it needs, each file checked against a fixed SHA-256: Python 3.13 (python.org), LLVM/clang
 9 (the official build, repackaged as a zip), the prebuilt runtime of this release (our own code only), libopus and FFmpeg.
 
-The **first start** prepares every shader of the game ("preparing shaders"): a few minutes, once. Later starts take seconds.
+The shaders are ready when the installer finishes, so the game starts in seconds. After a graphics driver update, or
+when you change the widescreen or resolution-scale setting, the game prepares them once more at its start: the loading
+screen then shows "preparing shaders (once)" with a count, the time spent and the time left.
 
 ## The launcher
 
 - **PLAY** starts the game.
 - **GAME** shows the game version (1.0.0 or 1.0.4) and lets you choose another game folder.
-- **SETTINGS**: window or full screen, resolution (up to 4K and above), widescreen (fits the monitor by default, ultrawide
-  too), frame rate (60 fps by default), vsync, volume, language, Local Play online (saved in `build\config\graphics.ini`).
+- **SETTINGS**: window or full screen, resolution (up to 4K and above), widescreen (*Off*, 16:9, by default; *Fit the
+  screen* for ultrawide monitors up to 21:9: the 3D view widens, menus keep their 16:9 shape in the middle), frame rate
+  (60 fps by default), vsync, volume, language, Local Play online (saved in `build\config\graphics.ini`).
 - **SAVE DATA**: back up and restore your save, or import a save dumped from your Switch (`Map.sav`, `Mii.sav`, `Player.sav`).
 - **CONTROLS**: the controller it sees and the keyboard keys (`build\config\controllers.ini`).
 
@@ -115,6 +119,9 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 
 ## Known issues
 
+- Very large islands (30+ residents) run slowly on some PCs; we are working on it (issues #7, #18).
+- Now and then a Mii's line shows without its voice (seen once in Mii News); the session log now records every line and
+  voice, so please send `build\work\play_*.log` with the time it happened.
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and
   send `build\work\play_*.log` of that session.
 - Local Play over the internet worked on a simulated link (lag and lost packets) but not yet between two real home routers;

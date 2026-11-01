@@ -191,7 +191,8 @@ const std::vector<Option>& options() {
         {"DISPLAY", "window", "windowed", {{"windowed", "Window"}, {"borderless", "Borderless"}, {"fullscreen", "Fullscreen"}}},
         {"WINDOW SIZE", "size", "1280x720", {{"1280x720", "1280 x 720"}, {"1600x900", "1600 x 900"}, {"1920x1080", "1920 x 1080"}, {"2560x1440", "2560 x 1440"}, {"3840x2160", "3840 x 2160"}}},
         {"RESOLUTION", "resolution_scale", "1.0", {{"1.0", "1080p"}, {"1.5", "1620p"}, {"2.0", "4K"}, {"3.0", "3240p"}}},
-        {"WIDESCREEN", "widescreen", "auto", {{"auto", "Fit the monitor"}, {"off", "Off (16:9)"}, {"21:9", "21:9"}, {"32:9", "32:9"}}},
+        // as the game's PC Settings (menu.cpp) since 2026-11-01: 16:9 by default, no fixed 21:9 / 32:9 (the game reads them as 16:9)
+        {"WIDESCREEN", "widescreen", "off", {{"off", "Off (16:9)"}, {"auto", "Fit the screen (up to 21:9)"}}},
         {"FRAME RATE", "frame_rate", "60", {{"60", "60 fps (drops to 30 when needed)"}, {"30", "30 fps (as on the console)"}}},
         {"VSYNC", "vsync", "auto", {{"auto", "Automatic"}, {"display", "Follow the display"}, {"clock", "Own 60 Hz clock"}, {"off", "Off"}}},
         {"VOLUME", "volume", "auto", {{"auto", "System"}, {"0", "0 %"}, {"10", "10 %"}, {"20", "20 %"}, {"30", "30 %"}, {"40", "40 %"}, {"50", "50 %"}, {"60", "60 %"}, {"70", "70 %"}, {"80", "80 %"}, {"90", "90 %"}, {"100", "100 %"}}},
