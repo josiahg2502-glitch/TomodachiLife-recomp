@@ -4711,13 +4711,14 @@ static void drawsig_note(void) {
         h = fnv(h, t ? (uint32_t)t->b.width << 16 ^ (uint32_t)t->b.height ^ (uint32_t)t->b.format << 24 : 0xffffffffu);
         h = fnv(h, S.gl_tex[1][4 + u] == g_dummy_handle);
     }
-    if (g_dsig_n == g_dsig_cap) { g_dsig_cap = g_dsig_cap ? g_dsig_cap * 2 : 4096; g_dsig = realloc(g_dsig, sizeof *g_dsig * (size_t)g_dsig_cap); }
+    if (g_dsig_n + 1 >= g_dsig_cap) { g_dsig_cap = g_dsig_cap ? g_dsig_cap * 2 : 4096; g_dsig = realloc(g_dsig, sizeof *g_dsig * (size_t)g_dsig_cap); }
     g_dsig[g_dsig_n++] = h;
+    g_dsig[g_dsig_n++] = (uint32_t)S.fbo_w << 16 | (uint32_t)S.fbo_h;      /* (printed with it: the target's size) */
 }
 static void drawsig_frame(long long frame) {             /* job_present */
     if (g_dsig_lo < 0 || !g_dsig_n) { g_dsig_n = 0; return; }
-    printf("drawsig %lld %d:", frame, g_dsig_n);
-    for (int i = 0; i < g_dsig_n; i++) printf(" %08x", g_dsig[i]);
+    printf("drawsig %lld %d:", frame, g_dsig_n / 2);
+    for (int i = 0; i + 1 < g_dsig_n; i += 2) printf(" %08x@%ux%u", g_dsig[i], g_dsig[i + 1] >> 16, g_dsig[i + 1] & 0xffff);
     printf("\n");
     g_dsig_n = 0;
 }
@@ -7553,6 +7554,87 @@ static void job_present(void *arg) {
                         if (left > 0) { char path[64]; snprintf(path, sizeof path, "flick_%lld.bmp", (long long)frame); save_bmp(path, t); left--; }
                     }
                     if (seen % 600 == 0) printf("flicker: %lld of %lld frames flickered\n", (long long)flick, (long long)seen);
+                }
+            }
+        }
+        {   /* FLICKER RECORDER (2026-11-01; TOMO_FLICKER_LOG=0: off). The user sees Miis and backgrounds flicker for a frame now and
+             * then; neither their recording nor the test scenes caught one. Every presented picture goes into a 480x270 copy read
+             * back 3 frames late through a mapped buffer (no wait). A frame that differs from the one before and the one after in
+             * 4 or more of 48x27 cells of a picture that otherwise stands still (the frames around it agree on 85 % of them: no
+             * camera move, no transition; a close Mii's blink changes 2-3) is saved with its neighbours as flicker_log\f<frame>.bmp (before | flicker | after), 60 a run. */
+            static int on = -1, k, have, saved;
+            static GLuint fbx[2], ttex, pb;
+            static uint8_t *pm, *img[3];
+            static void *fs[4];
+            static long long ff[4], fimg[3], last_hit = -100;
+            if (on < 0) { const char *e = getenv("TOMO_FLICKER_LOG"); on = !(e && e[0] == '0') && gl_has(glNamedBufferStorage, "glNamedBufferStorage") && gl_has(glMapNamedBufferRange, "glMapNamedBufferRange"); }
+            if (on && t && t->o.gl && t->b.width > 0 && t->b.height > 0 && frame > 300) {
+                enum { FW = 480, FH = 270, FB = FW * FH * 4, CW = 48, CH = 27 };
+                if (!pb) {
+                    glGenFramebuffers(2, fbx); glGenTextures(1, &ttex);
+                    glBindTexture(GL_TEXTURE_2D, ttex); glTexStorage2D(GL_TEXTURE_2D, 1, 0x8058 /* RGBA8 */, FW, FH);
+                    glCreateBuffers(1, &pb); glNamedBufferStorage(pb, 4 * FB, NULL, 0x1 | 0x40 | 0x80 /* READ | PERSISTENT | COHERENT */);
+                    pm = glMapNamedBufferRange(pb, 0, 4 * FB, 0x1 | 0x40 | 0x80);
+                    for (int i = 0; i < 3; i++) img[i] = malloc(FB);
+                    if (!pm || !img[0] || !img[1] || !img[2]) on = 0;
+                }
+                if (on) {
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER_, fbx[0]); glFramebufferTexture(GL_READ_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, t->o.gl, 0);
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, fbx[1]); glFramebufferTexture(GL_DRAW_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, ttex, 0);
+                    glDisable(GL_SCISSOR_TEST);
+                    glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], 0, 0, FW, FH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER_, fbx[1]);
+                    glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, pb); glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    glReadPixels(0, 0, FW, FH, 0x1908 /* RGBA */, GL_UNSIGNED_BYTE, (void *)(uintptr_t)((size_t)k * FB));
+                    glBindBuffer(0x88EB, 0);
+                    glEnable(GL_SCISSOR_TEST);
+                    glBindFramebuffer(GL_FRAMEBUFFER_, S.have_fbo ? S.fbo : 0);
+                    if (fs[k]) glDeleteSync(fs[k]);
+                    fs[k] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0); ff[k] = frame;
+                    k = (k + 1) & 3;                           /* the oldest of the four: 3 frames ago */
+                    GLenum r = fs[k] ? glClientWaitSync(fs[k], 0, 0) : 0;
+                    if (r == 0x911A || r == 0x911C) {          /* ALREADY_SIGNALED / CONDITION_SATISFIED */
+                        uint8_t *o = img[0]; img[0] = img[1]; img[1] = img[2]; img[2] = o;
+                        fimg[0] = fimg[1]; fimg[1] = fimg[2]; fimg[2] = ff[k];
+                        memcpy(img[2], pm + (size_t)k * FB, FB);
+                        if (++have >= 3 && fimg[1] == fimg[0] + 1 && fimg[2] == fimg[1] + 1) {
+                            static uint8_t cl[3][CW * CH];
+                            for (int i = 0; i < 3; i++)       /* each cell's mean luminance, every other pixel of its 10x10 */
+                                for (int cy = 0; cy < CH; cy++) for (int cx = 0; cx < CW; cx++) {
+                                    unsigned s = 0;
+                                    for (int y = 0; y < 10; y += 2) for (int x = 0; x < 10; x += 2) { const uint8_t *q = img[i] + ((size_t)(cy * 10 + y) * FW + cx * 10 + x) * 4; s += (q[0] * 2u + q[1] * 5u + q[2]) / 8u; }
+                                    cl[i][cy * CW + cx] = (uint8_t)(s / 25);
+                                }
+                            int still = 0, hit = 0, x0 = CW, y0 = CH, x1 = -1, y1 = -1;
+                            for (int c = 0; c < CW * CH; c++) {
+                                int a = cl[0][c], b = cl[1][c], d = cl[2][c];
+                                if (abs(a - d) < 4) { still++; if (abs(b - a) > 20 && abs(b - d) > 20) { hit++; if (c % CW < x0) x0 = c % CW; if (c % CW > x1) x1 = c % CW; if (c / CW < y0) y0 = c / CW; if (c / CW > y1) y1 = c / CW; } }
+                            }
+                            if (hit >= 4 && still >= CW * CH * 85 / 100 && hit <= CW * CH * 40 / 100 && fimg[1] - last_hit > 10 && saved < 60) {
+                                char path[64];
+                                last_hit = fimg[1]; saved++;
+                                CreateDirectoryA("flicker_log", NULL);
+                                snprintf(path, sizeof path, "flicker_log/f%lld.bmp", fimg[1]);
+                                FILE *fp = fopen(path, "wb");
+                                if (fp) {             /* a 24-bit BMP (bottom row first; the picture's rows come top first) */
+                                    uint8_t head[54] = {'B', 'M'};
+                                    uint32_t row = 3 * FW * 3, size = 54 + row * FH, v;
+                                    memcpy(head + 2, &size, 4); v = 54; memcpy(head + 10, &v, 4); v = 40; memcpy(head + 14, &v, 4);
+                                    v = 3 * FW; memcpy(head + 18, &v, 4); v = FH; memcpy(head + 22, &v, 4); head[26] = 1; head[28] = 24;
+                                    fwrite(head, 1, 54, fp);
+                                    uint8_t *line = malloc(row);
+                                    for (int y = FH - 1; line && y >= 0; y--) {
+                                        for (int i = 0; i < 3; i++) for (int x = 0; x < FW; x++) { const uint8_t *q = img[i] + ((size_t)y * FW + x) * 4; uint8_t *o2 = line + ((size_t)i * FW + x) * 3; o2[0] = q[2]; o2[1] = q[1]; o2[2] = q[0]; }
+                                        fwrite(line, 1, row, fp);
+                                    }
+                                    free(line);
+                                    fclose(fp);
+                                }
+                                printf("flicker log: frame %lld saved as %s (%d of %d cells changed for one frame, x %d..%d y %d..%d of 48x27)%c", fimg[1], path, hit, CW * CH, x0, x1, y0, y1, 10);
+                                fflush(stdout);
+                            }
+                        }
+                    }
                 }
             }
         }
