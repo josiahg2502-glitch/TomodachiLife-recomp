@@ -1724,9 +1724,14 @@ int mx_translate(const MxIn *in, MxOut *out) {
             for (unsigned n = 0; n < 32; n++)
                 if (e->in_attr >> n & 1) emit(&h, "layout(location = %u) in %s in_attr%u;\n", n, n < 16 && (in->int_attrs >> (16 + n) & 1) ? "uvec4" : n < 16 && (in->int_attrs >> n & 1) ? (in->sint_attrs >> n & 1 ? "ivec4" : "uvec4") : "vec4", n);
             for (unsigned n = 0; n < 32; n++) if (e->out_attr >> n & 1) emit(&h, "layout(location = %u) out vec4 out_attr%u;\n", n, n);
-            if (!vk && in->wide == 2)   /* 2D only (w = 1 give or take rounding); a full-screen quad keeps the width when mx_wide < 0 */
+            if (!vk && in->wide == 2)   /* 2D only (w = 1 give or take rounding); a full-screen quad keeps the width when mx_wide < 0.
+                                         * mx_wfill > 0 (nvn_gl.c: a menu fill on a widened target, the layout camera widened by
+                                         * tomo.c): a corner at or past the 16:9 edge (|x / w| >= mx_wfill = 1 / k) goes to the
+                                         * window's edge, so dims, fades and captured backdrops cover the sides too */
                 emit(&h, "layout(location = 2) uniform float mx_wide = 1.0;\n"
+                         "layout(location = 3) uniform float mx_wfill = 0.0;\n"
                          "void mx_wide_fix() { float x = gl_Position.x, w = gl_Position.w, q = abs(mx_wide);\n"
+                         "  if (mx_wfill > 0.0 && abs(w - 1.0) > 1e-4 && w > 0.0 && abs(x) >= (mx_wfill - 1e-3) * w) { gl_Position.x = sign(x) * w; return; }\n"
                          "  if (q == 1.0 || abs(w - 1.0) > 1e-4) return;\n"
                          "  if (mx_wide < 0.0 && (abs(abs(x / w) - 1.0) < 1e-4 || abs(abs(x / w) - 3.0) < 1e-4)) return;\n"
                          "  gl_Position.x = x * q; }\n");

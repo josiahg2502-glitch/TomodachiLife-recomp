@@ -4562,6 +4562,20 @@ static void apply_sc(int i) {
     int x0 = (int)floorf((float)v[0] * S.prs + 0.5f), y0 = (int)floorf((float)v[1] * S.prsy + 0.5f);
     glScissorIndexed((GLuint)i, x0, y0, (int)floorf((float)(v[0] + v[2]) * S.prs + 0.5f) - x0, (int)floorf((float)(v[1] + v[3]) * S.prsy + 0.5f) - y0);
 }
+static int g_wsc;                                     /* scissor 0 is cut to the 16:9 part for a menu draw (wide_menu_scissor) */
+static void wide_menu_scissor(int clip) {             /* widescreen: a menu's art stays inside the 16:9 part of a widened target */
+    Tex *t = S.color0;
+    if (!clip || !t || !t->rw) { if (g_wsc) { g_wsc = 0; apply_sc(0); } return; }
+    const int *v = S.gsc[0];
+    int w16 = (int)floorf((float)t->rw / wide_k() + 0.5f), c0 = (t->rw - w16) / 2, x0, y0, x1, y1;
+    if (!S.prs || v[2] >= 16384) { x0 = v[0]; y0 = v[1]; x1 = v[0] + v[2]; y1 = v[1] + v[3]; }
+    else { x0 = (int)floorf((float)v[0] * S.prs + 0.5f); y0 = (int)floorf((float)v[1] * S.prsy + 0.5f); x1 = (int)floorf((float)(v[0] + v[2]) * S.prs + 0.5f); y1 = (int)floorf((float)(v[1] + v[3]) * S.prsy + 0.5f); }
+    if (x0 < c0) x0 = c0;
+    if (x1 > c0 + w16) x1 = c0 + w16;
+    if (x1 < x0) x1 = x0;
+    glScissorIndexed(0, x0, y0, x1 - x0, y1 - y0);
+    g_wsc = 1;
+}
 static void rs_pass(Tex *t) {                         /* the scale of the targets now bound (their first): viewports and scissors follow */
     float s = t && t->rw ? (float)t->rw / (float)t->b.width : 0.0f, sy = t && t->rh ? (float)t->rh / (float)t->b.height : 0.0f;
     if (s == S.prs && sy == S.prsy) return;
@@ -4952,7 +4966,8 @@ static int draw_prepare(void) {
         }
         if (wide_k() != 1.0f) {     /* widescreen: the vertex stage's clip-space x shrinks by 1/k on a widened target, else 1 */
             static int nosq = -1; if (nosq < 0) nosq = getenv("TOMO_WIDE_NOSQUEEZE") != NULL;      /* TEST ONLY: the picture stretched instead */
-            float q = S.prs && S.prsy && !nosq ? S.prsy / S.prs : 1.0f;
+            float q = S.prs && S.prsy && !nosq ? S.prsy / S.prs : 1.0f, fill = 0.0f;
+            int clip = 0;
             if (q != 1.0f && g_wide_camera && !depth_only) {     /* a full-screen 2D quad keeps the width only to read a widened texture or to fill with
                                                                   * no texture (fades); 2D art keeps its 16:9 shape (no stretching) */
                 int screen = 1;
@@ -4963,8 +4978,15 @@ static int draw_prepare(void) {
                     if (screen) break;
                 }
                 if (screen) q = -q;
+                /* A menu draw (no depth target) on the widened screen: its art is cut at the 16:9 edges, as the console's screen
+                 * edge cuts it (21:9, 2026-11-01: the next page's resident sat beside the residents list, panels that wait just
+                 * off screen showed at the sides); a fill or a captured backdrop reaching the edge covers the sides instead. */
+                static int menu = -1; if (menu < 0) menu = !(getenv("TOMO_WIDE_MENU") && getenv("TOMO_WIDE_MENU")[0] == '0');
+                if (menu && !S.depth_tex) { if (screen) fill = fabsf(q); else clip = 1; }
+                glProgramUniform1f(pair ? pair : S.prog[0]->st[0].glsl, 3, fill);
             }
             glProgramUniform1f(pair ? pair : S.prog[0]->st[0].glsl, 2, q);
+            wide_menu_scissor(clip);
         }      /* resolution scale: game pixels per real one */
         for (int s = 0; s < (depth_only ? 1 : 2); s++) {
             Stage *st = &S.prog[s]->st[s];
