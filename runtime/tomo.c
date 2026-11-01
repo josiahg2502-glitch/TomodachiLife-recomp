@@ -4,6 +4,8 @@
  * "not available". Registered after the C runtime (boot.c), so only names nobody else implements are bound here. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <time.h>
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
@@ -424,7 +426,22 @@ static void audio_work_size(Ctx *c) { RET(0x100000); }
  * A SILENT renderer: no mixing; a playing voice consumes its wave buffers at its sample rate (240 samples a frame at
  * 48 kHz) so the game's streaming and sound-state logic run as on the console. */
 typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, seen; float frac; int32_t af; int16_t yn1, yn2, abuf[14];
-                 int bq_on[2]; double bq[2][6][4]; int heard, starve; } SilentVoice;      /* the voice's two biquad filters: on last update, state per channel */
+                 int bq_on[2]; double bq[2][6][4]; int heard, starve;      /* the voice's two biquad filters: on last update, state per channel */
+                 int speech, dry, gaps, filt; uint32_t clock, rate; uint64_t from; float vpeak, gpeak; double e_in, e_out; } SilentVoice;      /* (speech log) */
+/* Speech log (on in every build, 2026-11-01: the user heard a line "getting missed and another being really quiet"): one
+ * line per 16-bit voice (the Mii speech the game synthesizes) when it ends: the local time it began, how long it played,
+ * its highest volume and total gain, and how often it ran dry and was fed again mid-line. A muted line (volume 0: the game's
+ * own choice for far chats) is marked. TOMO_SPEECHLOG=0: off. */
+static void speech_end(SilentVoice *s, uint32_t id) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("TOMO_SPEECHLOG") && getenv("TOMO_SPEECHLOG")[0] == '0');
+    if (on && s->speech && s->played)
+        printf("speech: %02u:%02u:%02u voice %u, %.2f s played, volume %.2f, gain %.2f%s, %d gap%s mid-line, level %.0f dBFS%s %.1f dB\n", s->clock / 3600, s->clock / 60 % 60, s->clock % 60,
+               id, (double)s->played / (double)(s->rate ? s->rate : 48000), s->vpeak, s->gpeak, s->vpeak == 0.0f ? " (muted)" : s->gpeak < 0.15f ? " (quiet)" : "", s->gaps, s->gaps == 1 ? "" : "s",
+               s->e_in > 0 ? 10.0 * log10(s->e_in / (double)(s->played ? s->played : 1) / (32768.0 * 32768.0)) : -99.0, s->filt ? ", filters" : ", no filter",
+               s->e_in > 0 && s->e_out > 0 ? 10.0 * log10(s->e_out / s->e_in) : 0.0);
+    s->speech = 0;
+}
 static SilentVoice g_sv[1024];
 static int g_bq_off = -1;                                /* TOMO_AUDIO_BQ=0: the voices' biquad filters are not applied (A/B) */
 static unsigned long long g_bq_voices;                   /* voice updates with a filter on (TOMO_AUDIOLOG) */
@@ -972,6 +989,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
         uint32_t count = rev >= 15 ? rd32(v + 0x54) : rd32(v + 0x3c), index = rev >= 15 ? rd32(v + 0x58) : rd16(v + 0x40);
         uint64_t wb = v + (rev >= 15 ? 0x78 : 0x60);
         SilentVoice *s = &g_sv[id < 1024 ? id : 0];
+        if (s->speech && (is_new || !in_use)) speech_end(s, id);
         if (is_new || !s->seen) { memset(s, 0, sizeof *s); s->seen = 1; s->last_index = index; s->af = -1; }
         {   static int nl = -1; if (nl < 0) nl = getenv("TOMO_AUDIOLOG") && atoi(getenv("TOMO_AUDIOLOG")) >= 4;     /* TEST: every new 16-bit voice (speech), audible or not */
             if (nl && is_new && in_use && rd8(v + 0xb) == 2) printf("audio-voice NEW: update %llu voice %u rate %u vol %.3f play %u\n", (unsigned long long)g_audio_updates, id, rate, rdf(v + 0x20), play); }
@@ -1061,6 +1079,17 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 }
             }
             if (vol > 0.0f && play == 0) { if (routed) g_routed++; else g_direct++; }
+            if (fmt == 2) {                               /* speech log: this voice's peaks and mid-line gaps */
+                if (!s->speech) {
+                    time_t now = time(NULL); struct tm *lt = localtime(&now);
+                    s->speech = 1; s->from = g_audio_updates; s->rate = rate; s->clock = lt ? (uint32_t)(lt->tm_hour * 3600 + lt->tm_min * 60 + lt->tm_sec) : 0;
+                }
+                float sum = 0; for (uint32_t ch = 0; ch < cc && ch < 6; ch++) { if (routed) for (int t = 0; t < tn[ch]; t++) sum += tg[ch][t]; else sum += gl[ch] + gr[ch]; }
+                if (vol > s->vpeak) s->vpeak = vol;
+                if (sum > s->gpeak) s->gpeak = sum;
+                if (bqn) s->filt = 1;
+                if (!avail) s->dry = 1; else if (s->dry) { s->dry = 0; if (s->played) s->gaps++; }
+            }
             int mix = mixing && ((fmt >= 1 && fmt <= 5) || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f);   /* (only 16-bit and ADPCM were mixed: other voices were silent) */
             if (mixing && fmt == 6 && coef <= 0x10000) {       /* an ADPCM voice without coefficients where they were looked for: the layout */
                 static int said_v;
@@ -1101,6 +1130,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             nxt = (idx + 1) % 14 ? s->abuf[(idx + 1) % 14] : (int32_t)(idx + 1) < end ? adpcm_peek(s, data, f + 1, coef) : smp;
                         }
                         float val = (float)smp + (float)(nxt - smp) * s->frac;
+                        if (fmt == 2 && ch == 0) s->e_in += (double)val * val;      /* (speech log: the line's level, and what its filters take) */
                         for (int q = 0; q < bqn && ch < 6; q++) {
                             int j = bqi[q]; double *st = s->bq[j][ch];
                             double y = val * bqb[j][0] + st[0] * bqb[j][1] + st[1] * bqb[j][2] + st[2] * bqa[j][0] + st[3] * bqa[j][1];
@@ -1108,6 +1138,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             st[1] = st[0]; st[0] = val; st[3] = st[2]; st[2] = y;
                             val = (float)y;
                         }
+                        if (fmt == 2 && ch == 0) s->e_out += (double)val * val;
                         if (routed) { if (ch < 6) for (int t = 0; t < tn[ch]; t++) tb[ch][t][o] += val * tg[ch][t]; }
                         else { g_mix[o][0] += val * gl[ch]; g_mix[o][1] += val * gr[ch]; }
                     }
