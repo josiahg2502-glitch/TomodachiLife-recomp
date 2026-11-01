@@ -4671,7 +4671,21 @@ static int drawlog_now(void) {
 }
 static GLuint g_dbg_query;
 static struct { GLuint q; int active; uint64_t acc; } g_counter[17];
-static struct { uint64_t addr; long long frame; } g_tsrep[256];      /* TIMESTAMP_TOP reports: where, in which frame (OP_RENDER_ENABLE) */
+/* TIMESTAMP_TOP reports of this frame, by address (OP_RENDER_ENABLE: a target cleared once a frame). Until 2026-11-01 a
+ * 256-entry table on address bits 5..12: slots 8 KB apart (the game keeps two such slot arrays) took each other's entry, a
+ * re-test of the lost one cleared its target a second time after the Mii was drawn into it, and the whole Mii was missing
+ * for that frame (the user's Mii News and Mii creator; 4 such pairs in the two frames of their F12 draw log). Now open
+ * addressing on the whole address; an entry of an older frame counts as empty. */
+#define TSREP_N 4096
+static struct { uint64_t addr; long long frame; } g_tsrep[TSREP_N];
+static int tsrep(uint64_t addr, long long frame, int insert) {      /* 1: reported this frame (insert: now it is) */
+    unsigned k = (unsigned)(((addr >> 4) * 0x9E3779B97F4A7C15ULL) >> 52);
+    for (int n = 0; n < TSREP_N; n++, k = (k + 1) & (TSREP_N - 1)) {
+        if (g_tsrep[k].frame != frame) { if (insert) { g_tsrep[k].addr = addr; g_tsrep[k].frame = frame; } return insert; }
+        if (g_tsrep[k].addr == addr) return 1;
+    }
+    return 0;
+}
 static void drawlog_begin(void) { if (!drawlog_now() || g_counter[1].active) return; if (!g_dbg_query) glGenQueries(1, &g_dbg_query); glBeginQuery(0x8914, g_dbg_query); }
 static void drawlog_end(void) {
     GLuint n = 0;
@@ -6626,7 +6640,7 @@ static void exec(const Cmd *m, int depth) {
              * TOMO_CLEAR_ONCE=0: every conditional clear runs. */
             static int once = -1; if (once < 0) once = !getenv("TOMO_CLEAR_ONCE") || atoi(getenv("TOMO_CLEAR_ONCE"));
             int mem_eq = eq;
-            if (!eq && once && a[2] && g_tsrep[(a[2] >> 5) & 255].addr == a[2] && g_tsrep[(a[2] >> 5) & 255].frame == (long long)g_st.frames + 1) eq = 1;
+            if (!eq && once && a[2] && tsrep(a[2], (long long)g_st.frames + 1, 0)) eq = 1;
             S.render_off = a[1] == 1 ? !eq : eq;
             {   static long long from = -2; static int left;      /* TEST ONLY: TOMO_CONDLOG=<from frame>:<count> */
                 if (from == -2) { const char *e = getenv("TOMO_CONDLOG"); from = -1; if (e) { from = atoll(e); left = strchr(e, ':') ? atoi(strchr(e, ':') + 1) : 400; } }
@@ -6643,7 +6657,7 @@ static void exec(const Cmd *m, int depth) {
         int type = (int)a[0];
         /* type 16 (TIMESTAMP_TOP): a timestamp in the counter field too. Tomodachi Life reports it twice and draws its island
          * objects (palm trees, shrubs) under SetRenderEnableConditional(not equal) of the pair: two zeros culled them all. */
-        if (type == 16) { d[0] = d[1]; if (a[1]) { g_tsrep[(a[1] >> 5) & 255].addr = a[1]; g_tsrep[(a[1] >> 5) & 255].frame = (long long)g_st.frames + 1; } }
+        if (type == 16) { d[0] = d[1]; if (a[1]) tsrep(a[1], (long long)g_st.frames + 1, 1); }
         if (type > 0 && type < 16 && counter_target(type)) { counter_stop(type); d[0] = g_counter[type].acc; counter_start(type); }
         if (a[1]) { cbuf_flush_if(a[1], 16); memcpy(P(a[1]), d, 16); ww_note(a[1], 16); }
         if (drawlog_now()) printf("counter report: type %d value %llu at %llx (draw %d)\n", type, (unsigned long long)d[0], (unsigned long long)a[1], g_frame_draw_index);
