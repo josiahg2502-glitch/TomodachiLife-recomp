@@ -25,6 +25,7 @@ import hashlib
 import io
 import os
 import shutil
+import ssl
 import struct
 import subprocess
 import sys
@@ -75,6 +76,26 @@ def say(msg=''):
 
 def sha256_bytes(b):
     return hashlib.sha256(b).hexdigest()
+
+
+def get(url, timeout):
+    """The bytes at url. When Python's certificate check fails (issue #13: a root Windows had not fetched yet), Windows'
+    curl.exe gets a second try: it checks with Windows, which fetches the root. Callers check the SHA-256 either way."""
+    req = urllib.request.Request(url, headers={'User-Agent': 'ssbu-recomp-fetch-media'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except OSError as e:
+        reason = getattr(e, 'reason', e)
+        if not (isinstance(reason, ssl.SSLError) or 'CERTIFICATE_VERIFY_FAILED' in str(e)):
+            raise
+    curl = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'curl.exe')
+    if not os.path.isfile(curl):
+        curl = shutil.which('curl') or curl
+    r = subprocess.run([curl, '-L', '--fail', '--silent', '--show-error', '--max-time', str(timeout), url], capture_output=True)
+    if r.returncode:
+        raise OSError('curl exit %d: %s' % (r.returncode, r.stderr.decode('utf-8', 'replace').strip()))
+    return r.stdout
 
 
 def sha256_file(p):
@@ -219,9 +240,7 @@ def fetch_opus(deps_dir=None, force=False, url=OPUS_URL, pkg_sha256=OPUS_PKG_SHA
             say('libopus: already in %s (checked)' % dest)
             return dest
         say('libopus: downloading %s' % url)
-        req = urllib.request.Request(url, headers={'User-Agent': 'ssbu-recomp-fetch-media'})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            blob = r.read()
+        blob = get(url, 120)
         got = sha256_bytes(blob)
         if got != pkg_sha256:
             say('libopus: the downloaded package does not match its pinned SHA-256 (got %s); NOT used.' % got)
@@ -277,9 +296,7 @@ def fetch_ffmpeg(deps_dir=None, force=False, url=FFMPEG_URL, zip_sha256=FFMPEG_Z
             say('FFmpeg (movie fallback): already in %s (checked)' % dest)
             return dest
         say('FFmpeg (movie fallback): downloading %s' % url)
-        req = urllib.request.Request(url, headers={'User-Agent': 'ssbu-recomp-fetch-media'})
-        with urllib.request.urlopen(req, timeout=180) as r:
-            blob = r.read()
+        blob = get(url, 180)
         got = sha256_bytes(blob)
         if got != zip_sha256:
             say('FFmpeg: the downloaded package does not match its pinned SHA-256 (got %s); NOT used.' % got)

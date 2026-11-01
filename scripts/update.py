@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -74,8 +75,26 @@ def http(url, accept=None, timeout=60):
     if tok and url.startswith('https://api.github.com/'):
         h['Authorization'] = 'Bearer ' + tok
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.URLError as e:
+        reason = getattr(e, 'reason', e)
+        if not (isinstance(reason, ssl.SSLError) or 'CERTIFICATE_VERIFY_FAILED' in str(e)):
+            raise
+    # Python's certificate check failed (issue #13: a root Windows had not fetched yet): Windows' curl.exe checks with
+    # Windows, which fetches it. (No token on its command line.)
+    curl = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'curl.exe')
+    if not os.path.isfile(curl):
+        curl = shutil.which('curl') or curl
+    cmd = [curl, '-L', '--fail', '--silent', '--show-error', '--max-time', str(timeout)]
+    for k, v in h.items():
+        if k != 'Authorization':
+            cmd += ['-H', '%s: %s' % (k, v)]
+    r = subprocess.run(cmd + [url], capture_output=True)
+    if r.returncode:
+        raise urllib.error.URLError('curl exit %d: %s' % (r.returncode, r.stderr.decode('utf-8', 'replace').strip()))
+    return r.stdout
 
 
 def api_json(url):

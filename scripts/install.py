@@ -54,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import ssl
 import time
 import urllib.request
 import zipfile
@@ -594,13 +595,42 @@ SUYU_FILES = {'src/core/hle/service/mii/types/raw_data.cpp': '0f5b10dcde4038024f
               'src/core/hle/service/mii/mii_types.h': 'cf2e0c990b881c238f5b7fd823f33fe2c0a8d0846cdbf012ec6f702b1647f3e1'}
 
 
+def cert_failure(e):
+    """True when e is Python's TLS check refusing the server's certificate (not a network error)."""
+    reason = getattr(e, 'reason', e)
+    return isinstance(reason, ssl.SSLError) or 'CERTIFICATE_VERIFY_FAILED' in str(e)
+
+
+def download(url, dst):
+    """url into the file dst. Python checks certificates against the roots Windows already has; a PC that never needed the
+    root GitHub's download host uses had not fetched it yet, and Python refused every download (issue #13, "unable to get
+    local issuer certificate"). Windows' own curl.exe checks with Windows, which fetches a missing root as browsers do, so it
+    gets a second try. Every download here is checked against its SHA-256 afterwards either way."""
+    try:
+        urllib.request.urlretrieve(url, dst)
+        return
+    except OSError as e:
+        if not cert_failure(e):
+            raise
+        say('   Python could not check the server\'s certificate (%s): downloading with Windows\' curl instead' % getattr(e, 'reason', e))
+    curl = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'curl.exe')
+    if not os.path.isfile(curl):
+        curl = shutil.which('curl') or curl
+    r = subprocess.run([curl, '-L', '--fail', '--silent', '--show-error', '--retry', '3', '-o', dst, url])
+    if r.returncode:
+        raise OSError('curl could not download %s either (exit %d)' % (url, r.returncode))
+
+
 def fetch_suyu():
     dst = os.path.join(DEPS, 'suyu')
     for rel, sha in SUYU_FILES.items():
         out = os.path.join(dst, *rel.split('/'))
         if os.path.exists(out):
             continue
-        data = urllib.request.urlopen(MIRROR + rel.rsplit('/', 1)[1]).read()
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        download(MIRROR + rel.rsplit('/', 1)[1], out + '.part')
+        data = open(out + '.part', 'rb').read()
+        os.remove(out + '.part')
         if hashlib.sha256(data).hexdigest() != sha:
             raise Stop('suyu %s: the download does not match its SHA-256: refused' % rel)
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -619,7 +649,7 @@ def fetch(name):
     os.makedirs(DEPS, exist_ok=True)
     arc = os.path.join(DEPS, os.path.basename(url))
     say('   downloading %s' % url)
-    urllib.request.urlretrieve(url, arc)
+    download(url, arc)
     h = hashlib.sha256(open(arc, 'rb').read()).hexdigest()
     if h != sha:
         os.remove(arc)
@@ -666,7 +696,7 @@ def find_runtime(a, why=None):
             os.makedirs(DEPS, exist_ok=True)
             say('   downloading the prebuilt runtime %s' % url)
             try:
-                urllib.request.urlretrieve(url, dst + '.part')
+                download(url, dst + '.part')
             except OSError as e:
                 say('   the prebuilt runtime could not be downloaded (%s): everything is built here instead' % e)
                 why.append('the prebuilt runtime could not be downloaded from GitHub (%s): check the internet connection '
