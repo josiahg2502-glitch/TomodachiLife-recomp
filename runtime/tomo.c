@@ -1849,8 +1849,49 @@ static void pointer_install(void) {
     if (!tomo_hook(0x710044d090ull, isle_input_hook, &g_isle_input)) printf("mouse: the island camera hook is not installed (the mouse cannot move the island)%c", 10);
     if (!tomo_hook(0x710026dca0ull, pane_draw_hook, &g_pane_draw)) printf("mouse: the pane draw hook is not installed (button prompts cannot be clicked)%c", 10);
 }
+/* TEST ONLY, TOMO_PICKLOG=1 (1.0.4): every line the game picks for a balloon ([game 0x71004bbb20]: message file, candidate
+ * labels, ...; returns {UTF-16 text, length, index | file id << 32} through x8) with its label and the audio clock (5 ms
+ * updates), to match shown lines against the speech that should follow (scratchpad speechmatch.py; from the removed Mii
+ * chatter mod). The label: the file's LMS message (+0x18 section table, 0x18 bytes an entry; +0x20 the LBL1 index); LBL1 =
+ * bucket count, {count, offset} per bucket, then {length, label, index}. */
+static ImportFn g_pick_orig;
+static int pick_label(uint64_t mfile, uint32_t idx, char *out, size_t n) {
+    uint64_t msg = rd64(mfile);
+    int li = msg ? (int)rd32(msg + 0x20) : -1;
+    if (li < 0) return 0;
+    uint64_t lbl = rd64(rd64(msg + 0x18) + (uint64_t)li * 0x18);
+    uint32_t nb = lbl ? rd32(lbl) : 0;
+    for (uint32_t b = 0; b < nb && b < 65536; b++) {
+        uint64_t q = lbl + rd32(lbl + 8 + b * 8);
+        for (uint32_t k = 0, cnt = rd32(lbl + 4 + b * 8); k < cnt && k < 4096; k++) {
+            uint8_t ln = rd8(q);
+            if (rd32(q + 1 + ln) == idx) { size_t l = ln < n ? ln : n - 1; memcpy(out, (const void *)(uintptr_t)(q + 1), l); out[l] = 0; return 1; }
+            q += 1 + ln + 4;
+        }
+    }
+    return 0;
+}
+static void pick_log(Ctx *c, void *user) {
+    uint64_t res = c->x[8], mfile = c->x[0];
+    static long n;
+    (void)user;
+    g_pick_orig(c);
+    uint64_t tx = res ? rd64(res) : 0;
+    if (!tx || !mfile || n++ >= 4000) return;
+    char lb[80] = "", a[200]; int o = 0;
+    pick_label(mfile, (uint32_t)rd64(res + 0x10), lb, sizeof lb);
+    for (int k = 0; k < 240 && o < 180; k++) {
+        uint16_t ch = rd16(tx + (uint64_t)k * 2);
+        if (!ch) break;
+        if (ch == 0x0E) { o += snprintf(a + o, sizeof a - (size_t)o, "{%u.%u}", rd16(tx + (uint64_t)(k + 1) * 2), rd16(tx + (uint64_t)(k + 2) * 2)); k += 3 + rd16(tx + (uint64_t)(k + 3) * 2) / 2; continue; }
+        a[o++] = ch < 0x80 && ch >= 0x20 ? (char)ch : '?';
+    }
+    a[o < (int)sizeof a ? o : (int)sizeof a - 1] = 0;
+    printf("picklog @%llu %s: %s\n", (unsigned long long)g_audio_updates, lb, a);
+}
 static void heaplog_install(void) {
     trace_install();
+    if (getenv("TOMO_PICKLOG") && g_main.text_size == 0x256d250) printf("picklog: hook %s\n", hook_install(0x71004bbb20ull, pick_log, NULL, &g_pick_orig) ? "installed" : "NOT installed");
     if (getenv("TOMO_TASKLOG")) printf("tasklog: hook %s\n", tomo_hook(0x71005e1ffcull, tasklog_step, &g_task_step) ? "installed" : "NOT installed");
     if (!getenv("TOMO_HEAPLOG")) return;
     printf("heaplog: hook %s\n", tomo_hook(0x71001e68c0ull, heaplog_try_alloc, &g_try_alloc) ? "installed" : "NOT installed");
