@@ -1353,8 +1353,19 @@ static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
 /* Guest memory that may have been given back, read through the system (ReadProcessMemory fails where a read would fault;
  * mem_readable asks one byte a page). Not VirtualQuery: on the game's heap, one write-watched region of gigabytes, a query
  * walks the page table to the end of the region (16-40 ms) holding the lock the render thread's GetWriteWatch needs; the
- * chatter's search for the game's message archive froze the picture for 2.4 s (2026-10-31). A probe is about a microsecond. */
-static int mem_copy(uint64_t p, void *buf, size_t n) { SIZE_T got = 0; return p >= 0x10000 && ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)p, buf, n, &got) && got == n; }
+ * chatter's search for the game's message archive froze the picture for 2.4 s (2026-10-31). A probe is about a microsecond.
+ * Windows: a copy that catches the fault, no system call (the prompt hook reads every shown text pane's first characters,
+ * on the game's job threads: ReadProcessMemory there was 0.9 % of a job thread, 2026-11-01). */
+static int mem_copy(uint64_t p, void *buf, size_t n) {
+    if (p < 0x10000) return 0;
+#ifdef _WIN32
+    __try { memcpy(buf, (const void *)(uintptr_t)p, n); return 1; }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { return 0; }
+#else
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)p, buf, n, &got) && got == n;
+#endif
+}
 static int mem_readable(uint64_t p, size_t n) {
     uint8_t b;
     if (p < 0x10000 || p + n < p) return 0;

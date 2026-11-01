@@ -1082,8 +1082,15 @@ static void ww_scan_apply(uint64_t seq) {           /* render thread, at the sta
     g_wwr_n = g_wwl_n;
     memcpy(g_wwr_base, g_wwl_base, sizeof g_wwr_base); memcpy(g_wwr_size, g_wwl_size, sizeof g_wwr_size);
     ReleaseSRWLockShared(&g_wwl_lock);
-    if (!seq) ww_scan_once();
-    else while (g_wws_done < (LONG64)seq) WaitForSingleObject(g_wws_done_ev, 1);
+    {   /* TEST ONLY (TOMO_WWLOG): how long batches wait for their scan. Island 2026-11-01: the frame's big batch waits the whole
+         * scan, 1.9 ms (279 chunks; 1.4 ms without the textures' chunks), the others nothing. A call costs ~0.07 ms plus ~1 us per
+         * MB it covers, written or not, and calls do not overlap (one thread or two: the same). */
+        static LONG64 wt, wn, wbig; static int lg = -1; LONG64 w0 = pf_now();
+        if (lg < 0) lg = getenv("TOMO_WWLOG") != NULL;
+        if (!seq) ww_scan_once();
+        else while (g_wws_done < (LONG64)seq) WaitForSingleObject(g_wws_done_ev, 1);
+        if (lg) { LONG64 d = pf_now() - w0; wt += d; wn++; if (d > 5000) wbig++;
+                  if (wn % 900 == 0) { printf("wwwait: %.3f ms a batch on average, %lld of 900 batches over 0.5 ms%c", (double)wt / 1e4 / 900.0, (long long)wbig, 10); wt = 0; wbig = 0; } } }
     AcquireSRWLockExclusive(&g_wws_lock);
     if (g_wws_all) g_ww_floor = ++g_ww_stamp;
     if (g_wws_n) { uint64_t stamp = ++g_ww_stamp; for (size_t i = 0; i < g_wws_n; i++) *ww_slot(g_wws_pg[i], 1) = stamp; }
@@ -2359,17 +2366,14 @@ static uint64_t sh_hash(uint64_t h, const void *data, size_t n) {
  *   turns it off (every stage is then compiled with glCreateShaderProgramv, as before). */
 static LONG64 g_shd_loaded, g_shd_saved, g_shd_refused;
 static volatile LONG64 g_shw_queued, g_shw_done, g_shw_compiled, g_shw_present, g_shw_failed;
-static volatile LONG64 g_shw_bg_queued, g_shw_bg_done;     /* pairs re-warmed while the game runs (pw_sample_note): not waited for */
 static volatile LONG g_shp_queueing;                       /* the shader store's variations are being queued (shp_queue) */
 static DWORD g_shw_tid[8];
 /* hostrt.c, the crash report: which of this file's host threads a thread id is, or NULL */
 const char *nvn_front_thread_kind(unsigned long tid) { static char b[32]; if (tid == g_render_tid) return "render thread"; for (int i = 0; i < 8; i++) if (g_shw_tid[i] && g_shw_tid[i] == tid) { snprintf(b, sizeof b, "shader worker %d", i); return b; } return NULL; }
 static volatile LONG g_pw_listed_done;                      /* the start-up queueing of pairs.txt is over (boot.c waits for the workers then) */
 /* boot.c: how many worker jobs are still pending, and how many were queued in all; -1 until the start-up queueing is over */
-/* boot.c: the jobs the start waits for (-1: not all queued yet). The pairs re-warmed after a cold sample (pw_sample_note) are
- * not among them: the total grew while the screen counted (user, 2026-10-30: "9306 of 13770", the amount going up). */
 long long nvn_front_warm_pending(long long *total) {
-    LONG64 q = g_shw_queued - g_shw_bg_queued, d = g_shw_done - g_shw_bg_done;
+    LONG64 q = g_shw_queued, d = g_shw_done;
     *total = q;
     return g_pw_listed_done && !g_shp_queueing ? (q > d ? q - d : 0) : -1;
 }
@@ -2722,21 +2726,31 @@ static volatile LONG64 g_shp_total, g_shp_done, g_shp_t0;      /* shader prepara
  * a day after they were warmed; the 2026-10-29 session stalled at 651 of 850 first draws, 26 ms each). Re-warming the
  * whole list at each start costs 15 s, so: the first PW_SAMPLE listed pairs (the title's and the island's) are warmed at
  * every start, 0.2 s when the driver has them; when more than PW_SAMPLE_COLD of them are cold the cache was purged, and
- * the rest of the list is warmed by the workers while the game runs (it was waited for before the game started: 5-12 min on
- * 2026-10-30, the screen's total growing meanwhile). TOMO_PAIR_REWARM=1: the whole list, every start. */
+ * the rest of the list is warmed too. TOMO_PAIR_REWARM=1: the whole list, every start.
+ * 2026-11-01: NEVER while the game runs. A worker's warm draw holds a lock of the driver while it compiles, and the driver's
+ * thread that runs the render thread's calls waits for that lock (call stacks at the freeze): warmed while the game started,
+ * the game's 4th frame (its render targets) waited 3.9-4.3 s, 1.7 s with two workers. With its own cache folder (boot.c) the
+ * driver keeps the pairs, and 8-12 of the 64 took 20 ms or more at every start anyway (twelve contexts warming at once), so
+ * over 10 had set that off in every second start: more than half now (a new driver), and the rest is warmed before the game
+ * starts, in list order (the earliest used first), for 60 s at most; what is left then compiles at its first draw.
+ * TOMO_PW_COLD=<n>: another limit (test). */
 #define PW_SAMPLE 64
-#define PW_SAMPLE_COLD 10
+#define PW_SAMPLE_COLD (getenv("TOMO_PW_COLD") ? atoi(getenv("TOMO_PW_COLD")) : 32)
+#define PW_REWARM_S 60
 typedef struct { uint64_t vh, fh; uint32_t vl, fl, mask; } PwPair;
 static PwPair *g_pw_rest;
 static int g_pw_rest_n, g_pw_rest_cap;
 static volatile LONG g_pw_sample_n, g_pw_sample_done, g_pw_sample_cold, g_pw_sample_decided;
+static LONG64 g_pw_rewarm_end;
 static void pw_queue_named(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, uint32_t mask, int sample);
 static void pw_sample_note(int cold) {              /* worker: a sampled pair is done */
     if (cold) InterlockedIncrement(&g_pw_sample_cold);
     if (InterlockedIncrement(&g_pw_sample_done) != g_pw_sample_n || InterlockedExchange(&g_pw_sample_decided, 1)) return;
     if (g_pw_sample_cold > PW_SAMPLE_COLD) {
-        printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache was purged, the other %d listed pairs are warmed while the game runs%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
-        for (int i = 0; i < g_pw_rest_n; i++) pw_queue_named(g_pw_rest[i].vh, g_pw_rest[i].vl, g_pw_rest[i].fh, g_pw_rest[i].fl, g_pw_rest[i].mask, 2);      /* in the background: the game starts meanwhile */
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+        g_pw_rewarm_end = pf_now() + f.QuadPart * PW_REWARM_S;
+        printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache was purged (a new driver?), the other %d listed pairs are warmed before the game starts, %d s at most%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, PW_REWARM_S, 10);
+        for (int i = 0; i < g_pw_rest_n; i++) pw_queue_named(g_pw_rest[i].vh, g_pw_rest[i].vl, g_pw_rest[i].fh, g_pw_rest[i].fl, g_pw_rest[i].mask, 2);      /* (queued before the last sampled job counts as done: the start waits for them) */
     } else printf("nvn_gl: shader pairs: %ld of %ld sampled pairs were cold: the driver's cache holds them, the other %d listed pairs are not warmed again%c", g_pw_sample_cold, g_pw_sample_n, g_pw_rest_n, 10);
     fflush(stdout);
     free(g_pw_rest); g_pw_rest = NULL; g_pw_rest_n = g_pw_rest_cap = 0;
@@ -2814,9 +2828,9 @@ static int pw_job_inner(ShJob *j, GLuint pipe, GLuint empty_fs) {      /* 1 = th
     return cold;
 }
 static void pw_job(ShJob *j, GLuint pipe, GLuint empty_fs) {
+    if (j->stage == 2 && j->key[3] == 2 && pf_now() > g_pw_rewarm_end) return;      /* the start's re-warm time is up (PW_REWARM_S) */
     int c = pw_job_inner(j, pipe, empty_fs);
     if (j->stage == 2 && j->key[3] == 1) pw_sample_note(c);
-    if (j->stage == 2 && j->key[3] == 2) InterlockedIncrement64(&g_shw_bg_done);
 }
 static void pw_enqueue(ShJob *j) {
     j->next = NULL;
@@ -2834,7 +2848,6 @@ static void pw_queue_named(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, u
     j->stage = 2; j->key[3] = (uint32_t)sample;
     memcpy(j->data, &vh, 8); memcpy(j->data + 8, &fh, 8); memcpy(j->data + 16, &vl, 4); memcpy(j->data + 20, &fl, 4); memcpy(j->data + 24, &mask, 4);
     g_pw_named++;
-    if (sample == 2) InterlockedIncrement64(&g_shw_bg_queued);      /* (counted before it is queued: the start-up wait never sees it) */
     pw_enqueue(j);
 }
 static volatile LONG64 g_pw_gate_t0;
@@ -3819,11 +3832,18 @@ static CmdBuf *cb_get(uint64_t g) {
     CmdBuf *cb = hobj(g, K_CMD);
     return cb ? cb : cb_new(g);
 }
+/* A recording's buffer goes to its list at the end, so every recording started from nothing and doubled its way up
+ * (realloc 0.6 % of a game job thread, 2026-11-01): the first one is as big as the last recording of this command buffer. */
+static void cb_grow(CmdBuf *cb, size_t need) {
+    size_t want = (cb->cap + need) * 2 + 4096;
+    if (!cb->cap && (size_t)cb->hint + need + 4096 > want) want = (size_t)cb->hint + need + 4096;
+    cb->cap = want; cb->data = realloc(cb->data, cb->cap);
+}
 /* Appends a command with x1..x7 as its arguments and room for `blob` more bytes; returns it (valid until the next append). */
 static Cmd *rec(Ctx *c, uint32_t op, size_t blob) {
     CmdBuf *cb = cb_get(A0);
     size_t need = sizeof(Cmd) + ((blob + 7) & ~(size_t)7);
-    if (cb->len + need > cb->cap) { cb->cap = (cb->cap + need) * 2 + 4096; cb->data = realloc(cb->data, cb->cap); }
+    if (cb->len + need > cb->cap) cb_grow(cb, need);
     {   /* Command memory as the game sees it. The real encoding is the driver's own; the model is 8 bytes per command plus its
          * array payload (control memory: 32 bytes per recording, charged by EndRecording). When the memory the game added is
          * used up, its callback is asked for more, as NVN does (NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY = 0). */
@@ -3849,7 +3869,7 @@ static Cmd *rec(Ctx *c, uint32_t op, size_t blob) {
                            (unsigned long long)((use + 0xff) & ~0xffull), (unsigned)cb->rec_cmd, (unsigned long long)cb->cmd_used, (unsigned long long)cb->cmd_size, (unsigned long long)cb->cmd_pool, (unsigned long long)cb->cmd_off);
             }
             memcpy(c->x, sx, sizeof sx); memcpy(c->v, sv, sizeof sv);
-            if (cb->len + need > cb->cap) { cb->cap = (cb->cap + need) * 2 + 4096; cb->data = realloc(cb->data, cb->cap); }
+            if (cb->len + need > cb->cap) cb_grow(cb, need);
         }
         cb->cmd_used += use; cb->rec_cmd += use;
     }
@@ -7764,6 +7784,7 @@ void nvn_gl_start(void *hwnd) {
     g_job_event = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_ready_event = CreateEventA(NULL, TRUE, FALSE, NULL);
     { const char *e = getenv("SSBU_STACKS_AT"); void nvn_vk_stacks_at(int seconds); if (e && atoi(e) > 0) nvn_vk_stacks_at(atoi(e)); }      /* session 13, TEST: every thread's call stack once, that many seconds from here, with either renderer (nvn_vk_wd.c) */
+    { const char *e = getenv("TOMO_FREEZE_DUMP"); void nvn_wd_freeze_dump(int ms); if (e && atoi(e) > 0) nvn_wd_freeze_dump(atoi(e)); }      /* TEST: the same report when the frames stop that many ms (nvn_vk_wd.c) */
     CreateThread(NULL, 16 << 20, render_thread, NULL, 0, NULL);
     WaitForSingleObject(g_ready_event, INFINITE);
 }
@@ -8380,6 +8401,7 @@ static void cmd_end(Ctx *c) {
     cb_range_close(cb);
     uint64_t h = list_register(cb->data, cb->len, (uint32_t)cb->rec_cmd, (uint32_t)cb->rec_ctrl, (uint32_t)cb->dispatches, cb);
     L1T("end recording cb %llx -> list %llx (%u bytes, %u dispatches)", (unsigned long long)A0, (unsigned long long)h, (unsigned)cb->len, (unsigned)cb->dispatches);
+    cb->hint = cb->len < 0xffffffffu ? (uint32_t)cb->len : 0xffffffffu;
     cb->data = NULL; cb->len = cb->cap = 0; cb->recording = 0;
     RET(h);
 }

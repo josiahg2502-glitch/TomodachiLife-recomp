@@ -70,29 +70,36 @@ void print_devinfo_summary(FILE *out) {
 
 /* ---- memory pools and buffers: the game supplies the memory, so mapping must work for real.
  * Guest objects are opaque; what each one refers to is kept in a side table keyed by address. */
-typedef struct NvnObj { uint64_t key, memory, size, pool, offset, flags; struct NvnObj *next; } NvnObj;
-static NvnObj *g_objs[4096];
+typedef struct NvnObj { uint64_t key, memory, size, pool, offset, flags; struct NvnObj *volatile next; struct NvnObj *free_next; } NvnObj;
+/* Found WITHOUT a lock: the game's job threads ask for buffer addresses, maps and pool flags all the time (2.4 % of a job
+ * thread under the shared lock, with 4,096 chains picked by the low bits of the address, 2026-11-01). A record is never given
+ * back, only reused, so a walk that meets one being dropped or reused at worst misses and looks again under the lock. */
+#define NOBJ_BITS 14
+static NvnObj *volatile g_objs[1 << NOBJ_BITS];
+static NvnObj *g_objs_free;
 static SRWLOCK g_objs_lock = SRWLOCK_INIT;
+static unsigned nobj_hash(uint64_t key) { return (unsigned)((key * 0x9E3779B97F4A7C15ull) >> (64 - NOBJ_BITS)); }
 static NvnObj *nobj(uint64_t key) {
-    unsigned h = (unsigned)((key >> 3) * 2654435761u) & 4095;
-    /* found under the shared lock: the game's job threads ask for buffer addresses, maps and pool flags all the time and
-     * queued on the exclusive one */
-    AcquireSRWLockShared(&g_objs_lock);
-    NvnObj *o = g_objs[h];
-    while (o && o->key != key) o = o->next;
-    ReleaseSRWLockShared(&g_objs_lock);
-    if (o) return o;
+    unsigned h = nobj_hash(key);
+    NvnObj *o;
+    for (o = g_objs[h]; o; o = o->next) if (o->key == key) return o;
     AcquireSRWLockExclusive(&g_objs_lock);
     for (o = g_objs[h]; o && o->key != key; o = o->next) {}
-    if (!o) { o = calloc(1, sizeof *o); o->key = key; o->next = g_objs[h]; g_objs[h] = o; }
+    if (!o) {
+        if ((o = g_objs_free) != NULL) { g_objs_free = o->free_next; o->memory = o->size = o->pool = o->offset = o->flags = 0; }
+        else o = calloc(1, sizeof *o);
+        o->key = key; o->next = g_objs[h];
+        MemoryBarrier();                                                /* (filled before a walk can reach it) */
+        g_objs[h] = o;
+    }
     ReleaseSRWLockExclusive(&g_objs_lock);
     return o;
 }
 static void nobj_drop(uint64_t key) {                                   /* the object is finalized: forget what it referred to */
-    unsigned h = (unsigned)((key >> 3) * 2654435761u) & 4095;
+    unsigned h = nobj_hash(key);
     AcquireSRWLockExclusive(&g_objs_lock);
-    for (NvnObj **pp = &g_objs[h]; *pp; pp = &(*pp)->next)
-        if ((*pp)->key == key) { NvnObj *o = *pp; *pp = o->next; free(o); break; }
+    for (NvnObj *volatile *pp = &g_objs[h]; *pp; pp = &(*pp)->next)
+        if ((*pp)->key == key) { NvnObj *o = *pp; *pp = o->next; o->key = 0; o->free_next = g_objs_free; g_objs_free = o; break; }      /* (its next stays: a walk on it goes on) */
     ReleaseSRWLockExclusive(&g_objs_lock);
 }
 void nvn_label_set(uint64_t obj, const char *text);                    /* nvn_gl.c */

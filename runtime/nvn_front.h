@@ -78,6 +78,7 @@ typedef struct {
     int recording, callback_off, in_callback, dispatches;
     uint64_t cmd_pool, cmd_off, r_start, r_pool[4], r_lo[4], r_hi[4];   /* the current memory block (pool, offset) and the ranges of it the recording took */
     int r_n;
+    uint32_t hint;                                         /* the last recording's length: the next one's first buffer is that big (rec) */
 } CmdBuf;
 typedef struct { int count, interval, nactive; Tex *tex[8]; int crop[4]; uint64_t native; } Window;
 typedef struct { void *s; volatile LONG dead; long long fence_frame; } SyncObj;       /* s: GL sync object; Vulkan: the number of the submission the fence follows */

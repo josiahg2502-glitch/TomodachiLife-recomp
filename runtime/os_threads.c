@@ -178,11 +178,17 @@ static DWORD_PTR g_cc_core[3];
  * each shared its core with the main thread and a job pool thread and only ran in their gaps, so a job the main thread
  * then waited for took 60-110 ms (island house view: 241 frames over 20 ms in 2 min, 7-10 s of main-thread waits;
  * unpinned 121-153 frames, under 1 s). The start-up stays pinned (the game sizes child heaps from free memory there and
- * raced with everything unpinned, 2026-10-25). TOMO_CC_RELAX=0: pinned throughout, as before. */
+ * raced with everything unpinned, 2026-10-25). TOMO_CC_RELAX=0: pinned throughout, as before.
+ * 2026-11-01: EVERY game thread, the main thread and the job pools at 16 and the Presentation Thread too. Pinned, the main
+ * thread, Prepare Thread and AppJobThreadPool0 shared one processor at one priority (Windows time-slices them: the console
+ * runs one until it waits) and the main thread waited for its job barrier (0x710024ba7c): island, 4 alternating runs each,
+ * frames over 33 ms after 40 s 41-63 pinned, 7-20 relaxed; frames not on the 60 fps cadence 3.1-5.9 % against 1.6-2.4 %.
+ * (nn::os::GetCurrentCoreNumber, which answers the ideal core off the three processors, is asked once per thread, at its
+ * start.) TOMO_CC_RELAX_ALL=0: only the threads below the main thread's priority, as before. */
 static DWORD_PTR g_cc_all;
 static volatile LONG g_cc_relaxed;
 static int cc_relax_on(void) { static int o = -1; if (o < 0) { const char *e = getenv("TOMO_CC_RELAX"); o = e ? atoi(e) != 0 : 1; } return o; }
-static int cc_relax_floor(void) { static int f = -1; if (f < 0) f = getenv("TOMO_CC_RELAX_ALL") && atoi(getenv("TOMO_CC_RELAX_ALL")) ? 0 : 17; return f; }      /* TEST: TOMO_CC_RELAX_ALL=1: the job threads too */
+static int cc_relax_floor(void) { static int f = -1; if (f < 0) f = getenv("TOMO_CC_RELAX_ALL") && !atoi(getenv("TOMO_CC_RELAX_ALL")) ? 17 : 0; return f; }
 static int console_cores(void) {
     if (g_cc < 0) {
         int n = 0, on = 0;
@@ -250,7 +256,7 @@ void os_cc_relax(void) {                              /* display.c, two seconds 
     for (int h = 0; h < BUCKETS; h++)
         for (Obj *o = g_table[h]; o; o = o->next)
             if (o->thread && !o->finished && o->priority >= cc_relax_floor()) { apply_sched(o->thread, o->core_mask, o->priority); n++; }
-    printf("nn::os: console core model relaxed: %d threads below the main thread's priority may run on any performance core (TOMO_CC_RELAX=0: pinned)\n", n);
+    printf("nn::os: console core model relaxed: %d %s may run on any performance core (TOMO_CC_RELAX=0: pinned)\n", n, cc_relax_floor() ? "threads below the main thread's priority" : "game threads");
 }
 static int host_priority(int prio) {
     if (console_cores()) {

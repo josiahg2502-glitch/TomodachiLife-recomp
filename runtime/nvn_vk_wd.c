@@ -392,6 +392,20 @@ static void wd_start(void) {
  * (found with it: why SSBU_RENDERER=gl stood still at its start). The Vulkan fields of the report are zero under OpenGL. */
 static DWORD WINAPI wd_once(void *a) { Sleep((DWORD)(uintptr_t)a * 1000); wd_dump(0, 0); return 0; }
 void nvn_vk_stacks_at(int seconds) { HANDLE h = CreateThread(NULL, 0, wd_once, (void *)(uintptr_t)seconds, 0, NULL); if (h) CloseHandle(h); }
+/* TEST ONLY (TOMO_FREEZE_DUMP=<ms>, read in nvn_gl.c): the same report once per freeze when the game's frame counter stands
+ * still that long after its second frame, at most 3 a run (the OpenGL renderer has no watchdog of its own) */
+static DWORD WINAPI wd_frozen(void *a) {
+    ULONGLONG ms = (ULONGLONG)(uintptr_t)a, since = GetTickCount64();
+    long long last = -1;
+    for (int dumps = 0, done = 0; dumps < 3;) {
+        Sleep(20);
+        long long f = nvn_front_frame_next();
+        if (f != last) { last = f; since = GetTickCount64(); done = 0; continue; }
+        if (!done && f >= 2 && GetTickCount64() - since >= ms) { wd_dump((double)(GetTickCount64() - since) / 1000.0, 0); dumps++; done = 1; }
+    }
+    return 0;
+}
+void nvn_wd_freeze_dump(int ms) { HANDLE h = CreateThread(NULL, 0, wd_frozen, (void *)(uintptr_t)ms, 0, NULL); if (h) CloseHandle(h); }
 static void wd_stop(void) {
     g_wd_quit = 1;
     if (g_wd_thread) { WaitForSingleObject(g_wd_thread, 3000); CloseHandle(g_wd_thread); g_wd_thread = NULL; }
