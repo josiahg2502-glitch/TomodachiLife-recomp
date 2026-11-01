@@ -6851,9 +6851,12 @@ static void frozen_drawtexture_selftest(void) {
  * whole table on the job threads (main-thread stalls) and sampled the dummy. TOMO_BL_CAP=<entries> (test: evict sooner),
  * TOMO_BL_MISSLOG=1 (the shaders count handles they did not find: "bindless misses" every 10 s). */
 #define BL_SLOTS (1u << MX_BL_BITS)
-static struct { uint32_t nh, gen, slot, seen; uint64_t gl; } g_bl[BL_SLOTS / 2];
+static struct { uint32_t nh, gen, slot, seen; uint64_t gl; } g_bl[BL_SLOTS / 4 * 3];
 static uint32_t g_bl_slot[BL_SLOTS];                      /* open addressing on the handle: 0 = free, else index + 1 */
-static int g_bl_n, g_bl_cap = BL_SLOTS / 2;              /* at most half the slots used: short probes (GLSL gives up after BL_PROBE) */
+/* at most 3/4 of the slots (196,608 pairs; half until 2026-11-01): the user's session filled the 131,072 of half after ~15
+ * minutes (pairs of live textures kept after each eviction grew 65,000 -> 101,000) and every later pair sampled the dummy:
+ * objects and shadows drawn blank. Probes stay far below BL_PROBE (GLSL gives up there, and so does bl_note). */
+static int g_bl_n, g_bl_cap = BL_SLOTS / 4 * 3;
 #define BL_PROBE 256
 static volatile uint32_t g_bl_now;                        /* seconds; bl_update keeps it */
 static SRWLOCK g_bl_lock = SRWLOCK_INIT;
@@ -6929,14 +6932,14 @@ static void bl_update(void) {                                /* render thread, b
     if (!g_bl_buf) {                                         /* BL_SLOTS entries + the dummy + the miss counter (TOMO_BL_MISSLOG) */
         uint32_t tail[8] = {0, (uint32_t)g_dummy_handle, (uint32_t)(g_dummy_handle >> 32), 1, 0, 0, 0, 0};
         const char *cap = getenv("TOMO_BL_CAP");
-        if (cap && atoi(cap) >= 1024 && atoi(cap) < (int)(BL_SLOTS / 2)) g_bl_cap = atoi(cap);
+        if (cap && atoi(cap) >= 1024 && atoi(cap) < (int)(BL_SLOTS / 4 * 3)) g_bl_cap = atoi(cap);
         glCreateBuffers(1, &g_bl_buf); glNamedBufferData(g_bl_buf, (ptrdiff_t)(BL_SLOTS + 2) * 16, NULL, 0x88E8 /* DYNAMIC_DRAW */);
         { void *z = calloc(BL_SLOTS, 16); glNamedBufferSubData(g_bl_buf, 0, (ptrdiff_t)BL_SLOTS * 16, z); free(z); }
         glNamedBufferSubData(g_bl_buf, (ptrdiff_t)BL_SLOTS * 16, 32, tail);
     }
-    {   /* from 98,304 pairs (the old table's 3/4) on, again once 32,768 were added since or after 60 s: the walk below and the
-         * whole-table upload of an eviction stay as cheap as before; the bigger table (MX_BL_BITS) only takes the pairs that
-         * could not be dropped instead of refusing new ones (a full table: those sampled the dummy, objects flickered) */
+    {   /* from 98,304 pairs (3/4 of the old limit) on, again once 32,768 (at most 1/8 of the limit) were added since or after
+         * 60 s: the walk below stays as cheap as before; the higher limit (g_bl_cap) only takes the pairs that could not be
+         * dropped instead of refusing new ones (a full table: those sampled the dummy, objects flickered) */
         static int after; static uint32_t when;
         int from = g_bl_cap < 131072 ? g_bl_cap - g_bl_cap / 4 : 98304, step = g_bl_cap / 8 < 32768 ? g_bl_cap / 8 : 32768;      /* (TOMO_BL_CAP: smaller) */
         if (g_bl_n >= from && (g_bl_n >= after + step || g_bl_now >= when + 60)) { bl_evict(); after = g_bl_n; when = g_bl_now; }

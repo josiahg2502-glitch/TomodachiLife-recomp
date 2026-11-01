@@ -103,9 +103,10 @@ int mx_translate(const MxIn *in, MxOut *out);
 const char *mx_opcode_name(uint64_t insn);
 /* TEX.B handle table (nvn_gl.c bl_*): 1 << MX_BL_BITS entries, home slot (handle * 2654435761) >> (32 - MX_BL_BITS), linear
  * probing; entry 1 << MX_BL_BITS = the 1x1 dummy, the next one the miss counter of TOMO_BL_MISSLOG=1 (mx_bl_misslog).
- * 20 since 2026-11-01 (was 18): the user's session filled all 131,072 pairs after ~15 minutes (the pairs of live textures
- * alone grew from 65,000 to 101,000 kept after each eviction), and every pair asked for after that sampled the dummy. */
-#define MX_BL_BITS 20
+ * Changing it changes the text of every TEX.B shader: 20 (2026-11-01) made the user's first start prepare ~8,000 shaders
+ * again, and the driver's compiles queued on its heap lock (15 in 3 minutes): back to 18; the room comes from nvn_gl.c's
+ * fill limit instead (g_bl_cap). */
+#define MX_BL_BITS 18
 int mx_bl_misslog(void);
 
 #endif
