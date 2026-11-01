@@ -76,6 +76,7 @@ uint64_t nvn_pool_flags_of(uint64_t pool);
 void input_frame_draws(int draws);                                    /* nnhid.c */
 void display_pace(void);                                              /* display.c */
 int display_present_defer(void); int display_present_due(void); void display_present_flushed(void); void display_present_done(int fight);      /* display.c: the present at the tick */
+int display_pace_lead(void); int display_wait_present_due(int max_ms);      /* display.c: TOMO_PACE_LEAD */
 extern volatile LONG g_display_holding;                              /* display.c: a finished frame is held for its tick (hitch.c: pacing, not a cost) */
 int display_wait_refresh(void);                                       /* display.c, P3 round 3: one refresh clock */
 void display_before_present(void);
@@ -367,6 +368,22 @@ static struct {
 static LONG64 g_frame_draws, g_frame_skipped, g_frame_clears;
 static LONG64 g_fs_big, g_fs_bigclr, g_fs_rt, g_fs_disp;     /* TOMO_FRAMESUM: draws and clears on 2048-wide targets, target switches, dispatches */
 static int g_debug, g_logn;
+/* NVIDIA's own GL thread (threaded optimization) takes the driver's half of every call off the render thread, unless the
+ * context has synchronous debug output. Island at forced 60, 2026-10-31: a frame's command list replayed in 10.5-12 ms
+ * instead of 15-15.7, frames over 20 ms after the island was up 36-55 instead of 266 a run, p99 20.5 instead of 26.9 ms.
+ * The driver picks its thread when the context starts: turning synchronous debug output off later (tried: once the
+ * shader workers were idle) left the replay as slow as before. SSBU_GL_DRIVER_THREAD=0 (or SSBU_GLDEBUG): synchronous
+ * debug output, as before. */
+static int gl_driver_thread(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_GL_DRIVER_THREAD"); on = !getenv("SSBU_GLDEBUG") && !(e && e[0] == '0'); }
+    return on;
+}
+static int g_gl_thr_on;                          /* synchronous debug output is off on the render context now (render thread) */
+/* GL error checks on paths taken every frame or for every new object: with NVIDIA's GL thread each glGetError waits for
+ * everything queued before it, so there errors are left to the debug callback (still printed, without the stall). */
+#define GL_ERR_SOFT() (g_gl_thr_on ? 0 : glGetError())
+#define GL_ERR_CLEAR_SOFT() do { if (!g_gl_thr_on) while (glGetError()) {} } while (0)
 static const char *g_cur_op = "";
 static volatile LONG g_setshaders_calls, g_with_text, g_without_text;
 static LONG g_bufhist[6][32], g_storhist[32];
@@ -388,6 +405,10 @@ static GLuint g_gs_last_prog[2];
 static uint32_t g_gs_last_attr[16];
 static inline LONG64 pf_now(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 static LONG64 g_pp[10]; static int g_pp_on = -1;     /* TOMO_PREPPROF=1: draw_prepare by part (ms per frame) */
+/* The per-command and per-draw scopes (commands, prep, draw calls, texture handles) cost two QueryPerformanceCounter calls
+ * each: ~25,000 commands a frame on the island, about 1.5 ms of the render thread. TOMO_PF_DETAIL=1 turns them on for the
+ * nvn_perf lines; the draw call's own time is still taken for the hitch report (SSBU_HITCH). */
+static int pf_detail(void) { static int on = -1; if (on < 0) on = getenv("TOMO_PF_DETAIL") != NULL; return on; }
 static inline void pf_add(int k, LONG64 t0) { InterlockedExchangeAdd64(&g_pf[k], pf_now() - t0); InterlockedIncrement64(&g_pfn[k]); }
 void nvn_pf_pace(LONG64 ticks) { InterlockedExchangeAdd64(&g_pf[PF_PACE], ticks); InterlockedIncrement64(&g_pfn[PF_PACE]); }     /* display.c */
 
@@ -712,7 +733,7 @@ static int rsy(const Tex *t, int v) { return t->rh ? (int)floorf((float)v * (flo
 
 #define SPARE_KEY (offsetof(TexBuilder, layout))        /* flags .. has_layout, swz: what tex_realize makes the storage from */
 #define SPARE_MAX 96
-static struct { TexBuilder b; TexObj o; VNode *views; int glevels; } g_spare[SPARE_MAX];
+static struct { TexBuilder b; TexObj o; VNode *views; int glevels; Tex *crop; } g_spare[SPARE_MAX];
 static int g_spare_n;
 static LONG64 g_spare_hits, g_spare_kept, g_spare_full;
 static LONG64 g_spare_same_mem, g_spare_cleared;
@@ -731,7 +752,7 @@ static void tex_zero(Tex *t) {
     else if (f.kind == 2) { fm = 0x1901; ty = 0x1401; }            /* STENCIL_INDEX, UNSIGNED_BYTE */
     else if (f.kind == 3) { fm = 0x84F9; ty = f.internal == 0x8CAD ? 0x8DAD : 0x84FA; }   /* DEPTH_STENCIL: 32F_8 or 24_8 */
     for (int l = 0; l < t->glevels; l++) glClearTexImage(t->o.gl, l, fm, ty, NULL);
-    while (glGetError()) {}
+    GL_ERR_CLEAR_SOFT();
 }
 static int tex_take_spare(Tex *t) {
     if (!t->gpu_written || g_rb == &rb_vk) return 0;
@@ -744,6 +765,7 @@ static int tex_take_spare(Tex *t) {
     if (pick < 0) return 0;
     int same = g_spare[pick].b.pool == t->b.pool && g_spare[pick].b.offset == t->b.offset;
     t->o = g_spare[pick].o; t->views = g_spare[pick].views; t->glevels = g_spare[pick].glevels;
+    t->crop = g_spare[pick].crop; t->crop_gen = t->rt_gen + 1;      /* (its 16:9 part, tex_crop: copied again at the first use) */
     memmove(&g_spare[pick], &g_spare[pick + 1], sizeof g_spare[0] * (size_t)(g_spare_n - 1 - pick)); g_spare_n--;
     g_spare_hits++;
     if (same) g_spare_same_mem++;
@@ -781,7 +803,7 @@ static void tex_realize(Tex *t) {
         if (levels > maxl) levels = maxl;
     }
     t->glevels = levels;
-    while (glGetError()) {}
+    GL_ERR_CLEAR_SOFT();
     glGenTextures(1, &t->o.gl);
     InterlockedIncrement64(&g_tex_live);
     glBindTexture(tg, t->o.gl);
@@ -800,7 +822,7 @@ static void tex_realize(Tex *t) {
         set_swizzle(tg, b->swz);
         if (b->dsmode == 1) glTexParameteri(tg, GL_DEPTH_STENCIL_TEXTURE_MODE_, GL_STENCIL_INDEX_);
     }
-    GLenum e = glGetError();
+    GLenum e = GL_ERR_SOFT();
     g_st.tex_created++;
     if (b->format >= 0x01 && b->format <= 0x0c && !(b->flags & 0x10)) {       /* candidates for a glyph cache: block-linear single-channel textures */
         static int n1;
@@ -1148,7 +1170,7 @@ static void dec_land(void) {                       /* render thread: the decoded
         g_dec_bytes -= d->lin + (size_t)d->w * d->h * 4;
         free(d->buf); free(d);
     }
-    while (glGetError()) {}
+    GL_ERR_CLEAR_SOFT();
 }
 static void dec_finish(Tex *t) {                   /* render thread: wait for the texture's levels (a copy or a CPU write of it comes next) */
     while (t->dec_pending > 0) {
@@ -1284,10 +1306,10 @@ static GLuint twin_copy(Tex *t, uint64_t key) {   /* the GL texture copied from,
     TexLayout L;
     GLenum tg = gl_target(t->b.target, t->b.samples);
     tex_lay(&t->b, &L);
-    while (glGetError()) {}
+    GL_ERR_CLEAR_SOFT();
     for (int l = 0; l < t->glevels && l < L.levels; l++)
         glCopyImageSubData(c->o.gl, tg, l, 0, 0, 0, t->o.gl, tg, l, 0, 0, 0, L.lvl_w[l], L.lvl_h[l], tg == GL_TEXTURE_3D_ ? L.lvl_d[l] : L.layers);
-    if (glGetError()) return 0;
+    if (GL_ERR_SOFT()) return 0;
     t->dec_gen++;                                  /* (levels of older texels still with the decoder are dropped) */
     g_twin_hits++;
     return c->o.gl;
@@ -1295,6 +1317,18 @@ static GLuint twin_copy(Tex *t, uint64_t key) {   /* the GL texture copied from,
 
 /* Make the GL texture exist and hold what the guest memory holds. async: only sampled next (its decoded levels may land a
  * frame or two late, dec_*); otherwise the levels still with the decoder are waited for. */
+/* A texture's newest write stamp. Once its memory is in the scan's chunks (the scan thread asks for them at every
+ * submission, ww_scan_apply stamps them at the batch start), table lookups: no GetWriteWatch call of its own, which cost
+ * about 12 us a texture on the render thread (1 ms a frame on the island, 2-4 ms at the title: 370-660 checks). The
+ * first look asks itself and marks the chunks. TOMO_TEX_WWSCAN=0: every look asks, as before. */
+static uint64_t tex_ww_newest(Tex *t, const uint8_t *src) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("TOMO_TEX_WWSCAN") && getenv("TOMO_TEX_WWSCAN")[0] == '0');
+    if (on && t->ww_marked && !g_wws_sync) { uint64_t s = ww_range_stamp((uint64_t)(uintptr_t)src, t->data_size); if (s) return s; }
+    uint64_t r = ww_newest(src, t->data_size);
+    if (on && r && !g_wws_sync && !t->b.packaged) { ww_chunk_mark((uint64_t)(uintptr_t)src, t->data_size); t->ww_marked = 1; }
+    return r;
+}
 static void tex_sync_a(Tex *t, int async) {
     Fmt f;
     if (t->dec_pending && !async) dec_finish(t);
@@ -1309,7 +1343,7 @@ static void tex_sync_a(Tex *t, int async) {
     if (t->b.packaged && t->uploaded) return;      /* packaged data is consumed once at creation */
     LONG64 pf0 = pf_now();
     HS_IN("texture check (write watch, hash)", 0);
-    uint64_t newest = ww_newest(src, t->data_size);
+    uint64_t newest = tex_ww_newest(t, src);
     if (newest) {
         if (t->uploaded && !t->dirty && t->ww_hashed && newest <= t->ww_seen) { g_ww_clean++; pf_add(PF_TEXHASH, pf0); HS_OUT(); return; }      /* not written since the last look */
         t->ww_seen = newest;
@@ -1322,7 +1356,7 @@ static void tex_sync_a(Tex *t, int async) {
     pf_add(PF_TEXHASH, pf0); g_pf_hash_bytes += (LONG64)t->data_size;
     HS_OUT();
     if (same) return;
-    while (glGetError()) {}
+    GL_ERR_CLEAR_SOFT();
     pf0 = pf_now();
     uint64_t key;
     GLuint twin;
@@ -1337,7 +1371,7 @@ static void tex_sync_a(Tex *t, int async) {
           t->b.target, t->b.width, t->b.height, t->b.depth, t->b.format, t->b.levels, (unsigned)t->b.flags, (unsigned long long)t->data_size, t->o.gl, again ? " (again)" : " (first)", dirty ? " dirty" : "",
           (double)(pf_now() - pf0) * 1000.0 / (double)qpf, twin ? " (copied from an earlier texture)" : t->dec_pending ? " (deferred)" : seen ? " (seen before)" : ""); }
     pf_add(PF_TEXUP, pf0);
-    GLenum e = glGetError();
+    GLenum e = GL_ERR_SOFT();
     static int nlog;
     if (e) logf_limited(&nlog, 20, "nvn_gl: upload of texture %dx%d format 0x%x target %d failed with GL error 0x%x\n", t->b.width, t->b.height, t->b.format, t->b.target, e);
     t->hash = h; t->uploaded = 1; t->dirty = 0; t->upframe = g_st.frames;
@@ -1517,13 +1551,14 @@ static int rtlog_match(const Tex *t) {         /* TEST ONLY, TOMO_RTLOG=<w>x<h>[
     if (lw == -2) { const char *e = getenv("TOMO_RTLOG"); lw = -1; if (e && sscanf(e, "%dx%d", &lw, &lh) != 2) lw = -1; if (e && strchr(e, ':')) lf = (int)strtol(strchr(e, ':') + 1, NULL, 16); }
     return lw > 0 && t && t->b.width == lw && t->b.height == lh && (lf < 0 || t->b.format == lf);
 }
+static void tex_crop_free(Tex *c) {
+    if (!c) return;
+    for (VNode *n = c->views, *next; n; n = next) { next = n->next; texobj_free(&n->o, 1); free(n); }
+    texobj_free(&c->o, 0); free(c);
+}
 static void tex_free_gl(Tex *t) {
     alias_handoff(t);
     if (t->frz_snap) { glDeleteTextures(1, &t->frz_snap); t->frz_snap = 0; }
-    if (t->crop) {
-        for (VNode *n = t->crop->views, *next; n; n = next) { next = n->next; texobj_free(&n->o, 1); free(n); }
-        texobj_free(&t->crop->o, 0); free(t->crop); t->crop = NULL;
-    }
     {   unsigned i = g_freed_n % 16; int nv = 0;
         for (VNode *n = t->views; n; n = n->next) nv++;
         g_freed[i].gl = t->o.gl; g_freed[i].target = t->b.target; g_freed[i].format = t->b.format; g_freed[i].w = t->b.width; g_freed[i].h = t->b.height; g_freed[i].d = t->b.depth;
@@ -1546,13 +1581,15 @@ static void tex_free_gl(Tex *t) {
         if (drop >= 0) {
             for (VNode *n = g_spare[drop].views, *next; n; n = next) { next = n->next; texobj_free(&n->o, 1); free(n); }
             texobj_free(&g_spare[drop].o, 0);
+            tex_crop_free(g_spare[drop].crop);
             memmove(&g_spare[drop], &g_spare[drop + 1], sizeof g_spare[0] * (size_t)(g_spare_n - 1 - drop)); g_spare_n--;
             g_spare_full++;
         }
         if (g_spare_n < SPARE_MAX) {
             g_spare[g_spare_n].b = t->b; g_spare[g_spare_n].o = t->o; g_spare[g_spare_n].views = t->views; g_spare[g_spare_n].glevels = t->glevels;
+            g_spare[g_spare_n].crop = t->crop;     /* the 16:9 part goes with it: made anew for every remade target, its creation waited for NVIDIA's GL thread */
             g_spare_n++; g_spare_kept++;
-            memset(&t->o, 0, sizeof t->o); t->views = NULL;
+            memset(&t->o, 0, sizeof t->o); t->views = NULL; t->crop = NULL;
             tex_release_packaged(t);
             return;
         }
@@ -1561,6 +1598,7 @@ static void tex_free_gl(Tex *t) {
     for (VNode *n = t->views, *next; n; n = next) { next = n->next; texobj_free(&n->o, 1); free(n); }
     t->views = NULL;
     texobj_free(&t->o, 0);
+    tex_crop_free(t->crop); t->crop = NULL;
     tex_release_packaged(t);
 }
 
@@ -1570,7 +1608,13 @@ static int g_sampler_count;
 static GLuint sampler_gl(const SamplerParams *p) {
     static const GLenum minf[6] = {GL_NEAREST, GL_LINEAR, GL_NEAREST_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_LINEAR};
     static const GLenum wrap[8] = {GL_CLAMP, GL_REPEAT, 0x8742, 0x8743, 0x8912, 0x812D, 0x8370, 0x812F};
-    for (int i = 0; i < g_sampler_count; i++) if (!memcmp(&g_samplers[i].p, p, sizeof *p)) return g_samplers[i].gl;
+    /* by a hash of the parameters (1024 slots, indices + 1): a texture bind searched the ~80 samplers one by one (3,000 binds
+     * a frame on the island) */
+    static int16_t slot[1024];
+    uint64_t hh = 0xcbf29ce484222325ULL;
+    for (size_t k = 0; k < sizeof *p; k++) hh = (hh ^ ((const uint8_t *)p)[k]) * 0x100000001b3ULL;
+    unsigned at = (unsigned)(hh >> 54);
+    for (; slot[at]; at = (at + 1) & 1023) if (!memcmp(&g_samplers[slot[at] - 1].p, p, sizeof *p)) return g_samplers[slot[at] - 1].gl;
     GLuint s = 0;
     glGenSamplers(1, &s);
     glSamplerParameteri(s, GL_TEXTURE_MIN_FILTER, (GLint)minf[p->min < 6 ? p->min : 1]);
@@ -1614,7 +1658,7 @@ static GLuint sampler_gl(const SamplerParams *p) {
             if (said++ < 8) printf("nvn_gl: comparison sampler: func %d (GL 0x%x)\n", p->cfunc, GL_NEVER + (p->cfunc ? p->cfunc - 1 : 7));
         }
     }
-    if (g_sampler_count < 512) { g_samplers[g_sampler_count].p = *p; g_samplers[g_sampler_count++].gl = s; }
+    if (g_sampler_count < 512) { g_samplers[g_sampler_count].p = *p; g_samplers[g_sampler_count++].gl = s; slot[at] = (int16_t)g_sampler_count; }
     return s;
 }
 
@@ -1691,6 +1735,28 @@ static uint64_t handle_make(Tex *t, View v, SamplerParams p, int have_sampler, u
     }
     return h;
 }
+/* A texture bind the batch resolved before (same pools, same ID word, no pool entry registered since: g_pool_gen) takes that
+ * answer: the island's big list binds a few hundred textures in some thousand binds, and each resolve read the pool entries,
+ * the formats and the sampler table again (9 % of the render thread, 2026-10-31). The first bind in a batch still syncs the
+ * texture (tex_sync_a). TOMO_HMEMO=0: every bind resolved. */
+static volatile LONG g_pool_gen;                  /* (below: pool entries registered) */
+static struct { TexPool *tp; SamplerPool *sp; uint64_t nh, gl; uint32_t dims[4], ser; LONG gen; int isint; } g_hmemo[2048];
+static uint64_t resolve_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, uint32_t *dims, int *isint);
+static uint64_t resolve_handle_memo(TexPool *tp, SamplerPool *sp, uint64_t nh, uint32_t *dims, int *isint) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("TOMO_HMEMO") && getenv("TOMO_HMEMO")[0] == '0');
+    if (!on) return resolve_handle(tp, sp, nh, dims, isint);
+    unsigned i = (unsigned)(((nh ^ ((uint64_t)(uintptr_t)tp << 7) ^ ((uint64_t)(uintptr_t)sp << 13)) * 0x9E3779B97F4A7C15ULL) >> 53);
+    LONG gen = g_pool_gen;
+    if (g_hmemo[i].ser == g_serial && g_hmemo[i].gen == gen && g_hmemo[i].nh == nh && g_hmemo[i].tp == tp && g_hmemo[i].sp == sp) {
+        memcpy(dims, g_hmemo[i].dims, 16); *isint = g_hmemo[i].isint;
+        return g_hmemo[i].gl;
+    }
+    uint64_t gl = resolve_handle(tp, sp, nh, dims, isint);
+    g_hmemo[i].tp = tp; g_hmemo[i].sp = sp; g_hmemo[i].nh = nh; g_hmemo[i].gl = gl; memcpy(g_hmemo[i].dims, dims, 16);
+    g_hmemo[i].isint = *isint; g_hmemo[i].ser = g_serial; g_hmemo[i].gen = gen;
+    return gl;
+}
 static uint64_t resolve_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, uint32_t *dims, int *isint) {
     Tex *t;
     View v;
@@ -1748,7 +1814,14 @@ static int g_fbo_bad_last;                         /* set by fbo_get for an inco
 static LONG64 g_fbo_evicted, g_fbo_t_detach, g_fbo_t_make;      /* TOMO_RTSTAT */
 static GLuint fbo_get(const FboKey *k) {
     static int nlog;
-    for (int i = 0; i < NFBO; i++) if (g_fbos[i].used && !memcmp(&g_fbos[i].k, k, sizeof *k)) return g_fbos[i].fbo;
+    /* by a hash of the key first (the slot it was found in last time): each target switch compared the key with up to 1,024
+     * cached framebuffers (8 us a switch, 200 switches a frame on the island) */
+    static int16_t front[512];
+    uint64_t hh = 0xcbf29ce484222325ULL;
+    for (size_t b = 0; b < sizeof *k; b++) hh = (hh ^ ((const uint8_t *)k)[b]) * 0x100000001b3ULL;
+    int fi = (int)(hh >> 55), fs = front[fi] - 1;
+    if (fs >= 0 && g_fbos[fs].used && !memcmp(&g_fbos[fs].k, k, sizeof *k)) return g_fbos[fs].fbo;
+    for (int i = 0; i < NFBO; i++) if (g_fbos[i].used && !memcmp(&g_fbos[i].k, k, sizeof *k)) { front[fi] = (int16_t)(i + 1); return g_fbos[i].fbo; }
     LONG64 fq0 = pf_now();
     int slot = -1;
     for (int i = 0; i < NFBO && slot < 0; i++) if (!g_fbos[i].used) slot = i;
@@ -1777,7 +1850,7 @@ static GLuint fbo_get(const FboKey *k) {
         g_st.fbo_bad++; g_fbo_bad_last = 1;
         logf_limited(&nlog, 20, "nvn_gl: framebuffer incomplete (status 0x%x): %d colour targets (first gl %u), depth gl %u kind %d\n", st, k->n, k->color[0], k->depth, k->dkind);
     }
-    g_fbos[slot].k = *k; g_fbos[slot].fbo = fbo; g_fbos[slot].used = 1;
+    g_fbos[slot].k = *k; g_fbos[slot].fbo = fbo; g_fbos[slot].used = 1; front[fi] = (int16_t)(slot + 1);
     g_fbo_t_make += pf_now() - fq0;
     return fbo;
 }
@@ -1788,6 +1861,26 @@ static GLuint g_arena;
 static size_t g_arena_pos;
 static struct { uint64_t addr, size; size_t off; uint32_t gen, arena; uint64_t stamp; } g_acache[8192];
 static uint32_t g_arena_serial = 1;      /* each new store: a deleted store's GL name comes back for a later one */
+/* Small ranges (<= 16 KB: uniform blocks, texture handle tables, small vertex and index data) go into a persistently
+ * mapped ring of four 16 MB parts, written with memcpy. Each was a glBufferSubData before: 2,600 a frame on the island,
+ * each copied again by the driver's own thread, which was what limited the frame (half the resolution: 21.5 -> 20.4 ms).
+ * A part is written again once the fence set when it was left has passed. Larger ranges (meshes) stay in the 96 MB store
+ * in video memory. TOMO_RING=0: everything in the store, as before. */
+#define RING_PARTS 4
+#define RING_PART ((size_t)16 << 20)
+#define RING_MAX ((size_t)16 << 10)
+#define RING_GUARD ((size_t)1 << 20)
+static GLuint g_ring;
+static uint8_t *g_ring_map;
+static size_t g_ring_pos;
+static void *g_ring_fence[RING_PARTS];
+static uint32_t g_ring_gen[RING_PARTS];
+static int g_ring_on = -1;
+static LONG64 g_ring_calls, g_ring_bytes, g_ring_waits;
+static GLuint g_arena_buf;                 /* the buffer of the range arena_put / arena_put_raw returned last */
+static uint32_t g_arena_tag;               /* and what it is in: a store serial, or (high bit) a ring part and its generation */
+static int arena_tag_ok(uint32_t tag) { return tag & 0x80000000u ? (tag & 0xffffffu) == (g_ring_gen[(tag >> 24) & 0x7f] & 0xffffffu) : tag == g_arena_serial; }
+static GLuint arena_tag_buf(uint32_t tag) { return tag & 0x80000000u ? g_ring : g_arena; }
 static uint32_t g_arena_gen = 1;      /* (declared above ww_note) */
 /* Redundant state calls skipped: on the island (2760 draws a frame) most of the 80 000 GL calls a frame repeated the draw
  * before. These remember what the render context has bound: every storage buffer range goes through gs_ssbo, and the code
@@ -1826,17 +1919,69 @@ static void arena_retire(void) {
     }
 }
 
+static size_t ring_put(const void *p, size_t n) {     /* offset in g_ring, or (size_t)-1 */
+    if (!g_ring) {
+        if (!gl_has(glNamedBufferStorage, "glNamedBufferStorage") || !gl_has(glMapNamedBufferRange, "glMapNamedBufferRange")) { g_ring_on = 0; return (size_t)-1; }
+        glCreateBuffers(1, &g_ring);
+        /* + 1 MB that is never written: a shader reads a uniform block past the range bound for it, and a draw fetches vertices
+         * past its buffer's size (the console returns zeros there); at the ring's end such a read left the mapping and the GPU
+         * faulted (the NVIDIA driver then closes the game: "A TDR has been detected", 7 times in 25 runs before this) */
+        glNamedBufferStorage(g_ring, (ptrdiff_t)(RING_PARTS * RING_PART + RING_GUARD), NULL, 0x2 | 0x40 | 0x80);      /* MAP_WRITE | PERSISTENT | COHERENT */
+        g_ring_map = glMapNamedBufferRange(g_ring, 0, (ptrdiff_t)(RING_PARTS * RING_PART + RING_GUARD), 0x2 | 0x40 | 0x80);
+        if (g_ring_map) memset(g_ring_map + RING_PARTS * RING_PART, 0, RING_GUARD);
+        if (!g_ring_map) { glDeleteBuffers(1, &g_ring); g_ring = 0; g_ring_on = 0; gs_invalidate(); return (size_t)-1; }
+        g_ring_gen[0] = 1;
+    }
+    size_t pos = (g_ring_pos + 255) & ~(size_t)255;
+    static int part;                                     /* (from the position, a write that ended at the ring's end gave part 4) */
+    if (pos + n > (size_t)(part + 1) * RING_PART) {      /* into the next part, once the GPU is done with it */
+        /* The part left is not handed out again (its kept uploads, handle tables and copies stop being valid here): before,
+         * they stayed valid while the next parts filled, draws issued later still read them, and when the ring came round
+         * the part was written over under draws its fence did not cover: corrupted index and uniform data, the GPU faulted
+         * and the NVIDIA driver closed the game ("A TDR has been detected"; 2 of 2 runs with the driver's own GL thread).
+         * A draw can still bind ranges from both sides of the switch: the part is written again after the fence of the
+         * part that followed it, which came after that draw. */
+        g_ring_gen[part]++;
+        g_ring_fence[part] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0);
+        part = (part + 1) % RING_PARTS; pos = (size_t)part * RING_PART;
+        int after = (part + 1) % RING_PARTS;
+        if (g_ring_fence[after]) {
+            if (glClientWaitSync(g_ring_fence[after], 0, 0) == 0x911B /* TIMEOUT_EXPIRED */) { g_ring_waits++; HS_IN("buffer streaming: ring part still in use (wait)", 0); glClientWaitSync(g_ring_fence[after], 1, 2000000000ull); HS_OUT(); }
+            glDeleteSync(g_ring_fence[after]); g_ring_fence[after] = NULL;
+        }
+    }
+    memcpy(g_ring_map + pos, p, n);
+    g_ring_pos = pos + n;
+    g_ring_calls++; g_ring_bytes += (LONG64)n;
+    g_arena_buf = g_ring; g_arena_tag = 0x80000000u | ((uint32_t)part << 24) | (g_ring_gen[part] & 0xffffffu);
+    return pos;
+}
 static size_t arena_put_raw(const void *p, size_t n) {
+    if (g_ring_on < 0) g_ring_on = !(getenv("TOMO_RING") && getenv("TOMO_RING")[0] == '0');
+    if (g_ring_on && n <= RING_MAX) { size_t off = ring_put(p, n); if (off != (size_t)-1) return off; }
     g_arena_pos = (g_arena_pos + 255) & ~(size_t)255;
     if (g_arena_pos + n > ARENA_SIZE) {
-        /* Earlier bindings of this draw still read the old store; replacing its storage erases those inputs. */
-        ArenaOld *old = malloc(sizeof *old);
-        if (!old) { fprintf(stderr, "nvn_gl: cannot retain the upload buffer\n"); ExitProcess(5); }
-        old->buf = g_arena; old->next = g_arena_old; g_arena_old = old;
-        HS_IN("buffer streaming: new 96 MB store (glBufferData)", 0);
-        glGenBuffers(1, &g_arena); glBindBuffer(GL_ARRAY_BUFFER_, g_arena);
-        glBufferData(GL_ARRAY_BUFFER_, (ptrdiff_t)(n > ARENA_SIZE ? n : ARENA_SIZE), NULL, GL_STREAM_DRAW_);
-        HS_OUT(); g_arena_pos = 0; g_arena_gen++; g_arena_serial++;
+        /* The next of three stores, once the GPU is done with what it held (its fence): a new 96 MB buffer at every rollover
+         * (every ~13 frames on the island, 7.5 MB a frame of large ranges) cost the driver an allocation and the old one's
+         * release each time. (Earlier bindings of this draw still read the store being left: it is not written again before
+         * its fence has passed.) */
+        static GLuint store[3]; static void *fence[3]; static int cur;
+        if (!store[cur]) store[cur] = g_arena;
+        fence[cur] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0);
+        cur = (cur + 1) % 3;
+        int after = (cur + 1) % 3;                      /* (a draw binding ranges from both sides of the rollover: as for the ring) */
+        if (fence[after]) {
+            if (glClientWaitSync(fence[after], 0, 0) == 0x911B /* TIMEOUT_EXPIRED */) { HS_IN("buffer streaming: store still in use (wait)", 0); glClientWaitSync(fence[after], 1, 2000000000ull); HS_OUT(); }
+            glDeleteSync(fence[after]); fence[after] = NULL;
+        }
+        if (!store[cur]) {
+            HS_IN("buffer streaming: new 96 MB store (glBufferData)", 0);
+            glGenBuffers(1, &store[cur]); glBindBuffer(GL_ARRAY_BUFFER_, store[cur]);
+            glBufferData(GL_ARRAY_BUFFER_, (ptrdiff_t)ARENA_SIZE, NULL, GL_STREAM_DRAW_);
+            HS_OUT();
+        }
+        g_arena = store[cur]; glBindBuffer(GL_ARRAY_BUFFER_, g_arena);
+        g_arena_pos = 0; g_arena_gen++; g_arena_serial++;
     }
     size_t off = g_arena_pos;
     LONG64 pf0 = pf_now();
@@ -1846,12 +1991,14 @@ static size_t arena_put_raw(const void *p, size_t n) {
     pf_add(PF_ARENA, pf0); g_pf_arena_bytes += (LONG64)n;
     g_arena_pos += n;
     g_st.arena_bytes += (LONG64)n;
+    g_arena_buf = g_arena; g_arena_tag = g_arena_serial;
     return off;
 }
 static void arena_selftest(void) {
     if (!getenv("SSBU_ARENA_SELFTEST")) return;
     const uint32_t first = 0x12345678, second = 0xabcdef01;
     uint32_t got = 0;
+    g_ring_on = 0;                                /* (the store's rollover is tested) */
     size_t off = arena_put_raw(&first, sizeof first);
     GLuint before = g_arena;
     gs_ssbo(0, before, (ptrdiff_t)off, sizeof first);
@@ -1956,7 +2103,7 @@ static void rb_land_range(uint64_t addr, uint64_t size) {
 #define SNAP_MAX_UBO 65536
 #define SNAP_MAX_VBUF 32768
 typedef struct { uint64_t addr, size; size_t off, aoff; LONG64 emu_at; uint32_t aserial; int state; } SnapEnt;      /* state: 0 not looked at in the replay, 1 guest memory, 2 the copy (uploaded at aoff) */
-typedef struct SnapSet { SnapEnt *e; unsigned cap, n; int bad; uint8_t *data; size_t len, dcap; LONG64 emu; struct SnapSet *next; } SnapSet;
+typedef struct SnapSet { SnapEnt *e; unsigned cap, n; int bad; uint8_t *data; size_t len, dcap; LONG64 emu; struct SnapSet *next; volatile LONG ready; } SnapSet;
 static SnapSet *g_snap_cur;                              /* the batch being replayed (render thread) */
 static SnapSet *g_snap_pool;                             /* sets to use again (g_snap_lock) */
 static SRWLOCK g_snap_lock = SRWLOCK_INIT;
@@ -2014,13 +2161,31 @@ static SnapEnt *snap_pick(uint64_t addr, uint64_t size) {
     return e->state == 2 && snap_on() == 1 ? e : NULL;
 }
 /* Offset in the streaming buffer of a copy of guest memory [addr, addr+size), made at most once per batch. */
+static size_t arena_put_slow(uint64_t addr, uint64_t size);
+/* The same range again with nothing in between that can change it (g_arena_gen moves at every batch, read-back, copy or
+ * uniform update of ours, and the range's store or ring part is still the same): the last answer. Most draws bind the
+ * ranges the draw before bound (17,000 binds a frame on the island, 60 % repeats); each took the kept-upload table, the
+ * write stamps of its pages and the submission copies. TOMO_AFRONT=0: off. */
+static struct { uint64_t addr, size; size_t off; uint32_t gen, tag; } g_afront[1024];
 static size_t arena_put(uint64_t addr, uint64_t size) {
+    static int on = -1; if (on < 0) on = !(getenv("TOMO_AFRONT") && getenv("TOMO_AFRONT")[0] == '0');
+    unsigned fi = (unsigned)((((addr >> 4) ^ (size << 32)) * 0x9E3779B97F4A7C15ULL) >> 54);
+    if (on && g_afront[fi].addr == addr && g_afront[fi].size == size && g_afront[fi].gen == g_arena_gen && arena_tag_ok(g_afront[fi].tag)) {
+        g_arena_tag = g_afront[fi].tag; g_arena_buf = arena_tag_buf(g_arena_tag);
+        return g_afront[fi].off;
+    }
+    size_t off = arena_put_slow(addr, size);
+    g_afront[fi].addr = addr; g_afront[fi].size = size; g_afront[fi].off = off; g_afront[fi].gen = g_arena_gen; g_afront[fi].tag = g_arena_tag;
+    return off;
+}
+static size_t arena_put_slow(uint64_t addr, uint64_t size) {
     static int nlog;
     if (g_rbp_n) rb_land_range(addr, size);
     if (size > ARENA_SIZE / 4) { logf_limited(&nlog, 10, "nvn_gl: buffer range of %llu bytes clamped to %llu\n", (unsigned long long)size, (unsigned long long)(ARENA_SIZE / 4)); size = ARENA_SIZE / 4; }
     {   SnapEnt *se = g_snap_cur ? snap_pick(addr, size) : NULL;      /* the game rewrote it after the submission: what it held then */
         if (se) {
-            if (se->aserial != g_arena_serial) { se->aoff = arena_put_raw(g_snap_cur->data + se->off, (size_t)size); se->aserial = g_arena_serial; }
+            if (!arena_tag_ok(se->aserial)) { se->aoff = arena_put_raw(g_snap_cur->data + se->off, (size_t)size); se->aserial = g_arena_tag; }
+            else { g_arena_buf = arena_tag_buf(se->aserial); g_arena_tag = se->aserial; }
             return se->aoff;
         }
     }
@@ -2030,17 +2195,17 @@ static size_t arena_put(uint64_t addr, uint64_t size) {
     if (now) ww_chunk_mark(addr, size);             /* its pages are asked for at every batch from now on (ww_scan_regions) */
     for (int probe = 0; probe < 8; probe++) {
         unsigned i = (h + (unsigned)probe) & 8191;
-        if (g_acache[i].addr == addr && g_acache[i].size == size && g_acache[i].arena == g_arena_serial) {
-            if (g_acache[i].gen == g_arena_gen || (now && now <= g_acache[i].stamp)) return g_acache[i].off;
+        if (g_acache[i].addr == addr && g_acache[i].size == size && arena_tag_ok(g_acache[i].arena)) {
+            if (g_acache[i].gen == g_arena_gen || (now && now <= g_acache[i].stamp)) { g_arena_tag = g_acache[i].arena; g_arena_buf = arena_tag_buf(g_arena_tag); return g_acache[i].off; }
             pick = i; break;
         }
-        if (pick == 8192 && (g_acache[i].arena != g_arena_serial || (g_acache[i].gen != g_arena_gen && !g_acache[i].stamp))) pick = i;
+        if (pick == 8192 && (!arena_tag_ok(g_acache[i].arena) || (g_acache[i].gen != g_arena_gen && !g_acache[i].stamp))) pick = i;
     }
     if (pick == 8192) pick = h & 8191;
     uint64_t stamp = g_ww_stamp;                    /* a later write gets a larger stamp */
     size_t off = arena_put_raw(P(addr), (size_t)size);      /* may start a new store */
     g_acache[pick].addr = addr; g_acache[pick].size = size; g_acache[pick].off = off; g_acache[pick].gen = g_arena_gen;
-    g_acache[pick].arena = g_arena_serial; g_acache[pick].stamp = now ? stamp : 0;
+    g_acache[pick].arena = g_arena_tag; g_acache[pick].stamp = now ? stamp : 0;
     return off;
 }
 
@@ -2735,8 +2900,9 @@ static DWORD WINAPI shd_worker(LPVOID arg) {
     HGLRC rc = wglCreateContext(dc);
     if (!rc || !wglMakeCurrent(dc, rc)) { InterlockedIncrement(&g_shw_ctx_failed); return 0; }
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    { void display_background_thread(void); display_background_thread(); }      /* display.c: off the game's cores */
     GLuint pw_pipe = 0, pw_empty = 0;                  /* P3 round 4: the pair jobs draw one discarded point through this pipeline */
-    if (!getenv("SSBU_GL_DRIVER_THREAD")) { glEnable(GL_DEBUG_OUTPUT_); glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS_); }
+    glEnable(GL_DEBUG_OUTPUT_); glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS_);      /* (no driver thread here: compiles and links answer every call, gl_driver_thread is for the render thread's draws) */
     {   static const char *const src[1] = {"#version 450\nvoid main() {}\n"};
         static const float zero[64];
         GLuint vb = 0;
@@ -2997,6 +3163,7 @@ static void shp_queue(void) {                      /* render thread, start (prec
         GetSystemInfo(&si);
         int want = (int)si.dwNumberOfProcessors - 2;
         if (want > 12) want = 12;
+        if (getenv("SSBU_SHADER_WORKERS")) want = g_shw_n;      /* (the count asked for, as for the run-time workers) */
         for (; g_shw_n < want; g_shw_n++) { DWORD tid = 0; CloseHandle(CreateThread(NULL, 0, shd_worker, NULL, 0, &tid)); if (g_shw_n < 8) g_shw_tid[g_shw_n] = tid; }
     }
     printf("nvn_gl: shader preparation: %d variations of %d containers queued (%d repeated), %d workers%c", nvar, ncont, ndup, g_shw_n, 10);
@@ -3262,11 +3429,18 @@ static DWORD WINAPI pre_reader(LPVOID arg) {
     return 0;
 }
 static int pre_pending(void) { return g_pre_reading || g_pre_head; }
+/* With NVIDIA's GL thread (gl_driver_thread) these calls return before the driver has done the work, and each status query
+ * waits for everything queued before it: unbounded, a 2 ms slice could queue far more work than 2 ms ahead of the next
+ * frame's commands (5,465 binaries at every start). There a slice loads at most 3 and asks for their link status once at
+ * its end (the one wait = the slice's own work, as without the driver's thread); a binary the driver refused is taken out
+ * again before any draw could use it (draws run after this returns). */
 static void pre_idle(void) {                       /* render thread, no job queued: programs from the binaries read, ~2 ms */
     static LONG64 freq;
     if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; }
     LONG64 t0 = pf_now();
-    while (pf_now() - t0 < freq / 500 && !g_job_head) {
+    ShSrc *chk[3];
+    int nchk = 0;
+    while (pf_now() - t0 < freq / 500 && !g_job_head && nchk < (g_gl_thr_on ? 3 : 1)) {
         EnterCriticalSection(&g_pre_lock);
         PreBuf *b = g_pre_head;
         if (b) { g_pre_head = b->next; if (!g_pre_head) g_pre_tail = NULL; }
@@ -3276,20 +3450,32 @@ static void pre_idle(void) {                       /* render thread, no job queu
         int have = 0;
         for (ShSrc *e = g_shs[b->h & 4095]; e && !have; e = e->next) have = e->h == b->h && e->len == b->len;
         if (!have) {
-            GLint ok = 0;
+            GLint ok = 1;
             GLuint q = glCreateProgram();
             glProgramParameteri(q, 0x8258 /* PROGRAM_SEPARABLE */, 1);
             glProgramBinary(q, b->fmt, b->data, (GLsizei)b->size);
-            glGetProgramiv(q, 0x8B82, &ok);
-            while (glGetError()) {}
+            if (!g_gl_thr_on) { glGetProgramiv(q, 0x8B82, &ok); while (glGetError()) {} }
             if (ok) {
                 ShSrc *e = calloc(1, sizeof *e);
                 e->h = b->h; e->len = b->len; e->prog = q; e->next = g_shs[b->h & 4095]; g_shs[b->h & 4095] = e;
                 if (q < 65536) g_prog_src[q] = e;
                 g_pre_n++; g_shd_loaded++;
+                if (g_gl_thr_on) chk[nchk++] = e;
             } else glDeleteProgram(q);
         }
         free(b);
+        if (!g_gl_thr_on) nchk = 0;
+    }
+    for (int i = 0; i < nchk; i++) {               /* (driver's thread) the slice's binaries: refused ones out again */
+        GLint ok = 0;
+        ShSrc *e = chk[i], **pp = &g_shs[e->h & 4095];
+        glGetProgramiv(e->prog, 0x8B82, &ok);
+        if (ok) continue;
+        while (*pp && *pp != e) pp = &(*pp)->next;
+        if (*pp) *pp = e->next;
+        if (e->prog < 65536 && g_prog_src[e->prog] == e) g_prog_src[e->prog] = NULL;
+        glDeleteProgram(e->prog); free(e);
+        g_pre_n--; g_shd_loaded--;
     }
     g_pre_ticks += pf_now() - t0;
     if (!pre_pending() && !g_pre_said) {
@@ -4376,14 +4562,16 @@ static void set_targets(int n, const TargetRef *col, const TargetRef *depth) {
 }
 
 /* Everything a draw needs that is not plain GL state: programs, their buffers, texture handles, vertex streams. */
+static GLuint g_tex_buf[6];                       /* the buffer each stage's handle table went into (S.tex_off) */
+static uint32_t g_tex_tag[6];                     /* and where in it (arena_tag_ok) */
 static void bind_handle_table(int s, GLenum target, GLuint index, int skip) {
-    if (S.tex_dirty[s] || S.tex_gen[s] != g_arena_gen) {
+    if (S.tex_dirty[s] || S.tex_gen[s] != g_arena_gen || !arena_tag_ok(g_tex_tag[s])) {
         S.tex_off[s] = arena_put_raw(S.gl_tex[s], sizeof S.gl_tex[s]);
-        S.tex_gen[s] = g_arena_gen; S.tex_dirty[s] = 0;
+        S.tex_gen[s] = g_arena_gen; S.tex_dirty[s] = 0; g_tex_buf[s] = g_arena_buf; g_tex_tag[s] = g_arena_tag;
     }
-    if (target == GL_SHADER_STORAGE_BUFFER_) gs_ssbo(index, g_arena, (ptrdiff_t)S.tex_off[s] + skip, skip ? (ptrdiff_t)256 : (ptrdiff_t)sizeof S.gl_tex[s]);
-    else if (target == GL_UNIFORM_BUFFER_) gs_ubo(index, g_arena, (ptrdiff_t)S.tex_off[s] + skip, skip ? (ptrdiff_t)256 : (ptrdiff_t)sizeof S.gl_tex[s]);
-    else glBindBufferRange(target, index, g_arena, (ptrdiff_t)S.tex_off[s] + skip, skip ? (ptrdiff_t)256 : (ptrdiff_t)sizeof S.gl_tex[s]);
+    if (target == GL_SHADER_STORAGE_BUFFER_) gs_ssbo(index, g_tex_buf[s], (ptrdiff_t)S.tex_off[s] + skip, skip ? (ptrdiff_t)256 : (ptrdiff_t)sizeof S.gl_tex[s]);
+    else if (target == GL_UNIFORM_BUFFER_) gs_ubo(index, g_tex_buf[s], (ptrdiff_t)S.tex_off[s] + skip, skip ? (ptrdiff_t)256 : (ptrdiff_t)sizeof S.gl_tex[s]);
+    else glBindBufferRange(target, index, g_tex_buf[s], (ptrdiff_t)S.tex_off[s] + skip, skip ? (ptrdiff_t)256 : (ptrdiff_t)sizeof S.gl_tex[s]);
 }
 /* Debug aid SSBU_DRAWLOG=<frame>: state of every draw of that frame, and how many samples each draw produced. */
 static LONG64 g_prev_frame_draws, g_drawlog_frame = -1, g_disp_frames, g_frame_dispatch;
@@ -4440,6 +4628,14 @@ static int g_frag_ssbo_pending;               /* a draw's fragment stage wrote a
 static int g_cbuf_live;
 static CBuf *cbuf_find(uint64_t addr, uint64_t size);
 static CBuf *cbuf_get(uint64_t addr, uint64_t size);
+/* A vertex stream that lies inside a buffer the GPU wrote in this batch (still held in GL) is read from that GL buffer: it
+ * used to go back to guest memory first (compute_flush: a wait for the GPU) and be streamed in again; some island scenes
+ * did that 11 times a frame (3.7-4.3 ms of the render thread waiting, 2026-10-31). TOMO_VB_DIRECT=0: as before. */
+static int vb_direct_on(void) { static int on = -1; if (on < 0) on = !(getenv("TOMO_VB_DIRECT") && getenv("TOMO_VB_DIRECT")[0] == '0'); return on; }
+static CBuf *cbuf_holding(uint64_t addr, uint64_t size) {
+    for (int k = 0; k < 64; k++) if (g_cbuf[k].live && addr >= g_cbuf[k].addr && addr + size <= g_cbuf[k].addr + g_cbuf[k].size) return &g_cbuf[k];
+    return NULL;
+}
 static int g_dbg_noscissor, g_dbg_skipdraw = -1, g_frame_draw_index;
 static void snaplog_where(char *buf, size_t n) { snprintf(buf, n, "draw %d fbo %u (%dx%d)", g_frame_draw_index, S.fbo, S.fbo_w, S.fbo_h); }      /* debug aids: SSBU_NOSCISSOR=1, SSBU_SKIPDRAW=<n-th draw of every frame> */
 /* Audit measurement (fake audit, row "unbound or dead texture slots sample a 1x1 dummy texture"): draws whose bound
@@ -4578,10 +4774,10 @@ static int draw_prepare(void) {
             if (!g_cbuf[k].live) continue;
             uint64_t a = g_cbuf[k].addr, z = g_cbuf[k].size;
             hit = OVL(g_draw_ibuf);
-            for (uint32_t m = vm, i = 0; m && !hit; m >>= 1, i++) hit = (m & 1) && OVL(S.vbuf[i]);
+            for (uint32_t m = vm, i = 0; m && !hit; m >>= 1, i++) { hit = (m & 1) && OVL(S.vbuf[i]) && !(vb_direct_on() && S.vbuf[i].addr >= a && S.vbuf[i].addr + S.vbuf[i].size <= a + z); }
             for (int st = 0; st < 5 && !hit; st++) {
-                for (uint32_t m = um[st], n = 0; m && !hit; m >>= 1, n++) hit = (m & 1) && OVL(S.ubo[st][n]);
-                for (uint32_t m = sm[st], n = 0; m && !hit; m >>= 1, n++) hit = (m & 1) && OVL(S.ssbo[st][n]) && !(S.ssbo[st][n].addr == a && S.ssbo[st][n].size == z);
+                for (uint32_t m = um[st], n = 0; m && !hit; m >>= 1, n++) { hit = (m & 1) && OVL(S.ubo[st][n]); }
+                for (uint32_t m = sm[st], n = 0; m && !hit; m >>= 1, n++) { hit = (m & 1) && OVL(S.ssbo[st][n]) && !(S.ssbo[st][n].addr == a && S.ssbo[st][n].size == z); }
             }
         }
         #undef OVL
@@ -4700,7 +4896,7 @@ static int draw_prepare(void) {
                         gs_ssbo(40 + (GLuint)s * 16 + n, cb->buf, 0, (ptrdiff_t)S.ssbo[s][n].size);
                     } else {
                         size_t off = arena_put(S.ssbo[s][n].addr, S.ssbo[s][n].size);
-                        gs_ssbo(40 + (GLuint)s * 16 + n, g_arena, (ptrdiff_t)off, (ptrdiff_t)S.ssbo[s][n].size);
+                        gs_ssbo(40 + (GLuint)s * 16 + n, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)S.ssbo[s][n].size);
                     }
                 }
             if (st->glsl_cbufs & 0x80000000u) bl_bind();        /* TEX.B: the bindless handle table */
@@ -4720,8 +4916,8 @@ static int draw_prepare(void) {
                 }
                 if (r.addr && r.size) {
                     size_t off = arena_put(r.addr, r.size);
-                    if (st->glsl_ubo) gs_ubo((GLuint)s * 18 + n, g_arena, (ptrdiff_t)off, (ptrdiff_t)r.size);
-                    else gs_ssbo((GLuint)s * 20 + n, g_arena, (ptrdiff_t)off, (ptrdiff_t)r.size);
+                    if (st->glsl_ubo) gs_ubo((GLuint)s * 18 + n, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)r.size);
+                    else gs_ssbo((GLuint)s * 20 + n, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)r.size);
                     g_gs_buf_bind++;
                 }
             }
@@ -4750,13 +4946,13 @@ static int draw_prepare(void) {
                 bind_handle_table(s, k_pbuf_target[s], (GLuint)i, 32);
             } else if (n < 16 && S.ubo[s][n].addr && S.ubo[s][n].size) {
                 size_t off = arena_put(S.ubo[s][n].addr, S.ubo[s][n].size);
-                glBindBufferRange(k_pbuf_target[s], (GLuint)i, g_arena, (ptrdiff_t)off, (ptrdiff_t)S.ubo[s][n].size);
+                glBindBufferRange(k_pbuf_target[s], (GLuint)i, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)S.ubo[s][n].size);
             }
         }
         for (uint32_t m = st->storage & ~storage, n = 0; m; m >>= 1, n++)
             if ((m & 1) && S.ssbo[s][n].addr && S.ssbo[s][n].size) {
                 size_t off = arena_put(S.ssbo[s][n].addr, S.ssbo[s][n].size);
-                gs_ssbo(n, g_arena, (ptrdiff_t)off, (ptrdiff_t)S.ssbo[s][n].size);
+                gs_ssbo(n, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)S.ssbo[s][n].size);
                 storage |= 1u << n;
             }
     }
@@ -4785,10 +4981,14 @@ static int draw_prepare(void) {
     }
     for (int i = 0; i < 16; i++)
         if (S.vbuf[i].addr && S.vbuf[i].size) {
-            size_t off = arena_put(S.vbuf[i].addr, S.vbuf[i].size);
-            if (g_gs_vb[i].buf != g_arena || g_gs_vb[i].off != (ptrdiff_t)off || g_gs_vb[i].stride != (GLsizei)S.vstream[i].stride || !(g_gs_on & 8)) {
-                glBindVertexBuffer((GLuint)i, g_arena, (ptrdiff_t)off, (GLsizei)S.vstream[i].stride);
-                g_gs_vb[i].buf = g_arena; g_gs_vb[i].off = (ptrdiff_t)off; g_gs_vb[i].stride = (GLsizei)S.vstream[i].stride;
+            CBuf *cb = g_cbuf_live && vb_direct_on() ? cbuf_holding(S.vbuf[i].addr, S.vbuf[i].size) : NULL;
+            GLuint vbo = g_arena_buf;
+            size_t off;
+            if (cb) { vbo = cb->buf; off = (size_t)(S.vbuf[i].addr - cb->addr); if (cb->frag && cb->dirty) glMemoryBarrier(0x1 /* VERTEX_ATTRIB_ARRAY */); }
+            else { off = arena_put(S.vbuf[i].addr, S.vbuf[i].size); vbo = g_arena_buf; }
+            if (g_gs_vb[i].buf != vbo || g_gs_vb[i].off != (ptrdiff_t)off || g_gs_vb[i].stride != (GLsizei)S.vstream[i].stride || !(g_gs_on & 8)) {
+                glBindVertexBuffer((GLuint)i, vbo, (ptrdiff_t)off, (GLsizei)S.vstream[i].stride);
+                g_gs_vb[i].buf = vbo; g_gs_vb[i].off = (ptrdiff_t)off; g_gs_vb[i].stride = (GLsizei)S.vstream[i].stride;
                 g_gs_vbuf_bind++;
             }
             if (g_gs_vb[i].div != S.vstream[i].divisor + 1 || !(g_gs_on & 8)) { glVertexBindingDivisor((GLuint)i, S.vstream[i].divisor); g_gs_vb[i].div = S.vstream[i].divisor + 1; }
@@ -5223,7 +5423,7 @@ static void compute_bind_glsl(Prog *p) {
         if (n == 1) { r.addr = (uint64_t)(uintptr_t)st->cdata_copy; r.size = st->cdata_copy ? st->ctl[3] : 0; } else r = S.ubo[5][n - 3];
         if (r.addr && r.size) {
             size_t off = arena_put(r.addr, r.size);
-            gs_ssbo(n, g_arena, (ptrdiff_t)off, (ptrdiff_t)r.size);
+            gs_ssbo(n, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)r.size);
         }
     }
     for (int k = 0; k < 8; k++) {
@@ -5302,7 +5502,7 @@ static void compute_dispatch(unsigned gx, unsigned gy, unsigned gz) {
         if (held[n]) gs_ssbo(binding, held[n]->buf, 0, (ptrdiff_t)r.size);
         else {
             size_t off = arena_put(r.addr, r.size);
-            gs_ssbo(binding, g_arena, (ptrdiff_t)off, (ptrdiff_t)r.size);
+            gs_ssbo(binding, g_arena_buf, (ptrdiff_t)off, (ptrdiff_t)r.size);
         }
     }
     if (text) {
@@ -5768,7 +5968,7 @@ static void exec(const Cmd *m, int depth) {
     int noted = gputime_ms() != 0 && m->op != OP_CALL;
     int isdraw = m->op == OP_DRAW_ARRAYS || m->op == OP_DRAW_ELEMENTS || m->op == OP_DRAW_INDIRECT || m->op == OP_DISPATCH || m->op == OP_DISPATCH_INDIRECT;
     int timed = noted && (every ? isdraw && ++nth % (unsigned)every == 0 : 1);
-    LONG64 gt0 = timed ? pf_now() : 0, oc0 = isdraw ? 0 : pf_now();
+    LONG64 gt0 = timed ? pf_now() : 0, oc0 = isdraw || !pf_detail() ? 0 : pf_now();
     if (noted) gputime_note(m);
     if (g_rbp_n) switch (m->op) {             /* commands that touch guest memory: read-backs in flight over it land first */
         case OP_UPDATE_UBO: rb_land_range(a[0] + a[2], a[3]); break;
@@ -5818,7 +6018,7 @@ static void exec(const Cmd *m, int depth) {
             uint32_t dims[4] = {0, 0, 0, 0};
             int isint = 0;
             unsigned u = (unsigned)(first + i);
-            { LONG64 pf0 = pf_now(); HS_IN("texture handle (view, sampler, bindless handle)", 0); S.gl_tex[stage][4 + u] = resolve_handle(S.tpool, S.spool, h, dims, &isint); HS_OUT(); pf_add(PF_HANDLE, pf0); }
+            { LONG64 pf0 = pf_detail() ? pf_now() : 0; HS_IN("texture handle (view, sampler, bindless handle)", 0); S.gl_tex[stage][4 + u] = resolve_handle_memo(S.tpool, S.spool, h, dims, &isint); HS_OUT(); if (pf0) pf_add(PF_HANDLE, pf0); }
             {   static long long lo = -2, hi;      /* TOMO_TEXBINDLOG=<from>-<to>: binds of textures born or uploaded in the last 8 frames, or finalized */
                 if (lo == -2) { const char *e = getenv("TOMO_TEXBINDLOG"); lo = -1; if (e) sscanf(e, "%lld-%lld", &lo, &hi); }
                 if (lo >= 0 && g_st.frames >= lo && g_st.frames <= hi && S.tpool) {
@@ -6011,21 +6211,21 @@ static void exec(const Cmd *m, int depth) {
         break;
     }
     case OP_DRAW_ARRAYS: {
-        LONG64 pf0 = pf_now();
+        LONG64 pf0 = pf_detail() ? pf_now() : 0;
         int ok;
         feedback_guard();
         { HS_IN("draw state (pipeline, bindings)", 0); ok = draw_prepare(); HS_OUT(); }
-        pf_add(PF_PREP, pf0);
+        if (pf0) pf_add(PF_PREP, pf0);
         if (g_draw_tag) dt_line("gl", g_draw_tag, g_dt_idx++, ok, (unsigned)a[0], -1, (int)a[2], 0, (long long)a[1], (unsigned)a[3], (unsigned)a[4], S.prog, S.nattr, S.vattr, S.vbuf, (const uint32_t *)S.vstream, S.ubo, S.ssbo, dt_host);
         if (!ok) { g_st.draws_skipped++; g_frame_skipped++; break; }
         if (drawlog_now()) printf("  DrawArrays mode %d first %d count %d base instance %d instances %d%c", (int)a[0], (int)a[1], (int)a[2], (int)a[3], (int)a[4], 10);
         drawlog_begin();
         first_draw_warm();
-        pf0 = pf_now();
+        pf0 = pf_detail() || g_hitch_ms ? pf_now() : 0;
         g_fd_prim = (unsigned)a[0]; g_fd_count = (unsigned)a[2];
         { HS_IN("draw call (driver)", 0); glDrawArraysInstancedBaseInstance(nvn_prim((unsigned)a[0]), (GLint)a[1], (GLsizei)a[2], (GLsizei)a[4], (GLuint)a[3]); HS_OUT(); }
         feedback_restore();
-        pf_add(PF_DRAWCALL, pf0);
+        if (pf0) pf_add(PF_DRAWCALL, pf0);
         if (g_hitch_ms) hitch_draw(pf0);
         drawlog_end();
         draw_shot();
@@ -6036,7 +6236,7 @@ static void exec(const Cmd *m, int depth) {
         static const GLenum itype[3] = {GL_UNSIGNED_BYTE, GL_UNSIGNED_SHORT, GL_UNSIGNED_INT};
         unsigned t = (unsigned)a[1] < 3 ? (unsigned)a[1] : 1;
         int count = (int)a[2];
-        LONG64 pf0 = pf_now();
+        LONG64 pf0 = pf_detail() ? pf_now() : 0;
         int ok;
         {   /* TEST ONLY, TOMO_WATCHDRAW=<index count>,<uniform binding>,<byte offset>,<from frame>: at the first such draw, a
              * hardware write watchpoint on that word of the vertex stage's buffer (debug_mode.c: the writers' guest stacks) */
@@ -6078,10 +6278,10 @@ static void exec(const Cmd *m, int depth) {
         { HS_IN("draw state (pipeline, bindings)", 0); ok = count > 0 && a[3] && draw_prepare(); HS_OUT(); }
         g_draw_ibuf.addr = 0;
         if (g_draw_tag) dt_line("gl", g_draw_tag, g_dt_idx++, ok, (unsigned)a[0], (int)t, count, a[3], (long long)(int32_t)a[4], (unsigned)a[5], (unsigned)a[6], S.prog, S.nattr, S.vattr, S.vbuf, (const uint32_t *)S.vstream, S.ubo, S.ssbo, dt_host);
-        if (!ok) { pf_add(PF_PREP, pf0); g_st.draws_skipped++; g_frame_skipped++; break; }
+        if (!ok) { if (pf0) pf_add(PF_PREP, pf0); g_st.draws_skipped++; g_frame_skipped++; break; }
         size_t off = arena_put(a[3], (uint64_t)count << t);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_, g_arena);
-        pf_add(PF_PREP, pf0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_, g_arena_buf);
+        if (pf0) pf_add(PF_PREP, pf0);
         if (drawlog_now()) {
             printf("  DrawElements mode %d type %d count %d base vertex %d base instance %d instances %d%c", (int)a[0], (int)t, count, (int)a[4], (int)a[5], (int)a[6], 10);
             uint32_t mx = 0, mn = 0xffffffffu, first[6] = {0};
@@ -6103,11 +6303,11 @@ static void exec(const Cmd *m, int depth) {
         if (dsclear >= 0 && g_st.frames == dsclear) { glDisable(GL_SCISSOR_TEST); glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT); glEnable(GL_SCISSOR_TEST); }
         drawlog_begin();
         first_draw_warm();
-        pf0 = pf_now();
+        pf0 = pf_detail() || g_hitch_ms ? pf_now() : 0;
         g_fd_prim = (unsigned)a[0]; g_fd_count = (unsigned)count;
         { HS_IN("draw call (driver)", 0); glDrawElementsInstancedBaseVertexBaseInstance(nvn_prim((unsigned)a[0]), count, itype[t], (const void *)off, (GLsizei)a[6], (GLint)a[4], (GLuint)a[5]); HS_OUT(); }
         feedback_restore();
-        pf_add(PF_DRAWCALL, pf0);
+        if (pf0) pf_add(PF_DRAWCALL, pf0);
         if (g_hitch_ms) hitch_draw(pf0);
         drawlog_end();
         draw_shot();
@@ -6296,7 +6496,7 @@ static void exec(const Cmd *m, int depth) {
             if (elements) {
                 if (!a[2]) continue;
                 size_t off = arena_put(a[2] + ((uint64_t)d[2] << t), (uint64_t)d[0] << t);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_, g_arena);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_, g_arena_buf);
                 glDrawElementsInstancedBaseVertexBaseInstance(nvn_prim((unsigned)a[0]), (GLsizei)d[0], itype[t], (const void *)off, (GLsizei)d[1], (GLint)d[3], d[4]);
             } else glDrawArraysInstancedBaseInstance(nvn_prim((unsigned)a[0]), (GLint)d[2], (GLsizei)d[0], (GLsizei)d[1], d[3]);
             feedback_restore();
@@ -6635,6 +6835,12 @@ static void bl_update(void) {                                /* render thread, b
     AcquireSRWLockShared(&g_bl_lock);
     int n = g_bl_n;
     ReleaseSRWLockShared(&g_bl_lock);
+    {   /* an entry changes only with a pool registration (g_pool_gen) or when it is new: the whole table was walked every batch */
+        static LONG last_gen; static int last_n = -1;
+        LONG gen_now = g_pool_gen;
+        if (n == last_n && gen_now == last_gen) return;
+        last_n = n; last_gen = gen_now;
+    }
     for (int i = 0; i < n; i++) {                            /* only this thread moves entries (bl_evict); bl_note appends past n */
         uint32_t nh = g_bl[i].nh, dims[4] = {0, 0, 0, 0};
         uint32_t gen = 1 + g_tgen[nh & 0xfffff] + (g_sgen[(nh >> 20) & 0xfff] << 16);
@@ -6647,11 +6853,6 @@ static void bl_update(void) {                                /* render thread, b
     }
 }
 static void bl_bind(void) { if (g_bl_buf) gs_ssbo(39, g_bl_buf, 0, (BL_SLOTS + 2) * 16); }
-/* The ASTC textures a batch binds, synced before its first command: their GPU decodes then run back to back with one memory
- * barrier after them. Synced at their binds, each decode came between two draws, and the GPU let the draws before it finish
- * and the draw after it wait (the title's first frame: 292 small textures, 97 ms of GPU, a 150 ms frame, 2026-10-31). The
- * binds still sync (nothing is done twice in a batch); the pools as the batch sets them, deferred arrays as they hold now.
- * TOMO_TEX_PRESCAN=0: at the binds only, as before. */
 static int snap_hot(uint64_t addr, uint64_t size) {      /* a page of it written by the game in the last 5 s */
     LONG fr = (LONG)g_st.frames;
     if (fr - g_hot_all < 300) return 1;
@@ -6707,20 +6908,27 @@ void nvn_snap_flushcheck(const char *what) {             /* game thread */
     if (g_sfc_points % 2000 == 0) printf("snapcheck: %lld points, %lld ranges checked, %lld changed between the submission and the flush%c", (long long)g_sfc_points, (long long)g_sfc_checked, (long long)g_sfc_changed, 10);
     g_sfc_n = 0;
 }
-static SnapSet *snap_take(const uint64_t *handles, int count) {      /* game thread, at the submission */
-    LONG64 t0 = pf_now();
+/* The copies are made after the batch is handed to the render thread (snap_begin before, snap_fill after): it starts the
+ * batch (write-watch scan, ASTC textures it binds) meanwhile and waits for them before its first command. Made before the
+ * hand-over, the render thread stood idle for them: 0.9-1.0 ms of every island frame (the frame's big batch, 860 ranges). */
+static SnapSet *snap_begin(void) {                         /* game thread, at the submission, before the batch is posted */
     AcquireSRWLockExclusive(&g_snap_lock);
     SnapSet *s = g_snap_pool;
     if (s) g_snap_pool = s->next;
     ReleaseSRWLockExclusive(&g_snap_lock);
     if (!s && !(s = calloc(1, sizeof *s))) return NULL;
+    s->ready = 0;
     s->emu = g_emu_serial;                                 /* (read before the copies: a write of ours racing them counts as later) */
+    return s;
+}
+static void snap_fill(SnapSet *s, const uint64_t *handles, int count) {      /* game thread, after the batch is posted */
+    LONG64 t0 = pf_now();
     for (int i = 0; i < count; i++) snap_list(s, handles[i], 0);
     if (g_sfc_on < 0) g_sfc_on = getenv("TOMO_SNAP_FLUSHCHECK") != NULL;
     if (g_sfc_on > 0) for (unsigned i = 0; i < s->cap && g_sfc_n < 8192; i++) if (s->e[i].addr) { g_sfc[g_sfc_n].addr = s->e[i].addr; g_sfc[g_sfc_n].size = s->e[i].size; g_sfc[g_sfc_n++].h = mem_hash(s->data + s->e[i].off, (size_t)s->e[i].size, 1); }
     InterlockedIncrement64(&g_snap_sets); InterlockedExchangeAdd64(&g_snap_ranges, s->n); InterlockedExchangeAdd64(&g_snap_bytes, (LONG64)s->len);
     InterlockedExchangeAdd64(&g_snap_ticks, pf_now() - t0);
-    return s;
+    InterlockedExchange(&s->ready, 1);
 }
 static void snap_give(SnapSet *s) {                        /* render thread, after the replay */
     if (!s) return;
@@ -6730,6 +6938,22 @@ static void snap_give(SnapSet *s) {                        /* render thread, aft
     AcquireSRWLockExclusive(&g_snap_lock);
     s->next = g_snap_pool; g_snap_pool = s;
     ReleaseSRWLockExclusive(&g_snap_lock);
+}
+/* The ASTC textures a batch binds, synced before its first command: their GPU decodes then run back to back with one memory
+ * barrier after them. Synced at their binds, each decode came between two draws, and the GPU let the draws before it finish
+ * and the draw after it wait (the title's first frame: 292 small textures, 97 ms of GPU, a 150 ms frame, 2026-10-31). The
+ * binds still sync (nothing is done twice in a batch); the pools as the batch sets them, deferred arrays as they hold now.
+ * TOMO_TEX_PRESCAN=0: at the binds only, as before. */
+/* A handle the batch's pre-scan resolved already (same pool) is not looked up again: the island's big list binds a few
+ * hundred textures in some thousand binds, each a lookup of the pool entry and the texture records. */
+static struct { uint64_t h; TexPool *tp; uint32_t ser; } g_ps_seen[4096];
+static int prescan_seen(TexPool *tp, uint64_t h) {
+    unsigned i = (unsigned)(((h ^ (uint64_t)(uintptr_t)tp) * 0x9E3779B97F4A7C15ULL) >> 52);
+    for (int k = 0; k < 8; k++, i = (i + 1) & 4095) {
+        if (g_ps_seen[i].ser != (uint32_t)g_serial) { g_ps_seen[i].ser = (uint32_t)g_serial; g_ps_seen[i].h = h; g_ps_seen[i].tp = tp; return 0; }
+        if (g_ps_seen[i].h == h && g_ps_seen[i].tp == tp) return 1;
+    }
+    return 0;
 }
 static void prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
     size_t len = 0;
@@ -6747,6 +6971,7 @@ static void prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
             uint64_t h;
             Tex *t; View v; SamplerParams sp;
             memcpy(&h, hs + i * 8, 8);
+            if (prescan_seen(*tp, h)) continue;
             handle_lookup(*tp, NULL, h, &t, &v, &sp);
             if (t && !t->dead && t->b.format >= 0x79 && t->b.format <= 0x94 && t->checked != g_serial) { tex_sync_a(t, 1); (*n)++; }
         }
@@ -6775,6 +7000,12 @@ static void job_submit(void *arg) {
         if (on && ga_on()) for (int i = 0; i < j->count; i++) prescan_list(j->handles[i], 0, &tp, &n);
         HS_OUT();
     }
+    if (j->snap) {                               /* the copies of this batch's ranges (snap_fill on the game's thread) */
+        SnapSet *sn = j->snap;
+        HS_IN("batch start: submission copies (waited for)", 0);
+        for (int k = 0; !InterlockedCompareExchange(&sn->ready, 0, 0); k++) { if (k < 2000) YieldProcessor(); else SwitchToThread(); }
+        HS_OUT();
+    }
     LONG64 pf0 = pf_now();
     g_snap_cur = j->snap;
     for (int i = 0; i < j->count; i++) replay(j->handles[i], 0);
@@ -6785,7 +7016,7 @@ static void job_submit(void *arg) {
     pf_add(PF_SUBMIT, pf0);
     g_cur_op = "";
     GLenum e;
-    { HS_IN("batch end: GL error check (glGetError)", 0); e = glGetError(); HS_OUT(); }
+    { HS_IN("batch end: GL error check (glGetError)", 0); e = GL_ERR_SOFT(); HS_OUT(); }
     if (e) { g_st.gl_errors++; logf_limited(&nlog, 30, "nvn_gl: GL error 0x%x in submitted batch %lld\n", e, (long long)g_st.submits); while (glGetError()) {} }
     g_st.submits++;
 }
@@ -6979,8 +7210,11 @@ static void pf_frame_mark(LONG64 frame) {
         }
         snap[k] = t; snapn[k] = c;
     }
-    printf(" | MB/frame: streamed %.2f, read back %.2f, hashed %.2f\n", (double)(g_pf_arena_bytes - b0[0]) / 300.0 / 1048576.0, (double)(g_pf_cflush_bytes - b0[1]) / 300.0 / 1048576.0,
-           (double)(g_pf_hash_bytes - b0[2]) / 300.0 / 1048576.0);
+    {   static LONG64 r0[3];
+        printf(" | MB/frame: streamed %.2f (ring %.2f in %.0f copies, %lld part waits), read back %.2f, hashed %.2f\n", (double)(g_pf_arena_bytes - b0[0]) / 300.0 / 1048576.0,
+               (double)(g_ring_bytes - r0[0]) / 300.0 / 1048576.0, (double)(g_ring_calls - r0[1]) / 300.0, (long long)(g_ring_waits - r0[2]), (double)(g_pf_cflush_bytes - b0[1]) / 300.0 / 1048576.0,
+               (double)(g_pf_hash_bytes - b0[2]) / 300.0 / 1048576.0);
+        r0[0] = g_ring_bytes; r0[1] = g_ring_calls; r0[2] = g_ring_waits; }
     b0[0] = g_pf_arena_bytes; b0[1] = g_pf_cflush_bytes; b0[2] = g_pf_hash_bytes;
     {
         static int on = -1;
@@ -7036,7 +7270,7 @@ static void gl_swap_now(void) {
     if (InterlockedExchange(&g_gl_swap_pending, 0)) { InterlockedExchange(&g_display_holding, 0); display_present_flushed(); }
     display_present_done(0);
 }
-static void job_gl_swap_flush(void *arg) { (void)arg; if (g_gl_swap_pending) gl_swap_now(); }
+static void job_gl_swap_flush(void *arg) { (void)arg; if (g_gl_swap_pending && display_present_due()) gl_swap_now(); }      /* (not a newer frame kept for a later tick) */
 #endif
 /* F12 (display.c): a flicker sample. The next 8 presented pictures go to flicker/f<frame>.bmp beside the exe, then the draw
  * log of the two frames after them (every draw: targets, programs, textures; the frozen-scene restores) to the session log,
@@ -7054,6 +7288,7 @@ static void job_present(void *arg) {
     RECT r;
     LONG64 frame = g_st.frames + 1;
 #ifdef _WIN32
+    if (g_gl_swap_pending && display_pace_lead()) { display_wait_present_due(50); gl_swap_now(); }      /* TOMO_PACE_LEAD: the kept frame goes at its tick first */
     if (InterlockedExchange(&g_gl_swap_pending, 0)) { InterlockedExchange(&g_display_holding, 0); display_present_flushed(); }      /* a frame kept for its tick is replaced by this newer one */
 #endif
     LONG64 pf0 = pf_now();
@@ -7449,8 +7684,9 @@ static DWORD WINAPI render_thread(LPVOID arg) {
      * handles, program status, glGetError, buffer read-back) then waits for everything queued before it: 0.1-2 s frames
      * whenever a new shader or texture arrives (65 s of frames over 25 ms in a 170 s run; 13 s with it on). Synchronous
      * debug output is a debugging state of the context: it changes when the callback is called, not what is drawn; the
-     * callback prints errors only unless SSBU_GLDEBUG is set, as before. SSBU_GL_DRIVER_THREAD=1 = the old behaviour. */
-    if (g_debug || !getenv("SSBU_GL_DRIVER_THREAD")) glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS_);
+     * callback prints errors only unless SSBU_GLDEBUG is set, as before. Since 2026-10-31 only with SSBU_GL_DRIVER_THREAD=0
+     * or SSBU_GLDEBUG (gl_driver_thread: steady frames gained more than the uploads lost). */
+    if (gl_driver_thread()) g_gl_thr_on = 1; else glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS_);
     g_fdlog = getenv("SSBU_FDLOG") != NULL;
     if (g_fdlog && glDebugMessageControl) glDebugMessageControl(0x1100 /* DONT_CARE */, 0x1100, 0x1100, 0, NULL, 1);     /* every severity, low ones too */
     glDebugMessageCallback((void *)debug_cb, NULL);
@@ -8420,13 +8656,14 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
     else if (j.count > 0 && A2) {
         if (g_rb == &rb_gl) j.ww_seq = ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now */
         if (gl_async_on() && j.count <= 4096) {
-            if (g_rb == &rb_gl && snap_on()) j.snap = snap_take(j.handles, j.count);
+            if (g_rb == &rb_gl && snap_on()) j.snap = snap_begin();
             size_t size = sizeof j + (size_t)j.count * 8;
             SubmitJob *copy = malloc(size);
             *copy = j;
             memcpy(copy + 1, j.handles, (size_t)j.count * 8);
             gl_post(g_rb->submit_async, copy, size);
             free(copy);
+            if (j.snap) snap_fill(j.snap, j.handles, j.count);
         } else gl_run(g_rb->submit, &j);
         l1_pipe_after_submit();      /* L1 round 2 (SSBU_L1_PIPE=1): the picture is complete after this submission: present it now, hold the game here */
     }

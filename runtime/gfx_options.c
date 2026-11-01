@@ -24,9 +24,10 @@ static int g_gfx_menu = 1, g_gfx_volume = -1;      /* U1: menu = on (default) | 
 static char g_gfx_language[16];                      /* U1: language = auto ("") | a code */
 int gfx_menu(void) { gfx_options(); return g_gfx_menu; }
 static int g_gfx_stats;                              /* U1: stats_overlay = off | on */
-/* frame_rate = 60 (default: the adaptive mode of display.c; the game's logic counts refreshes, so it keeps its speed) |
- * 30 (as on the console). TOMO_FRAME_RATE wins. */
-static int g_gfx_fps = 60;
+/* frame_rate = 60 (default: always 60; the game's logic counts refreshes, so it keeps its speed) | auto (60 with the
+ * adaptive fallback to 30 of display.c) | 30 (as on the console). TOMO_FRAME_RATE wins. */
+static int g_gfx_fps = 60, g_gfx_fps_auto;
+int gfx_frame_rate_auto(void) { gfx_options(); return g_gfx_fps_auto; }      /* frame_rate = auto: 60, and 30 for a while when the PC cannot hold it */
 int gfx_frame_rate(void) {
     static int env = -2;
     if (env == -2) env = getenv("TOMO_FRAME_RATE") ? (atoi(getenv("TOMO_FRAME_RATE")) >= 60 ? 60 : 30) : -1;
@@ -156,9 +157,9 @@ static const char *const k_default_ini =
 ";   vsync = clock; those three keys of the file are then not used. The log says which profile is active.\r\n"
 "profile = custom\r\n"
 "\r\n"
-"; frame_rate = 60 | 30\r\n"
-";   60: presented at 60 frames per second; the game's logic counts the display's refreshes, so it keeps its speed;\r\n"
-";   a scene the PC cannot hold at 60 drops to 30 for a while instead of stuttering. 30: as on the console.\r\n"
+"; frame_rate = 60 | auto | 30\r\n"
+";   60: presented at 60 frames per second, always; the game's logic counts the display's refreshes, so it keeps its\r\n"
+";   speed. auto: 60, and 30 for a while when the PC cannot hold 60 in a scene (for a weak PC). 30: as on the console.\r\n"
 ";   TOMO_FRAME_RATE / TOMO_INTERVAL win.\r\n"
 "frame_rate = 60\r\n"
 "\r\n"
@@ -279,7 +280,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "latency")) g_gfx_latency = !_stricmp(val, "lowest") ? 2 : !_stricmp(val, "low") ? 1 : 0;      /* track L1 (display.c latency_mode) */
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
-        else if (!_stricmp(key, "frame_rate")) g_gfx_fps = atoi(val) >= 60 ? 60 : 30;
+        else if (!_stricmp(key, "frame_rate")) { g_gfx_fps_auto = !_stricmp(val, "auto"); g_gfx_fps = g_gfx_fps_auto || atoi(val) >= 60 ? 60 : 30; }
         else if (!_stricmp(key, "present_api")) g_gfx_present_api = !_stricmp(val, "dxgi") ? 1 : !_stricmp(val, "opengl") ? 2 : 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "mouse")) g_gfx_mouse = !_stricmp(val, "on") || !strcmp(val, "1");

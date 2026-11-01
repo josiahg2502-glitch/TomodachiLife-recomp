@@ -198,6 +198,26 @@ void display_perf_host_thread(void) {
     }
     if (g_pc_on && n > 0) SetThreadSelectedCpuSets(GetCurrentThread(), ids, (ULONG)n);
     else display_perf_thread();
+    /* (Tried 2026-10-31: the threads nobody placed, NVIDIA's own GL thread among them, given these cores as the process default:
+     * slightly MORE late frames on the island than leaving them to the system, 2 runs each.) */
+#endif
+}
+/* the calling thread: background work (the shader workers): the performance cores the game's threads do not hold and the
+ * efficiency cores */
+void display_background_thread(void) {
+    if (g_pc_n < 0) pcore_init();
+#ifdef _WIN32
+    uint64_t os_console_lp_mask(void);
+    uint64_t cc = os_console_lp_mask();
+    ULONG ids[256];
+    int n = 0;
+    for (int i = 0; i < g_pc_n; i++) {
+        int taken = 0;
+        for (int j = 0; j < g_pc_n; j++) if (g_pc_lp[j] < 64 && (cc >> g_pc_lp[j] & 1) && g_pc_core[j] == g_pc_core[i]) taken = 1;
+        if (!taken) ids[n++] = g_pc_ids[i];
+    }
+    for (int i = 0; i < g_slow_n; i++) ids[n++] = g_slow_ids[i];
+    if (g_pc_on && n > g_slow_n && cc) SetThreadSelectedCpuSets(GetCurrentThread(), ids, (ULONG)n);
 #endif
 }
 static void precise_wait_until(LONGLONG target, HANDLE timer) {
@@ -901,7 +921,10 @@ static void adapt_frame(LARGE_INTEGER now) {
                 }
             }
         }
-        if (off) return;
+        /* frame_rate = 60 stays at 60 (2026-10-31, the user: "We can't have it going to 30"); the fall to 30 below is
+         * frame_rate = auto's. A few late frames a second on the island made it 30 fps for 20 s at a time. */
+        int gfx_frame_rate_auto(void);
+        if (off || !gfx_frame_rate_auto()) return;
         /* Not before the island has been up 5 s: the loading screen, the title and the island's own load came late for the
          * loading, which 30 fps does not help, and each such drop doubled the next stay (2026-10-31: 30 fps from the loading
          * screen on, 2 min of it by the time the island was up). The game's own controller still picks 2 or 3 meanwhile. */
@@ -922,6 +945,7 @@ static void adapt_frame(LARGE_INTEGER now) {
         } else if (++at30 >= stay) { over = at30 = at60 = 0; rate_floor(1); static int n; if (n++ < 20) printf("display: frame_rate 60: 60 fps again (the game's minimum interval 1)%c", 10); }
         return;
     }
+    { int gfx_frame_rate_auto(void); if (!gfx_frame_rate_auto()) return; }      /* (frame_rate = 60: no fall to 30, as above) */
     if (g_interval == 1) {
         /* also: presents a refresh late (the render thread or the GPU, which the busy time does not see): 40-50 fps on a
          * 60 Hz display judders; 6 late ones in a second -> 30. A stall of 50 ms or more is not counted: 30 fps would not
@@ -1223,13 +1247,31 @@ static void l1_report(FILE *out) {
 /* Session 14, game thread, BEFORE the present job goes to the render thread (Vulkan only; OpenGL keeps the path above):
  * the refresh that shows this frame, by the same rule as frame_queued, and whether the present is held for it. A frame
  * queued before the tick it is due at (on time) is held until that tick; a late one is presented at once. */
+/* TOMO_PACE_LEAD=1 (OpenGL, latency = normal; TEST, off by default): each frame is shown one tick after the one following
+ * its present, and the game is let go one tick before its last frame is shown, so our render thread has two ticks for a
+ * frame. Island, 2026-11-01, alternating runs: the frame times got better (frames over 20 ms per 50 s 34-499, mean 285,
+ * against 165-519, mean 421) but the PICTURE's cadence got worse (frames not on screen for exactly 4 refreshes at 240 Hz:
+ * mean 22.7 % of the island's frames against 14.0 %, 4 runs each): the kept frame is flipped by a job that waits behind
+ * the batch the render thread is replaying by then. One frame (16.7 ms) more input delay. nvn_gl.c job_present keeps the
+ * order (a newer frame waits for the kept one's tick). */
+static LONG64 g_lead_cur;                              /* the lead of the frame planned last (0 or 1) */
+int display_pace_lead(void) {
+    static int on = -1;
+    if (on < 0) {
+        int latency_mode(void); const char *e = getenv("TOMO_PACE_LEAD");
+        on = e && atoi(e) > 0 && latency_mode() == 0;
+        printf("display: pacing %s (TOMO_PACE_LEAD)%c", on ? "with one tick of slack: a picture is shown one frame after it is due (OpenGL)" : "without slack", 10);
+    }
+    return on;
+}
 void display_present_plan(int vulkan) {
     if (!g_la_first) la_stop();                            /* U3: the first present: the loading animation stops before it (loading_anim.c) */
     if (old_pacing()) return;                          /* 2026-10-30: OpenGL presents at the tick too (nvn_gl.c job_present / job_gl_swap_flush) */
-    (void)vulkan;
     pace_options();
-    LONG64 now_n = g_vsync_n, iv = g_interval, prev = g_latch, at = now_n + 1;
-    int on_time = iv && now_n < prev + iv && prev + iv - now_n <= 6;
+    LONG64 iv = g_interval, lead = !vulkan && iv && g_ff == 1 && !g_lockstep && g_hold_on && display_pace_lead() ? 1 : 0;
+    LONG64 now_n = g_vsync_n, prev = g_latch, at = now_n + 1 + lead;
+    int on_time = iv && now_n < prev + iv && prev + iv - now_n <= 6 + lead;
+    g_lead_cur = lead;
     if (!iv) at = now_n;
     else if (at < prev + iv) at = prev + iv;
     g_latch = at;
@@ -1249,7 +1291,10 @@ void display_present_plan(int vulkan) {
 static volatile LONG64 g_defer_target;                 /* a finished frame is kept on the render thread for this tick */
 void nvn_front_post_present_flush(void);               /* nvn_gl.c: the kept present, as a job of the render thread */
 int display_present_defer(void) {
-    { static DWORD tid; if (tid != GetCurrentThreadId()) { tid = GetCurrentThreadId(); display_perf_thread(); } }      /* the render thread: performance cores */
+    { static DWORD tid; if (tid != GetCurrentThreadId()) { tid = GetCurrentThreadId(); display_perf_host_thread(); } }      /* the render thread: performance cores the game's threads do not hold
+                                                    * (this was display_perf_thread: from the first present on the render thread
+                                                    * shared the console cores with the game's main and job threads: island frames over
+                                                    * 20 ms 305 against 265 per 50 s, 2 runs each, 2026-10-31) */
     LONG64 tgt = InterlockedExchange64(&g_hold_target, 0);
     l1_ready(tgt);
     if (!tgt || g_vsync_n >= tgt) return 0;
@@ -1260,6 +1305,21 @@ int display_present_defer(void) {
 /* Render thread, after it has stored the kept present: 1 = the tick came meanwhile, present now. (The vsync thread looks
  * at g_defer_target AFTER it has published the tick, this looks at the tick AFTER the target is set: one of the two sees it.) */
 int display_present_due(void) { LONG64 t = g_defer_target; return t && g_vsync_n >= t; }
+/* Render thread (TOMO_PACE_LEAD): until the kept frame's tick, at most max_ms. 1 = due. */
+int display_wait_present_due(int max_ms) {
+    LARGE_INTEGER t0, now;
+    QueryPerformanceCounter(&t0);
+    AcquireSRWLockExclusive(&g_vsync_lock);
+    for (;;) {
+        LONG64 t = g_defer_target;
+        if (!t || g_vsync_n >= t) break;
+        QueryPerformanceCounter(&now);
+        if ((now.QuadPart - t0.QuadPart) * 1000 > (LONG64)max_ms * g_freq.QuadPart) break;
+        SleepConditionVariableSRW(&g_vsync_cv, &g_vsync_lock, 5, 0);
+    }
+    ReleaseSRWLockExclusive(&g_vsync_lock);
+    return display_present_due();
+}
 void display_present_flushed(void) { InterlockedExchange64(&g_defer_target, 0); }
 /* Render thread, right after vkQueuePresentKHR returned: what the screen gets (see the comment at the top). */
 static void pace_stat_line(FILE *out, const char *what, int i, int since) {
@@ -1321,7 +1381,8 @@ void display_present_done(int fight) {
 /* New pacing, part 2: holds the caller until the refresh that shows the last queued frame. Returns 1 if it waited. */
 int display_wait_refresh(void) {
     if (old_pacing() || !InterlockedExchange(&g_latch_pending, 0)) return 0;
-    if (g_vsync_n >= g_latch) {
+    LONG64 release = g_latch - g_lead_cur;             /* (TOMO_PACE_LEAD: one tick before the frame is shown) */
+    if (g_vsync_n >= release) {
         QueryPerformanceCounter(&g_release_at);        /* An already-due refresh still starts a new frame's busy time. */
         return 0;
     }
@@ -1376,7 +1437,7 @@ int display_wait_refresh(void) {
     LONG64 n0;
     AcquireSRWLockExclusive(&g_vsync_lock);
     n0 = g_vsync_n;
-    while (g_vsync_n < g_latch) SleepConditionVariableSRW(&g_vsync_cv, &g_vsync_lock, 100, 0);
+    while (g_vsync_n < release) SleepConditionVariableSRW(&g_vsync_cv, &g_vsync_lock, 100, 0);
     n0 = g_vsync_n - n0;
     ReleaseSRWLockExclusive(&g_vsync_lock);
     if (ca && n0 > 0) {

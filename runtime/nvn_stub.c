@@ -75,9 +75,15 @@ static NvnObj *g_objs[4096];
 static SRWLOCK g_objs_lock = SRWLOCK_INIT;
 static NvnObj *nobj(uint64_t key) {
     unsigned h = (unsigned)((key >> 3) * 2654435761u) & 4095;
-    AcquireSRWLockExclusive(&g_objs_lock);
+    /* found under the shared lock: the game's job threads ask for buffer addresses, maps and pool flags all the time and
+     * queued on the exclusive one */
+    AcquireSRWLockShared(&g_objs_lock);
     NvnObj *o = g_objs[h];
     while (o && o->key != key) o = o->next;
+    ReleaseSRWLockShared(&g_objs_lock);
+    if (o) return o;
+    AcquireSRWLockExclusive(&g_objs_lock);
+    for (o = g_objs[h]; o && o->key != key; o = o->next) {}
     if (!o) { o = calloc(1, sizeof *o); o->key = key; o->next = g_objs[h]; g_objs[h] = o; }
     ReleaseSRWLockExclusive(&g_objs_lock);
     return o;

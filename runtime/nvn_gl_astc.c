@@ -149,6 +149,7 @@ static ptrdiff_t ga_ring(const uint8_t *blocks, size_t total) {
     if (!g_ga.ring_map || total > GA_RING_PART) return -1;
     size_t pos = (g_ga.ring_pos + 255) & ~(size_t)255;
     int part = (int)(pos / GA_RING_PART);
+    if (part > 3) part = 3;                                          /* (a write that ended at the ring's end: past it is not ours) */
     if (pos + total > (size_t)(part + 1) * GA_RING_PART) {           /* into the next part */
         ga_flush();
         g_ga.ring_fence[part] = glFenceSync(0x9117 /* SYNC_GPU_COMMANDS_COMPLETE */, 0);

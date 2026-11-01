@@ -410,6 +410,23 @@ static void launch_defaults(void) {
         printf("SSBU_ROMFS not set: taken from ..\\state.json\n");
     }
 }
+/* NVIDIA's OpenGL shader cache for this game: a folder of its own next to ours (../cache/nvgl) and 1 GB. In the driver's
+ * default place the game's cache file had stopped at ~195 MB, full (2026-10-31: unchanged through hours of runs, kept
+ * mostly by earlier builds' shaders), and every start found 11-22 of 64 sampled program pairs cold and compiled ~2,000
+ * again in the background. In its own folder the file starts empty and grows with what this build compiles (3 runs:
+ * 56, 13, 8 sampled pairs cold). The driver reads these variables when it loads (measured: a 2 MB size stopped its file at
+ * 2.0 MB; the path moved it). A path or size the user set wins; TOMO_NVGL_CACHE=0: the driver's defaults. */
+static void gl_cache_defaults(void) {
+#ifdef _WIN32
+    const char *e = getenv("TOMO_NVGL_CACHE");
+    char dir[MAX_PATH];
+    if ((e && e[0] == '0') || getenv("__GL_SHADER_DISK_CACHE_PATH")) return;
+    CreateDirectoryA("..\\cache", NULL);
+    if (!GetFullPathNameA("..\\cache\\nvgl", sizeof dir, dir, NULL) || (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)) return;
+    _putenv_s("__GL_SHADER_DISK_CACHE_PATH", dir);
+    if (!getenv("__GL_SHADER_DISK_CACHE_SIZE")) _putenv_s("__GL_SHADER_DISK_CACHE_SIZE", "1073741824");
+#endif
+}
 /* The message of a start that cannot work, on the console and on stderr. A box on the screen as well, unless the run is a
  * scripted one or SSBU_ERROR_DIALOG=0 (the rule of nnmisc.c err_dialog: tests never hang on a dialog). Exit code 2. */
 void romfs_fail(const char *msg) {
@@ -440,6 +457,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     print_build_identity();
     launch_defaults();
+    gl_cache_defaults();
     {   /* pad tools and their self-test (nnpad_sdl.c): no game is started */
         int nnhid_pad_selftest(void), nnpad_tool(int, char **);
         int tool;

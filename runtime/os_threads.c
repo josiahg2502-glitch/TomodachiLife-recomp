@@ -123,7 +123,18 @@ static void sleep_ns(int64_t ns) {
     if (lg < 0) lg = getenv("SSBU_SLEEP_LOG") && atoi(getenv("SSBU_SLEEP_LOG"));
     LARGE_INTEGER q0, q1, fq;
     if (lg) QueryPerformanceCounter(&q0);
-    if (!timer || !SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) Sleep(ns_to_ms(ns));
+    /* Short sleeps are waited out on the clock, yielding the processor meanwhile: the game's job threads poll with 20 us
+     * sleeps (AppJobThreadPool, island, 2026-10-31) and a timer wait of 20 us took 4-9 ms (SSBU_SLEEP_LOG; the frame times
+     * did not change measurably either way). From 0.5 ms (the timer's grain) on they stay on the timer (5 ms waits took
+     * 5.2-5.7 ms). TOMO_SLEEP_SPIN=0: the timer for all, as before. */
+    static int spin = -1;
+    if (spin < 0) spin = !(getenv("TOMO_SLEEP_SPIN") && getenv("TOMO_SLEEP_SPIN")[0] == '0');
+    if (spin && ns < 500000) {
+        LARGE_INTEGER sf, st, now;
+        QueryPerformanceFrequency(&sf); QueryPerformanceCounter(&st);
+        LONGLONG end = st.QuadPart + (LONGLONG)((double)ns * (double)sf.QuadPart / 1e9);
+        do { SwitchToThread(); QueryPerformanceCounter(&now); } while (now.QuadPart < end);
+    } else if (!timer || !SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) Sleep(ns_to_ms(ns));
     else WaitForSingleObject(timer, INFINITE);
     if (lg) {
         extern long long nvn_front_frame_next(void);
