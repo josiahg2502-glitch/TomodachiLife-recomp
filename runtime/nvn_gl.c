@@ -2943,6 +2943,8 @@ static DWORD WINAPI shd_worker(LPVOID arg) {
     { void display_background_thread(void); display_background_thread(); }      /* display.c: off the game's cores */
     GLuint pw_pipe = 0, pw_empty = 0;                  /* P3 round 4: the pair jobs draw one discarded point through this pipeline */
     glEnable(GL_DEBUG_OUTPUT_); glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS_);      /* (no driver thread here: compiles and links answer every call, gl_driver_thread is for the render thread's draws) */
+    /* (2026-11-01, a first start's preparation, 7,168 stages: 720 s with 12 workers, 1,114 s with 4; the segment heap, no
+     * debug output and KHR_parallel_shader_compile did not make it faster: the driver compiles one stage at a time) */
     {   static const char *const src[1] = {"#version 450\nvoid main() {}\n"};
         static const float zero[64];
         GLuint vb = 0;
@@ -7660,7 +7662,7 @@ static void job_present(void *arg) {
                 }
             }
         }
-        {   /* FLICKER RECORDER (2026-11-01; TOMO_FLICKER_LOG=0: off). The user sees Miis and backgrounds flicker for a frame now and
+        {   /* FLICKER RECORDER (2026-11-01; off since 1.0.0, TOMO_FLICKER_LOG=1: on). The user sees Miis and backgrounds flicker for a frame now and
              * then; neither their recording nor the test scenes caught one. Every presented picture goes into a 480x270 copy read
              * back 3 frames late through a mapped buffer (no wait). A frame that differs from the one before and the one after in
              * 4 or more of 48x27 cells of a picture that otherwise stands still (the frames around it agree on 85 % of them: no
@@ -7670,7 +7672,7 @@ static void job_present(void *arg) {
             static uint8_t *pm, *img[3];
             static void *fs[4];
             static long long ff[4], fimg[3], last_hit = -100;
-            if (on < 0) { const char *e = getenv("TOMO_FLICKER_LOG"); on = !(e && e[0] == '0') && gl_has(glNamedBufferStorage, "glNamedBufferStorage") && gl_has(glMapNamedBufferRange, "glMapNamedBufferRange"); }
+            if (on < 0) { const char *e = getenv("TOMO_FLICKER_LOG"); on = e && e[0] == '1' && gl_has(glNamedBufferStorage, "glNamedBufferStorage") && gl_has(glMapNamedBufferRange, "glMapNamedBufferRange"); }
             if (on && t && t->o.gl && t->b.width > 0 && t->b.height > 0 && frame > 300) {
                 enum { FW = 480, FH = 270, FB = FW * FH * 4, CW = 48, CH = 27 };
                 if (!pb) {

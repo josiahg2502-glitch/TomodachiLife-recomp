@@ -507,15 +507,30 @@ int main(int argc, char **argv) {
          * the window: done while the game runs, the first frames are held for seconds and look like a hang. SSBU_PREPARE=0 skips it. */
         long long nvn_front_warm_pending(long long *total); void display_title_note(const char *);
         const char *e = getenv("SSBU_PREPARE");
-        if (!(e && e[0] == '0')) {
+        /* TOMO_PREPARE_ONLY=1 (scripts/setup.py, the installer's prepare step): every shader is made ready, with a progress line
+         * every 5 s, and the program ends without starting the game (no 15-minute limit). The first start then has nothing to
+         * prepare: a first install prepared 7,168 stages for 12 minutes on the loading screen, which players took for a hang
+         * (issues #10, #14, #19, 2026-11-01). */
+        int only = getenv("TOMO_PREPARE_ONLY") && getenv("TOMO_PREPARE_ONLY")[0] == '1';
+        if (!(e && e[0] == '0') || only) {
             long long total = 0, left, last = -1;
-            ULONGLONG t0 = GetTickCount64();
+            ULONGLONG t0 = GetTickCount64(), said = 0;
             display_title_note("preparing shaders");
-            while ((left = nvn_front_warm_pending(&total)) != 0 && GetTickCount64() - t0 < 900000) {
-                if (left > 0 && left != last) { char n[96]; snprintf(n, sizeof n, "preparing shaders: %lld of %lld", total - left, total); display_title_note(n); last = left; }
+            while ((left = nvn_front_warm_pending(&total)) != 0 && (only || GetTickCount64() - t0 < 900000)) {
+                ULONGLONG now = GetTickCount64(), s = (now - t0) / 1000;
+                if (left > 0 && (left != last || now - said >= 1000)) {      /* the count, the time spent and the time left: it moves every second */
+                    char n[160];
+                    long long done = total - left;
+                    int k = snprintf(n, sizeof n, "preparing shaders (once): %lld of %lld, %llu:%02llu", done, total, s / 60, s % 60);
+                    if (done >= 50 && s >= 20) { unsigned long long rest = (unsigned long long)((double)s * (double)left / (double)done); snprintf(n + k, sizeof n - (size_t)k, ", about %llu min left", rest / 60 + 1); }
+                    display_title_note(n); last = left; said = now;
+                }
+                static ULONGLONG printed;
+                if (only && left > 0 && now - printed >= 5000) { printf("shaders: %lld of %lld ready (%llu s)\n", total - left, total, s); fflush(stdout); printed = now; }
                 Sleep(left < 0 ? 20 : 100);
             }
             printf("shaders: %lld known programs made ready before the game started (%.1f s)\n", total, (double)(GetTickCount64() - t0) / 1000.0);
+            if (only) { printf("shaders: prepared%s\n", left ? " (NOT all: stopped)" : ""); fflush(stdout); ExitProcess(left ? 3 : 0); }      /* (the last job writes the store's "prepared" key before it counts as done) */
             { void tomo_timeline(const char *what); tomo_timeline("the game starts (shaders ready)"); }
             display_title_note("starting the game");
         }

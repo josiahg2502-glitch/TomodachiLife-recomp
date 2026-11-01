@@ -801,6 +801,43 @@ def step_prepare(cx):
         say('  launcher logo and icon: %s' % os.path.join(cx.work, 'title-logo.png'))
     except Fail as e:                         # the launcher then writes the name in text
         say('  WARNING: the launcher\'s logo could not be made: %s' % str(e).splitlines()[0])
+    try:
+        prepare_shaders(cx)
+    except Exception as e:                    # the game then prepares them at its first start, as before
+        say('  WARNING: the shaders could not be prepared now (%s): the game prepares them at its first start' % str(e).splitlines()[0])
+
+
+def prepare_shaders(cx):
+    """Every shader of the store compiled for this PC's graphics driver now, by the game itself (TOMO_PREPARE_ONLY:
+    runtime/boot.c prepares and quits without starting the game), so its first start has nothing left to prepare. Before,
+    a first start sat on "preparing shaders" for 12 minutes on a fast PC, longer on others, and players took it for a hang
+    (issues #10, #14, #19). It runs as tomodachi_play.exe, the launcher's copy of the exe: the driver's cache and ours are
+    kept per exe name, and the copy keeps the exe's time, as the launcher's CopyFile does, so the start finds them ready."""
+    exe, play = os.path.join(cx.work, EXE), os.path.join(cx.work, 'tomodachi_play.exe')
+    main_elf = os.path.join(cx.bin, 'main.elf')
+    if not (os.path.isfile(exe) and os.path.isfile(main_elf)):
+        say('  shaders: not prepared now (no game exe or main.elf yet): the game prepares them at its first start')
+        return
+    shutil.copy2(exe, play)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_', 'TOMO_'))}
+    env.update(SSBU_ROMFS=cx.state['dump']['romfs'], SSBU_USERDATA=os.path.join(cx.build, 'userdata'), SSBU_RENDERER='gl',
+               SSBU_SHOW='0', SSBU_VOLUME='0', TOMO_PREPARE_ONLY='1')
+    os.makedirs(env['SSBU_USERDATA'], exist_ok=True)
+    say('  shaders: compiling every shader of the game for your graphics card now (10-30 minutes, once), so the game starts quickly')
+    os.makedirs(cx.logs, exist_ok=True)
+    t0, last = time.time(), 0.0
+    with open(os.path.join(cx.logs, 'prepare_shaders.log'), 'ab') as f:
+        p = subprocess.Popen([play, main_elf], cwd=cx.work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for line in p.stdout:
+            f.write(line)
+            s = line.decode('utf-8', 'replace').strip()
+            if s.startswith('shaders: ') and (time.time() - last >= 30 or 'prepared' in s):
+                say('  ' + s)
+                last = time.time()
+        rc = p.wait()
+    if rc:
+        raise Fail('the game\'s shader preparation ended with exit %d after %s (see logs\\prepare_shaders.log)' % (rc, fmt(time.time() - t0)))
+    say('  shaders: ready (%s)' % fmt(time.time() - t0))
 
 
 RUNNERS = {'deps': step_deps, 'stage': step_stage, 'convert': step_convert, 'tables': step_tables, 'lift': step_lift,
