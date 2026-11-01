@@ -6624,6 +6624,11 @@ static void exec(const Cmd *m, int depth) {
     }
     HS_OUT();
 }
+#ifdef _WIN32
+static volatile LONG g_gl_swap_pending;              /* (below: a finished frame kept for its tick) */
+static void gl_swap_now(void);
+static int swap_midbatch_ok(void);
+#endif
 static void replay(uint64_t handle, int depth) {
     size_t len = 0;
     uint8_t *data = list_lookup(handle, &len);
@@ -6633,6 +6638,11 @@ static void replay(uint64_t handle, int depth) {
         const Cmd *m = (const Cmd *)(data + off);
         if (m->size < sizeof(Cmd)) break;
         exec(m, depth);
+#ifdef _WIN32
+        /* a frame kept for its tick goes to the screen AT the tick, also while a batch is being replayed: as a job it waited
+         * behind the batch (TOMO_PACE_LEAD: the next frame's, a picture a refresh late) */
+        if (g_gl_swap_pending && display_present_due() && swap_midbatch_ok()) gl_swap_now();
+#endif
         {   static int on = -1, nlog;                   /* TOMO_GLERR_DRAW: a GL error after any command, with its framebuffer */
             if (on < 0) on = getenv("TOMO_GLERR_DRAW") != NULL;
             GLenum e;
@@ -7271,6 +7281,7 @@ static void gl_swap_now(void) {
     display_present_done(0);
 }
 static void job_gl_swap_flush(void *arg) { (void)arg; if (g_gl_swap_pending && display_present_due()) gl_swap_now(); }      /* (not a newer frame kept for a later tick) */
+static int swap_midbatch_ok(void) { return g_dx.state != 1 || g_dx.checks >= 3; }      /* (dx_check's read-backs move the read framebuffer: not between commands) */
 #endif
 /* F12 (display.c): a flicker sample. The next 8 presented pictures go to flicker/f<frame>.bmp beside the exe, then the draw
  * log of the two frames after them (every draw: targets, programs, textures; the frozen-scene restores) to the session log,

@@ -182,6 +182,7 @@ static DWORD_PTR g_cc_core[3];
 static DWORD_PTR g_cc_all;
 static volatile LONG g_cc_relaxed;
 static int cc_relax_on(void) { static int o = -1; if (o < 0) { const char *e = getenv("TOMO_CC_RELAX"); o = e ? atoi(e) != 0 : 1; } return o; }
+static int cc_relax_floor(void) { static int f = -1; if (f < 0) f = getenv("TOMO_CC_RELAX_ALL") && atoi(getenv("TOMO_CC_RELAX_ALL")) ? 0 : 17; return f; }      /* TEST: TOMO_CC_RELAX_ALL=1: the job threads too */
 static int console_cores(void) {
     if (g_cc < 0) {
         int n = 0, on = 0;
@@ -238,7 +239,7 @@ uint64_t os_console_lp_mask(void) { return console_cores() ? (uint64_t)(g_cc_cor
 static void apply_sched(HANDLE h, uint64_t core_mask, int prio) {
     DWORD_PTR m = 0;
     if (!console_cores() || !h) return;
-    if (g_cc_relaxed && prio >= 17 && g_cc_all) { SetThreadAffinityMask(h, g_cc_all); SetThreadPriorityBoost(h, TRUE); return; }
+    if (g_cc_relaxed && prio >= cc_relax_floor() && g_cc_all) { SetThreadAffinityMask(h, g_cc_all); SetThreadPriorityBoost(h, TRUE); return; }
     for (int i = 0; i < 3; i++) if (core_mask >> i & 1) m |= g_cc_core[i];
     SetThreadAffinityMask(h, m ? m : g_cc_core[0]);
     SetThreadPriorityBoost(h, TRUE);
@@ -248,7 +249,7 @@ void os_cc_relax(void) {                              /* display.c, two seconds 
     int n = 0;
     for (int h = 0; h < BUCKETS; h++)
         for (Obj *o = g_table[h]; o; o = o->next)
-            if (o->thread && !o->finished && o->priority >= 17) { apply_sched(o->thread, o->core_mask, o->priority); n++; }
+            if (o->thread && !o->finished && o->priority >= cc_relax_floor()) { apply_sched(o->thread, o->core_mask, o->priority); n++; }
     printf("nn::os: console core model relaxed: %d threads below the main thread's priority may run on any performance core (TOMO_CC_RELAX=0: pinned)\n", n);
 }
 static int host_priority(int prio) {

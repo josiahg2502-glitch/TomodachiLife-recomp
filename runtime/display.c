@@ -1247,19 +1247,20 @@ static void l1_report(FILE *out) {
 /* Session 14, game thread, BEFORE the present job goes to the render thread (Vulkan only; OpenGL keeps the path above):
  * the refresh that shows this frame, by the same rule as frame_queued, and whether the present is held for it. A frame
  * queued before the tick it is due at (on time) is held until that tick; a late one is presented at once. */
-/* TOMO_PACE_LEAD=1 (OpenGL, latency = normal; TEST, off by default): each frame is shown one tick after the one following
- * its present, and the game is let go one tick before its last frame is shown, so our render thread has two ticks for a
- * frame. Island, 2026-11-01, alternating runs: the frame times got better (frames over 20 ms per 50 s 34-499, mean 285,
- * against 165-519, mean 421) but the PICTURE's cadence got worse (frames not on screen for exactly 4 refreshes at 240 Hz:
- * mean 22.7 % of the island's frames against 14.0 %, 4 runs each): the kept frame is flipped by a job that waits behind
- * the batch the render thread is replaying by then. One frame (16.7 ms) more input delay. nvn_gl.c job_present keeps the
- * order (a newer frame waits for the kept one's tick). */
+/* ONE TICK OF SLACK (OpenGL, latency = normal; 2026-11-01): each frame is shown one tick after the one following its
+ * present, and the game is let go one tick before its last frame is shown, so our render thread has two ticks for a frame
+ * instead of one minus the game's part, and a single slow frame (the island's 17-22 ms ones: the game's own job work plus
+ * our replay) is still shown at its tick instead of a refresh late. The kept frame is flipped at its tick between the
+ * commands of whatever batch is being replayed then (nvn_gl.c replay; as a job it waited behind that batch, and the slack
+ * made the cadence worse). Island, alternating runs: frames not on screen for exactly 4 refreshes at 240 Hz 3.5-8.9 % (4
+ * runs) against 9.2-29.9 % (7 runs). One frame (16.7 ms) more input delay. nvn_gl.c job_present keeps the order (a newer
+ * frame waits for the kept one's tick). TOMO_PACE_LEAD=0: as before; latency = low / lowest: never. */
 static LONG64 g_lead_cur;                              /* the lead of the frame planned last (0 or 1) */
 int display_pace_lead(void) {
     static int on = -1;
     if (on < 0) {
         int latency_mode(void); const char *e = getenv("TOMO_PACE_LEAD");
-        on = e && atoi(e) > 0 && latency_mode() == 0;
+        on = (e ? atoi(e) > 0 : 1) && latency_mode() == 0;
         printf("display: pacing %s (TOMO_PACE_LEAD)%c", on ? "with one tick of slack: a picture is shown one frame after it is due (OpenGL)" : "without slack", 10);
     }
     return on;
