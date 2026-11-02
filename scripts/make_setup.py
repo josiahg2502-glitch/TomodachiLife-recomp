@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build "dist/Tomodachi Life PC Setup.exe", the one download for players (and dist/Tomodachi-Life-PC.zip, the same files as a
+"""Build "dist/Tomodachi-Life-PC-Setup.exe", the one download for players (and dist/Tomodachi-Life-PC.zip, the same files as a
 zip): launcher/setup.c compiled with clang, and in its
 resources the release's files (PAYLOAD: `git archive` of <ref> plus build/work/TomodachiLauncher.exe and SDL3.dll from the
 runtime package that <ref>'s scripts/install.py pins), a manifest (common controls 6 for its dialog, no elevation, DPI
@@ -25,7 +25,7 @@ from ctypes import wintypes
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREFIX = 'Tomodachi-Life-PC/'
-NAME = 'Tomodachi Life PC Setup.exe'
+NAME = 'Tomodachi-Life-PC-Setup.exe'
 MANIFEST = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity type="win32" name="TomodachiLifePC.Setup" version="1.0.0.0" processorArchitecture="amd64"/>

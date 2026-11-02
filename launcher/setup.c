@@ -1,4 +1,4 @@
-/* Tomodachi Life PC Setup.exe: the one download. Its resources hold the release's files (PAYLOAD: a zip of the repository
+/* Tomodachi-Life-PC-Setup.exe: the one download. Its resources hold the release's files (PAYLOAD: a zip of the repository
  * at the release's tag with build\work\TomodachiLauncher.exe and SDL3.dll added); it unpacks them into the folder the
  * player confirms (C:\Games\TomodachiLife by default), puts a "Tomodachi Life" shortcut on the desktop and starts the
  * launcher there, whose INSTALL screen does the rest (the installer's Python, the player's game files, the build).

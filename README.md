@@ -31,7 +31,7 @@ Both 1.0.0 and 1.0.4 run. Other updates are not supported yet.
 
 ## Install
 
-1. Download **`Tomodachi Life PC Setup.exe`** from the [newest release](https://github.com/josiahg2502-glitch/TomodachiLife-recomp/releases)
+1. Download **`Tomodachi-Life-PC-Setup.exe`** from the [newest release](https://github.com/josiahg2502-glitch/TomodachiLife-recomp/releases)
    and run it. Windows may say it protected your PC (the setup is not signed): click **More info**, then **Run anyway**.
 2. Choose where it goes (`C:\Games\TomodachiLife` by default; about 15 GB). The launcher opens.
 3. It finds your game files and keys by itself (Downloads, Desktop, Documents and emulator folders). Choose anything it
