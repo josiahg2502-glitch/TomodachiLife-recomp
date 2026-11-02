@@ -363,7 +363,7 @@ static void gl_barrier_from(const char *who) {              /* everything queued
 static struct {
     LONG64 frames, submits, lists, draws, draws_skipped, clears, stale, tex_created, tex_uploads, tex_bytes, views, handles,
            prog_ok, prog_fail, binary_used, glsl_ok, glsl_fail, glsl_draws, fbo_made, fbo_bad, gl_errors, copies, unknown_fmt, arena_bytes,
-           dispatches, dispatch_run, dispatch_skipped, compute_bytes, draws_from_compute;
+           dispatches, dispatch_run, dispatch_skipped, compute_bytes, draws_from_compute, copyback_n, copyback_bytes;
 } g_st;
 static LONG64 g_frame_draws, g_frame_skipped, g_frame_clears;
 static LONG64 g_fs_big, g_fs_bigclr, g_fs_rt, g_fs_disp;     /* TOMO_FRAMESUM: draws and clears on 2048-wide targets, target switches, dispatches */
@@ -1207,6 +1207,7 @@ static void dec_finish(Tex *t) {                   /* render thread: wait for th
 }
 
 static void rb_land_range(uint64_t addr, uint64_t size);
+static void rb_tex_gone(Tex *t);
 static void rs_blit(GLuint from, int fl, GLuint to, int tl, GLenum att, const int *a, const int *b, GLbitfield mask);
 static int g_rbp_n;
 #include "nvn_gl_astc.c"                       /* ASTC levels decoded on the GPU */
@@ -1590,6 +1591,7 @@ static void tex_crop_free(Tex *c) {
 }
 static void tex_free_gl(Tex *t) {
     alias_handoff(t);
+    if (g_rbp_n) rb_tex_gone(t);
     if (t->frz_snap) { glDeleteTextures(1, &t->frz_snap); t->frz_snap = 0; }
     {   unsigned i = g_freed_n % 16; int nv = 0;
         for (VNode *n = t->views; n; n = n->next) nv++;
@@ -2049,7 +2051,7 @@ static void arena_selftest(void) {
  * staging memory behind a fence instead of read with a stall (the CPU waited for the whole batch: 6 ms a frame on the island).
  * They land in guest memory when the game's own wait on a later fence succeeds (job_sync_wait, Finish), at a present when
  * done, and before anything on this thread reads or writes guest memory over them (rb_land_range). Render thread only. */
-typedef struct { uint64_t addr, size; int slot; void *fence; uint8_t *snap; } RbPend;
+typedef struct { uint64_t addr, size; int slot; void *fence; uint8_t *snap; Tex *tex; int level; } RbPend;      /* tex: a level of a texture (tex_copy_back) */
 /* GPU results go back to guest memory only where the GPU changed them: the words that differ from what the buffer held when it
  * went to the GPU (snap). The game's CPU writes its inputs (camera near, far, aspect...) into the same buffers the compute
  * programs write their results into; copied back whole, a late copy put last frame's inputs back over the new ones and the
@@ -2106,7 +2108,12 @@ static void rb_land_at(int wait, int line) {        /* land the read-backs the G
         GLenum r = glClientWaitSync(q->fence, wait ? 1 : 0, wait ? 0xFFFFFFFFFFFFFFFFull : 0);
         if (wait && r != 0x911A) stall_add(line, w0);
         if (r == 0x911B /* TIMEOUT_EXPIRED */) break;        /* the later ones are not done either (the GPU finishes in order) */
-        gpu_merge(P(q->addr), g_rbs[q->slot].map, q->snap, (size_t)q->size);
+        if (q->tex) {                                  /* a texture level: laid out as the texture; the hash follows, so it is not uploaded again */
+            TexLayout L;
+            tex_lay(&q->tex->b, &L);
+            tex_swizzle_level(&L, q->level, g_rbs[q->slot].map, P(q->addr));
+            q->tex->hash = mem_hash(q->tex->mem, q->tex->data_size, q->tex->ww_hashed || (q->tex->b.flags & 0x10) != 0);
+        } else if (q->size) gpu_merge(P(q->addr), g_rbs[q->slot].map, q->snap, (size_t)q->size);
         ww_note(q->addr, q->size);
         free(q->snap); q->snap = NULL;
         g_rbs[q->slot].busy = 0;
@@ -2120,6 +2127,67 @@ static void rb_land_at(int wait, int line) {        /* land the read-backs the G
 }
 static void rb_land_range(uint64_t addr, uint64_t size) {
     for (int i = 0; i < g_rbp_n; i++) if (addr < g_rbp[i].addr + g_rbp[i].size && g_rbp[i].addr < addr + size) { rb_land(1); return; }
+}
+static void rb_tex_gone(Tex *t) {                  /* a texture freed with its read-back in flight: its memory may hold something else now */
+    for (int i = 0; i < g_rbp_n; i++) if (g_rbp[i].tex == t) { g_rbp[i].tex = NULL; g_rbp[i].size = 0; }
+}
+/* A copy or a render into memory the CPU reads (Tex.cpu_read: a CPU_CACHED or CPU_UNCACHED pool, not a COMPRESSIBLE one,
+ * whose bytes the CPU does not read as texels). Opening a Mii's Edit Mii copies their face paint into the editor's texture
+ * and draws its canvas into a render target there; closing it, the game saves both from their memory with no
+ * InvalidateMappedRange or read call to tell us: it held zeros here, and the face paint became a black box for good (issue
+ * #12). The written level goes into staging memory behind a fence, like the buffers the GPU writes, and lands laid out as
+ * the texture before the game's next wait returns and before anything reads that memory. */
+static void tex_copy_back(Tex *t, const View *v) {
+    Fmt f;
+    const TexFormat *tf = tex_format(t->b.format);
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOMO_COPYBACK"); on = !(e && e[0] == '0'); }      /* TOMO_COPYBACK=0: off, as before */
+    if (!on || !t->mem || !t->o.gl || t->b.packaged || t->b.samples > 1 || t->rw || (t->b.flags & 0x10) || (tf && tf->sw_decode) || !fmt_get(t->b.format, &f)) return;
+    if (g_rbp_n >= 56) rb_land(1);                 /* room in the queue */
+    TexLayout L;
+    tex_lay(&t->b, &L);
+    int level = (v->set & 0x81) == 0x81 ? v->lvl0 : 0, is3d = t->b.target == 2, n0 = g_rbp_n;
+    if (level < 0 || level >= L.levels || level >= t->glevels) return;
+    GLenum fo = f.kind == 1 ? 0x1902 : f.kind == 2 ? GL_STENCIL_INDEX_ : f.format;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    for (int layer = 0; layer < (is3d ? 1 : L.layers); layer++) {
+        const uint8_t *dst = tex_level_ptr(&L, t->mem, level, layer);
+        size_t lin = L.lvl_linear_size[level];
+        int st = g_rbp_n < 64 ? rb_stage(lin) : -1;
+        if (st < 0 || (t->limit && dst + L.lvl_size[level] > t->limit)) break;
+        glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, g_rbs[st].buf);
+        if (f.kind == 4) glGetCompressedTextureSubImage(t->o.gl, level, 0, 0, is3d ? 0 : layer, L.lvl_w[level], L.lvl_h[level], is3d ? L.lvl_d[level] : 1, (GLsizei)lin, NULL);
+        else glGetTextureSubImage(t->o.gl, level, 0, 0, is3d ? 0 : layer, L.lvl_w[level], L.lvl_h[level], is3d ? L.lvl_d[level] : 1, fo, f.type, (GLsizei)lin, NULL);
+        glBindBuffer(0x88EB, 0);
+        g_rbs[st].busy = 1;
+        RbPend *q = &g_rbp[g_rbp_n++];
+        memset(q, 0, sizeof *q);
+        q->addr = (uint64_t)(uintptr_t)dst; q->size = L.lvl_size[level]; q->slot = st; q->tex = t; q->level = level;
+    }
+    if (g_rbp_n == n0) return;
+    void *fe = glFenceSync(0x9117, 0);
+    for (int i = n0; i < g_rbp_n; i++) { g_rbp[i].fence = fe; g_st.copyback_n++; g_st.copyback_bytes += (LONG64)g_rbp[i].size; }
+    {   static int copylog = -1; if (copylog < 0) copylog = getenv("TOMO_COPYLOG") != NULL;
+        if (copylog) printf("copy back: frame %lld %dx%d format 0x%x level %d\n", (long long)g_st.frames + 1, t->b.width, t->b.height, t->b.format, level); }
+    static int nlog;
+    logf_limited(&nlog, 5, "nvn_gl: what the GPU wrote into texture %dx%d format 0x%x level %d (memory the CPU reads) goes back to guest memory\n", t->b.width, t->b.height, t->b.format, level);
+}
+/* Render targets in memory the CPU reads, drawn in this batch: their texels go back at its end (the face paint's canvas is
+ * drawn into one when Edit Mii opens and saved from its memory when it closes). Only 8-bit colour ones (the canvas, the
+ * photos): the float ones there are lighting data drawn every frame (8x8 RGBA32F, 64x64 and 256x256 RGBA16F, 0.6 MB and 11
+ * levels a frame) that the game reads after its own InvalidateMappedRange (job_invalidate), and copied back each batch
+ * they made the early waits wait for the batch. Nor the ones the game invalidates itself. */
+static int rt_cpu_format(int f) { return f == 0x25 || f == 0x37 || f == 0x38 || (f >= 0x99 && f <= 0x9C); }      /* RGBA8, sRGB8_A8, BGRA8 */
+static struct { Tex *t; View v; } g_cpurt[32];
+static int g_cpurt_n;
+static void rt_copy_back(void) {
+    for (int i = 0; i < g_cpurt_n; i++) if (!g_cpurt[i].t->dead && !g_cpurt[i].t->game_inval) tex_copy_back(g_cpurt[i].t, &g_cpurt[i].v);
+    g_cpurt_n = 0;
+}
+static void rt_note_cpu_read(Tex *t, const View *v) {
+    for (int i = 0; i < g_cpurt_n; i++) if (g_cpurt[i].t == t && !memcmp(&g_cpurt[i].v, v, sizeof *v)) return;
+    if (g_cpurt_n == 32) rt_copy_back();
+    g_cpurt[g_cpurt_n].t = t; g_cpurt[g_cpurt_n++].v = *v;
 }
 /* ---- what a batch binds, as it was when the game submitted it (SnapSet)
  * The game rewrites uniform buffers a few ms after it has submitted and flushed a batch that reads them (the console's GPU
@@ -4397,8 +4465,8 @@ static TexObj *bc_target(Tex *t, const View *v) {     /* NULL: not a render targ
     }
     b->o.gl = b->gl; b->o.alias = 1;                  /* not counted, not freed with the texture */
     b->pending = 1;
-    static int nlog;
-    logf_limited(&nlog, 5, "nvn_gl: compressed render target: texture format 0x%x %dx%d level %d drawn through a %dx%d scratch of format 0x%x\n", t->b.format, t->b.width, t->b.height, level, w, h, v->format);
+    static int nlog, nother;                         /* (Mii faces are format 0x48; the rest, e.g. face paint, counted apart) */
+    logf_limited(t->b.format == 0x48 ? &nlog : &nother, 5, "nvn_gl: compressed render target: texture format 0x%x %dx%d level %d drawn through a %dx%d scratch of format 0x%x\n", t->b.format, t->b.width, t->b.height, level, w, h, v->format);
     return &b->o;
 }
 static void bc_cache_selftest(void) {
@@ -4608,6 +4676,7 @@ static void set_targets(int n, const TargetRef *col, const TargetRef *depth) {
         if (!S.fbo_w) { int l = (col[i].view.set & 0x81) == 0x81 ? col[i].view.lvl0 : 0; S.fbo_w = lvl(t->b.width, l); S.fbo_h = lvl(t->b.height, l); }
         if (i == 0) S.color0 = t;
         S.color[i] = t;
+        if (t->cpu_read && !t->game_inval && rt_cpu_format(t->b.format)) rt_note_cpu_read(t, &col[i].view);      /* back to guest memory at the batch end (the face paint's canvas) */
     }
     if (depth && depth->tex && !depth->tex->dead) {
         Tex *t = depth->tex;
@@ -5388,7 +5457,7 @@ static void compute_flush_async(void) {
             glCopyNamedBufferSubData(b->buf, g_rbs[st].buf, 0, 0, (ptrdiff_t)b->size);
             HS_OUT();
             g_rbs[st].busy = 1;
-            g_rbp[g_rbp_n].addr = b->addr; g_rbp[g_rbp_n].size = b->size; g_rbp[g_rbp_n].slot = st; g_rbp[g_rbp_n].fence = NULL;
+            g_rbp[g_rbp_n].addr = b->addr; g_rbp[g_rbp_n].size = b->size; g_rbp[g_rbp_n].slot = st; g_rbp[g_rbp_n].fence = NULL; g_rbp[g_rbp_n].tex = NULL;
             g_rbp[g_rbp_n].snap = b->snap; b->snap = NULL;          /* the pending read-back owns it now */
             g_rbp_n++;
             g_st.compute_bytes += (LONG64)b->size;
@@ -6502,6 +6571,10 @@ static void exec(const Cmd *m, int depth) {
         if (drawlog_now()) printf("copy texture: %dx%d gl %u%s region %d,%d %dx%d -> %dx%d gl %u%s region %d,%d %dx%d\n", s->b.width, s->b.height, s->o.gl, s->rw ? " (scaled)" : "", sr[0], sr[1], sr[3], sr[4],
                                   d->b.width, d->b.height, d->o.gl, d->rw ? " (scaled)" : "", dr[0], dr[1], dr[3], dr[4]);
         { LONG64 pf0 = pf_now(); blit_tex(s, &sv, sr, d, &dv, dr, (int)(a[6] & 1)); pf_add(PF_COPY, pf0); }
+        {   static int copylog = -1; if (copylog < 0) copylog = getenv("TOMO_COPYLOG") != NULL;
+            if (copylog) printf("copy texture: frame %lld %dx%d format 0x%x -> %dx%d format 0x%x level %d%s\n", (long long)g_st.frames + 1, s->b.width, s->b.height, s->b.format,
+                                d->b.width, d->b.height, d->b.format, (dv.set & 0x81) == 0x81 ? dv.lvl0 : 0, d->cpu_read ? " (memory the CPU reads)" : ""); }
+        if (d->cpu_read) tex_copy_back(d, &dv);      /* the face paint into the Mii editor's texture */
         break;
     }
     case OP_DOWNSAMPLE: {
@@ -7170,6 +7243,7 @@ static void job_submit(void *arg) {
     g_snap_cur = NULL; snap_give(j->snap); j->snap = NULL;
     { HS_IN("batch end: compute results (flush)", 0);
     compute_flush_async();                       /* the guest may read what compute wrote once its fence after this batch has passed */
+    if (g_cpurt_n) rt_copy_back();               /* and render targets in memory it reads */
     HS_OUT(); }
     pf_add(PF_SUBMIT, pf0);
     g_cur_op = "";
@@ -8427,6 +8501,7 @@ static void tex_initialize(Ctx *c) {                   /* (texture, builder) */
         const TexFormat *tf0 = tex_format(t->b.format);
         int compressed = (fmt_get(t->b.format, &f0) && f0.kind == 4) || (tf0 && tf0->sw_decode);
         uint64_t pf = t->b.pool ? nvn_pool_flags_of(t->b.pool) : 0;
+        t->cpu_read = (pf & 6) && !(pf & 0x80);         /* CPU_UNCACHED / CPU_CACHED, not COMPRESSIBLE (tex_copy_back) */
         if ((pf & 1) && !t->b.packaged && !compressed) t->gpu_written = 1;
         /* Not a COMPRESSIBLE pool (render targets live in those) and its memory already holds texels: a texture loaded from a
          * file (the X menu's fluid mask XMenuIn24^d, the layouts' White8_00^d: R8 in pools 0x21). Measured 2026-10-25 on the
@@ -9218,7 +9293,8 @@ static void present_fence(long long frame) {
         printf("nvn_gl: submit copies: %lld batches, %.0f ranges and %.0f KB a batch, %.3f ms a batch on the game's thread; %lld ranges the game rewrote before the replay read them (the copy was used)%c",
                (long long)g_snap_sets, (double)g_snap_ranges / (double)g_snap_sets, (double)g_snap_bytes / 1024.0 / (double)g_snap_sets, (double)g_snap_ticks * 1000.0 / (double)fq.QuadPart / (double)g_snap_sets, (long long)g_snap_used, 10);
         g_snap_sets = g_snap_ranges = g_snap_bytes = g_snap_ticks = g_snap_used = 0; }
-    if (frame % 600 == 0) { static LONG64 cb0; printf("nvn_gl: one frame in flight: %lld early waits, %lld of them landed read-backs first; %.2f MB a frame read back from GPU-written buffers%c", (long long)g_early_n, (long long)g_full_n, (double)(g_st.compute_bytes - cb0) / 600.0 / 1048576.0, 10); cb0 = g_st.compute_bytes; }
+    if (frame % 600 == 0) { static LONG64 cb0, tn0, tb0; printf("nvn_gl: one frame in flight: %lld early waits, %lld of them landed read-backs first; %.2f MB a frame read back from GPU-written buffers, %.2f texture levels (%.3f MB) for the CPU%c", (long long)g_early_n, (long long)g_full_n,
+                                   (double)(g_st.compute_bytes - cb0) / 600.0 / 1048576.0, (double)(g_st.copyback_n - tn0) / 600.0, (double)(g_st.copyback_bytes - tb0) / 600.0 / 1048576.0, 10); cb0 = g_st.compute_bytes; tn0 = g_st.copyback_n; tb0 = g_st.copyback_bytes; }
 }
 static void job_sync_wait(void *arg) {
     SyncJob *j = arg;
@@ -10008,6 +10084,7 @@ static void job_invalidate(void *arg) {
         memset(&r, 0, sizeof r);
         r.tex = t; r.to_pool = 1;
         job_read_texels(&r);
+        if (j->addr <= a && a + t->storage <= end) t->game_inval = 1;      /* the game invalidates this texture itself: rt_copy_back leaves it */
         n++;
     }
     static int log = -1; if (log < 0) log = getenv("TOMO_COPYLOG") != NULL;

@@ -58,7 +58,8 @@ screen then shows "preparing shaders (once)" with a count, the time spent and th
 - **SETTINGS**: window or full screen, resolution (up to 4K and above), widescreen (*Off*, 16:9, by default; *Fit the
   screen* for ultrawide monitors up to 21:9: the 3D view widens, menus keep their 16:9 shape in the middle), frame rate
   (60 fps by default), vsync, volume, language, Local Play online (saved in `build\config\graphics.ini`).
-- **SAVE DATA**: back up and restore your save, or import a save dumped from your Switch (`Map.sav`, `Mii.sav`, `Player.sav`).
+- **SAVE DATA**: back up and restore your save, or import a save dumped from your Switch (the folder with `Map.sav`,
+  `Mii.sav`, `Player.sav` and the `Ugc` folder of your drawings).
 - **CONTROLS**: the controller it sees and the keyboard keys (`build\config\controllers.ini`).
 
 **In the game**, **PC Settings** opens with **F1**, the controller's **HOME** / Guide button, or by holding **-** and **+**

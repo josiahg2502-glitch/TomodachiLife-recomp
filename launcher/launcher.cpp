@@ -686,6 +686,10 @@ private:
             drop_pending_commit();
             for (const char* n : {"Map.sav", "Mii.sav", "Player.sav"})
                 ok = ok && fs::copy_file(from / n, g_userdata / "save" / n, fs::copy_options::overwrite_existing, e);
+            /* the island's drawings (Palette House creations, face paint: Ugc\*.canvas.zs, *.ugctex.zs) come with it and the
+             * old island's go (they are in the backup); left behind, the imported items were black or orange (issue #16) */
+            if (ok) { fs::remove_all(g_userdata / "save" / "Ugc", e); ok = !e; }
+            if (ok && is_dir(from / "Ugc")) ok = copy_contents(from / "Ugc", g_userdata / "save" / "Ugc");
         }
         note_ = ok ? "Save imported. Your previous save is in the backups." : "The import failed: your previous save is in the backups.";
         note_ok_ = ok;

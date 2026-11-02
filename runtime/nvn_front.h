@@ -62,6 +62,7 @@ typedef struct Tex {
     long long frz_depth, frz_snapf, frz_restf; unsigned frz_snap;     /* nvn_gl.c frozen_scene: last frame with 3D draws, of the snapshot, of a restore; the snapshot's GL name */
     long long frz_2d, frz_lead2d, frz_rf;     /* frozen_scene: last frame with a 2D draw before its 3D ones; last 3D frame that began with 2D; last restore */
     uint32_t dec_gen; int dec_pending;     /* nvn_gl.c dec_*: bumped by each software-decoded upload; its levels still with the decoder thread */
+    uint8_t cpu_read, game_inval;          /* nvn_gl.c tex_copy_back: in memory the CPU reads (not COMPRESSIBLE); the game invalidates it itself */
 } Tex;
 Tex *nvn_front_tex_first(void);            /* the newest texture record; ->all_next = the one made before it (records are never freed) */
 typedef struct { Tex *tex; View view; } TexPoolEnt;
