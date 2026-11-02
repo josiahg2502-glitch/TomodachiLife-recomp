@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -707,6 +708,7 @@ def copy_opus(cx):
 
 
 def step_link(cx):
+    cx.state.setdefault('done', {}).pop('prepare', None)       # a new exe: its shaders are prepared again (prepare_shaders)
     if cx.runtime_dir:                        # the prebuilt runtime: copied and checked; only the game DLL is linked here
         cx.run('link', [sys.executable, 'build.py', 'gamedll'], env=build_env(cx))
         with open(os.path.join(cx.runtime_dir, 'manifest.json')) as f:
@@ -790,8 +792,9 @@ def version():
 
 
 def step_prepare(cx):
-    """Every shader container of the game, taken out of its files into build/cache/shader_store: the game compiles them
-    all at its first start ("preparing shaders"), not while you play. And the launcher's logo, from the game's own files."""
+    """Every shader container of the game, taken out of its files into build/cache/shader_store, then compiled for this
+    PC's graphics card (prepare_shaders), so neither the first start nor play waits for them. And the launcher's logo,
+    from the game's own files."""
     d = cx.state['dump']
     game = os.path.dirname(d['romfs'])
     cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'shader_store.py'), game, cx.build, os.path.join(cx.bin, 'main.elf')], cwd=REPO)
@@ -826,14 +829,27 @@ def prepare_shaders(cx):
     say('  shaders: compiling every shader of the game for your graphics card now (10-30 minutes, once), so the game starts quickly')
     os.makedirs(cx.logs, exist_ok=True)
     t0, last = time.time(), 0.0
+    moved = [time.time(), '']                 # the last time the "N of M ready" count changed, and that line
     with open(os.path.join(cx.logs, 'prepare_shaders.log'), 'ab') as f:
         p = subprocess.Popen([play, main_elf], cwd=cx.work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+        def watchdog():                       # a driver that stops answering must not hold the installer: the game prepares at its start
+            while p.poll() is None:
+                if time.time() - moved[0] > 900:
+                    p.kill()
+                    return
+                time.sleep(5)
+        threading.Thread(target=watchdog, daemon=True).start()
         for line in p.stdout:
             f.write(line)
             s = line.decode('utf-8', 'replace').strip()
-            if s.startswith('shaders: ') and (time.time() - last >= 30 or 'prepared' in s):
-                say('  ' + s)
-                last = time.time()
+            if s.startswith('shaders: '):
+                count = s.split(' ready')[0]
+                if count != moved[1]:
+                    moved[0], moved[1] = time.time(), count
+                if time.time() - last >= 30 or 'prepared' in s:
+                    say('  ' + s)
+                    last = time.time()
         rc = p.wait()
     if rc:
         raise Fail('the game\'s shader preparation ended with exit %d after %s (see logs\\prepare_shaders.log)' % (rc, fmt(time.time() - t0)))
@@ -848,7 +864,7 @@ ALWAYS = {'deps', 'stage'}               # cheap, and they fill the in-memory co
 def how_to_run(cx):
     say('')
     say('Start the game: %s in %s (or the "Tomodachi Life" shortcut the installer makes).' % (LAUNCHER, cx.work))
-    say('The first start prepares the shaders (a few minutes, once); later starts take seconds.')
+    say('The shaders are compiled: the game starts in seconds (after a graphics driver update it prepares them once more).')
     say('Without the launcher:  python scripts/run.py')
 
 
