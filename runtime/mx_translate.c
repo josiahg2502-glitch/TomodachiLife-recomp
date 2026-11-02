@@ -39,6 +39,8 @@ typedef struct {
     unsigned smem_words;
     int uses_smem;
     int uses_fcs, uses_tf;                    /* MxIn.screen_scale: gl_FragCoord.xy was scaled / a texelFetch was mapped */
+    uint32_t ldc_src[256];                    /* Vulkan TEX.B: 1 + (cbuf << 16) + offset of the LDC that last wrote the register (0: none) */
+    uint32_t bx_hint[8];                      /* the LDCs that gave a TEX.B its handle (MxOut.bx_hint) */
     uint32_t images, images_read, images_written;
     uint16_t image_fmt[8]; uint8_t image_type[8];
     uint32_t *jt;                             /* static jump target of SYNC / BRK / CONT */
@@ -280,7 +282,7 @@ static int tex_unit(Mx *e, uint64_t i) {
 /* sampler of the given GLSL base type ("2D", "2DArray", "Cube", ...) for a bound unit */
 static const char *SMP(Mx *e, int unit, const char *base, int shadow) {
     const char *pre = "";
-    if (!shadow && (e->in->int_tex >> unit & 1)) pre = (e->in->sint_tex >> unit & 1) ? "i" : "u";
+    if (!shadow && unit < 32 && (e->in->int_tex >> unit & 1)) pre = (e->in->sint_tex >> unit & 1) ? "i" : "u";      /* (units 128 + k: TEX.B candidates, float) */
     if (e->in->target == 1) {                /* Vulkan: a named sampler per (unit, type), declared in the header from e->smp */
         char type[24];
         int k, same_unit = 0;
@@ -365,12 +367,18 @@ static const char *SMPB(Mx *e, const char *h, const char *base, int shadow) {
     e->uses_bl = 1;
     return S(e, "sampler%s%s(mx_bl(%s))", base, shadow ? "Shadow" : "", h);
 }
+static void bx_note(Mx *e, unsigned reg) {         /* Vulkan TEX.B: where the handle in reg was loaded from, for the back end's candidate scan */
+    uint32_t h = reg < 256 ? e->ldc_src[reg] : 0;
+    int k = 0;
+    if (!h) return;
+    while (k < 8 && e->bx_hint[k] && e->bx_hint[k] != h) k++;
+    if (k < 8) e->bx_hint[k] = h;
+}
 static void op_tex(Mx *e, uint64_t i, int bindless) {
     unsigned t = MXB(i, 28, 3), mask = MXB(i, 31, 4), dc = MXB(i, 50, 1), aoffi = MXB(i, 54, 1), blod = MXB(i, 55, 3), meta = MXB(i, 20, 8);
     int unit = -1, dim;
     const char *hreg = NULL;
     if (bindless) {
-        if (e->in->target == 1) { fail(e, "TEX.B", "bindless texture handle in a register (Vulkan)"); return; }
         hreg = X(e, meta); meta++;
         aoffi = MXB(i, 36, 1); blod = MXB(i, 37, 3);
     } else {
@@ -385,7 +393,38 @@ static void op_tex(Mx *e, uint64_t i, int bindless) {
     if (dc) dref = FR(e, meta++);
     int explicit_lod = blod == 1 || blod == 3 || blod == 7, bias = blod == 2 || blod == 6, is_int = tex_is_int(e, unit, dc);
     if (e->in->stage != MX_FRAGMENT && !explicit_lod) { explicit_lod = 1; bias = 0; lod = NULL; }
+    if (bindless && e->in->target == 1) {      /* Vulkan: the handle is one of the draw's MX_BX candidates (mx_translate.h), each bound as a texture of its own */
+        char hb[64], cb[512], ob[256], lb[128], db[128];  /* copies: the S() ring is reused many times below */
+        snprintf(hb, sizeof hb, "%s", hreg); snprintf(cb, sizeof cb, "%s", coords); snprintf(ob, sizeof ob, "%s", off ? off : "");
+        snprintf(lb, sizeof lb, "%s", lod ? lod : ""); snprintf(db, sizeof db, "%s", dref ? dref : "");
+        if (dc && t == 7 && (explicit_lod || off || bias)) { fail(e, "TEX", "shadow cube array with lod/offset/bias"); return; }
+        e->cbufs |= 1u | 4u; bx_note(e, MXB(i, 20, 8));
+        emit(e, "uint bk = %uu; for (uint q = 0u; q < %uu; q++) if (cb2(224u + q) == %s) { bk = q; break; }", MX_BX, MX_BX, hb);
+        emit(e, dc ? " float sv = 0.0;" : getenv("TOMO_BX_MAGENTA") ? " vec4 tv = vec4(1.0, 0.0, 1.0, 1.0);" : " vec4 tv = vec4(0.0);");      /* TEST: TOMO_BX_MAGENTA=1 shows a handle that matched no candidate */
+        /* each candidate is sampled in a branch of its own, and neighbouring pixels can take different ones (layers of the
+         * island's ground): implicit derivatives there are undefined (the ground came out blurred). A 2D lookup with an implicit
+         * LOD takes the slopes of its coordinates before the branches and samples with textureGrad. */
+        const int grad = t == 2 && !explicit_lod && e->in->stage == MX_FRAGMENT;
+        if (grad) emit(e, " vec2 gx = dFdx(%s), gy = dFdy(%s);%s", cb, cb, bias ? S(e, " gx *= exp2(%s); gy *= exp2(%s);", lb, lb) : "");
+        for (unsigned k = 0; k < MX_BX; k++) {
+            const char *sk = SMP(e, 128 + (int)k, k_tex_base[t], dc), *p = dc ? shadow_coords(e, t, cb, dim, db) : cb, *lv = blod == 1 || !lod ? "0.0" : lb, *ck;
+            if (dc && t == 7) ck = S(e, "texture(%s, %s, %s)", sk, p, db);
+            else if (grad) ck = off ? S(e, "textureGradOffset(%s, %s, gx, gy, %s)", sk, p, ob) : S(e, "textureGrad(%s, %s, gx, gy)", sk, p);
+            else if (explicit_lod) ck = off ? S(e, "textureLodOffset(%s, %s, %s, %s)", sk, p, lv, ob) : S(e, "textureLod(%s, %s, %s)", sk, p, lv);
+            else ck = off ? S(e, "textureOffset(%s, %s, %s%s%s)", sk, p, ob, bias ? ", " : "", bias ? lb : "") : S(e, "texture(%s, %s%s%s)", sk, p, bias ? ", " : "", bias ? lb : "");
+            emit(e, " if (bk == %uu) %s = %s;", k, dc ? "sv" : "tv", ck);
+        }
+        if (dc) emit(e, " vec4 tv = vec4(sv, sv, sv, 1.0);");
+        tex_store_mask(e, mask, MXB(i, 0, 8), 0);
+        if (MXB(i, 51, 3) != 7) emit(e, " %s = true;", PD(e, MXB(i, 51, 3)));
+        return;
+    }
     const char *lodv = blod == 1 || !lod ? "0.0" : lod, *smp = bindless ? SMPB(e, hreg, k_tex_base[t], dc) : SMP(e, unit, k_tex_base[t], dc), *call;
+    if (off && e->in->target == 1 && !dc && (t == 2 || t == 3)) {      /* Vulkan: an offset from a register cannot be an argument (glslang: "must be compile-time constant"): it moves the coordinates, in texels of the level sampled (0 unless explicit) */
+        const char *sz = S(e, "vec2(textureSize(%s, %s).xy)", smp, explicit_lod && blod != 1 && lod ? S(e, "int(%s)", lod) : "0");
+        coords = t == 2 ? S(e, "(%s + vec2(%s) / %s)", coords, off, sz) : S(e, "(%s + vec3(vec2(%s) / %s, 0.0))", coords, off, sz);
+        off = NULL;
+    }
     if (dc) {
         const char *p = shadow_coords(e, t, coords, dim, dref);
         if (t == 7 && (explicit_lod || off || bias)) { fail(e, "TEX", "shadow cube array with lod/offset/bias"); return; }
@@ -562,7 +601,6 @@ static void op_tld4s(Mx *e, uint64_t i) {
 static void op_tmml(Mx *e, uint64_t i, int bindless) {      /* TMML.B: the texture handle in Rb, as TEX.B (4 fragment stages of the game's store) */
     unsigned t = MXB(i, 28, 3), c = MXB(i, 8, 8), mask = MXB(i, 31, 4), r = MXB(i, 0, 8);
     int unit = -1;
-    if (bindless && e->in->target == 1) { fail(e, "TMML.B", "bindless texture handle in a register (Vulkan)"); return; }
     if (!bindless && (unit = tex_unit(e, i)) < 0) return;
     if (e->in->stage != MX_FRAGMENT) { fail(e, "TMML", "LOD query outside a fragment shader"); return; }
     const char *coords;
@@ -575,6 +613,20 @@ static void op_tmml(Mx *e, uint64_t i, int bindless) {      /* TMML.B: the textu
     case 7: coords = S(e, "vec3(%s, %s, %s)", FR(e, c + 1), FR(e, c + 2), FR(e, c + 3)); break;
     default: fail(e, "TMML", "type %u", t); return;
     }
+    if (bindless && e->in->target == 1) {      /* Vulkan: as TEX.B, among the draw's candidates */
+        char hb[64], cb[512];
+        snprintf(hb, sizeof hb, "%s", X(e, MXB(i, 20, 8))); snprintf(cb, sizeof cb, "%s", coords);
+        e->cbufs |= 1u | 4u; bx_note(e, MXB(i, 20, 8));
+        emit(e, "uint bk = %uu; for (uint q = 0u; q < %uu; q++) if (cb2(224u + q) == %s) { bk = q; break; } vec2 q = vec2(0.0);", MX_BX, MX_BX, hb);
+        if (t == 2) {                                  /* as TEX.B: the slopes before the branches (textureQueryLod in a branch reads undefined derivatives) */
+            emit(e, " vec2 gx = dFdx(%s), gy = dFdy(%s);", cb, cb);
+            for (unsigned k = 0; k < MX_BX; k++) {
+                const char *sk = SMP(e, 128 + (int)k, "2D", 0);
+                emit(e, " if (bk == %uu) { vec2 z = vec2(textureSize(%s, 0)); float l = 0.5 * log2(max(dot(gx * z, gx * z), dot(gy * z, gy * z))); q = vec2(clamp(l, 0.0, float(textureQueryLevels(%s) - 1)), l); }", k, sk, sk);
+            }
+        } else
+        for (unsigned k = 0; k < MX_BX; k++) emit(e, " if (bk == %uu) q = textureQueryLod(%s, %s);", k, SMP(e, 128 + (int)k, k_tex_base[t], 0), cb);
+    } else
     emit(e, "vec2 q = textureQueryLod(%s, %s);", bindless ? SMPB(e, X(e, MXB(i, 20, 8)), k_tex_base[t], 0) : SMP(e, unit, k_tex_base[t], 0), coords);
     for (unsigned k = 0; k < 4; k++) {
         if (!(mask >> k & 1)) continue;
@@ -1124,6 +1176,7 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         e->cbufs |= 1u << cb;
         if (cb < 18) e->cb_dyn |= 1u << cb;
         emit(e, "uint ad = %s + 0x%08xu, w = cb%u(ad >> 2);", A8, (uint32_t)off, cb);
+        if (rd != 255 && (sz == 4 || sz == 5)) { e->ldc_src[rd] = 1u + (cb << 16) + ((uint32_t)off & 0xffffu); if (sz == 5 && rd < 254) e->ldc_src[rd + 1] = 1u + (cb << 16) + (((uint32_t)off + 4u) & 0xffffu); }
         switch (sz) {
         case 0: emit(e, " %s = bitfieldExtract(w, int((ad & 3u) * 8u), 8);", DST); break;
         case 1: emit(e, " %s = uint(bitfieldExtract(int(w), int((ad & 3u) * 8u), 8));", DST); break;
@@ -1696,7 +1749,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
             for (unsigned n = 0; n < 18; n++) ncb += e->cbufs >> n & 1;
             out->ubo = !vk && in->ubo && (in->stage == MX_VERTEX || in->stage == MX_FRAGMENT) && ncb <= 14 && !e->gubos;
             for (unsigned n = 0; n < 18; n++) {
-                if (!(e->cbufs >> n & 1)) continue;
+                if (!(e->cbufs >> n & 1) || (vk && n == 0)) continue;     /* Vulkan: bit 0 = TEX.B candidates wanted (MX_BX), not a buffer */
                 if (out->ubo) {                    /* fixed indices only: the block as large as they reach; computed ones: all 64 KB */
                     unsigned vecs = e->cb_dyn >> n & 1 ? 4096u : e->cb_max[n] / 4u + 1u;
                     emit(&h, "layout(std140, binding = %u) uniform CB%u { uvec4 c%u[%u]; };\nuint cb%u(uint i) { return c%u[i >> 2u][i & 3u]; }\n", in->ubo_base + n, n, n, vecs, n, n);
@@ -1828,6 +1881,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
         free(h.s);
     }
     out->glsl = res;
+    memcpy(out->bx_hint, e->bx_hint, sizeof out->bx_hint);
     out->cbufs = e->cbufs | (e->uses_bl ? 0x80000000u : 0u); out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
     out->int_dep = in->stage == MX_VERTEX ? (e->in_attr & 0xffffu) | (e->in_attr << 16) : e->tex_units;      /* vertex: bit 16 + n = attribute n's SNORM decode (int_attrs) */
     out->ssbos = e->ssbos; out->ssbo_written = e->uses_gstore ? e->ssbos : 0;

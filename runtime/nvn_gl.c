@@ -7023,6 +7023,19 @@ static int bl_has(uint32_t nh) {
     ReleaseSRWLockShared(&g_bl_lock);
     return i >= 0;
 }
+/* Vulkan back end (TEX.B, nvn_vk_draw.c bx_scan): the handles of the bindless table among n words of guest memory, each once,
+ * appended to out (count *nout, at most max); one shared lock for the whole scan. */
+void nvn_front_bl_scan(const uint32_t *w, size_t n, uint32_t *out, int *nout, int max) {
+    AcquireSRWLockShared(&g_bl_lock);
+    for (size_t i = 0; i < n && *nout < max && g_bl_n; i++) {
+        uint32_t x = w[i];
+        int k = 0;
+        if (!x || x == 0xffffffffu) continue;
+        while (k < *nout && out[k] != x) k++;
+        if (k == *nout && bl_find(x) >= 0) out[(*nout)++] = x;
+    }
+    ReleaseSRWLockShared(&g_bl_lock);
+}
 static void bl_note(uint32_t nh) {
     /* shared lock for the usual case, a pair asked for again: the job threads ask ~20,000 times a second */
     AcquireSRWLockShared(&g_bl_lock);

@@ -23,9 +23,10 @@ typedef struct VStage {
     VSmp smp[64];
     VkShaderModule mod; struct VStage *next, *next_h;
     VkPipeline lib, lib2; volatile LONG lib_state, lib2_state;      /* session 9 (SSBU_VK_GPL=2): the stage's pipeline library; lib2: a vertex stage with the empty fragment shader state */
+    uint32_t bx_hint[8];                           /* TEX.B: where its handles are loaded from (MxOut.bx_hint; nvn_vk_draw.c bx_scan) */
 } VStage;
-#define MX_VK_VERSION 7u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
-typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; } StageRec;
+#define MX_VK_VERSION 11u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
+typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64];  uint32_t bx_hint[8];} StageRec;
 typedef struct { uint32_t magic, key[4], fo, dep, tex; uint64_t vh; } VarRec;      /* ..\cache\vk\stage\<stage>_<hb>.var: the variants of one code */
 #define STAGEREC_MAGIC (0x52545356u + MX_VK_VERSION)
 typedef struct { int stage, code_len, serial; const uint8_t *code, *cdata; uint32_t cdata_size, local[3], smem, lmem; } SSrc;
@@ -174,6 +175,7 @@ static int stage_rec_read(int s, uint64_t vh, StageRec *r) {
 }
 static void vstage_from_rec(VStage *v, const StageRec *r, uint64_t vh, VkShaderModule mod) {
     v->h = vh; v->hb = r->hb; v->code_len = r->code_len; memcpy(v->key, r->key, 16); v->fo = r->fo;
+    memcpy(v->bx_hint, r->bx_hint, sizeof v->bx_hint);
     v->cbufs = r->cbufs; v->ssbos = r->ssbos; v->ssbo_w = r->ssbo_w; v->images = r->images; v->dep = r->dep; v->tex_units = r->tex_units; v->in_attr = r->in_attr; v->out_attr = r->out_attr;
     v->uses_alpha = r->uses_alpha; v->nsmp = r->nsmp; memcpy(v->smp, r->smp, sizeof v->smp);
     v->mod = mod; v->ok = 1;
@@ -231,7 +233,12 @@ static void vstage_build(VStage *v, const SSrc *src) {
         snprintf(what, sizeof what, "program #%d %s stage", src->serial, s == 5 ? "compute" : s ? "fragment" : "vertex");
         if (s == 1 && RS_ON) in.screen_scale = 1;
         if (s == 0) in.depth_m1 = !(nvn_front_clip_modes() >> 8 & 0xff);
-        if (!mx_translate(&in, &out)) { printf("nvn_vk: %s: machine code not translated: %s\n", what, out.why); fflush(stdout); }
+        if (!mx_translate(&in, &out)) {
+            printf("nvn_vk: %s: machine code not translated: %s\n", what, out.why); fflush(stdout);
+            const char *gd = getenv("TOMO_VK_GLSL");          /* TEST: the OpenGL translation of a stage Vulkan cannot take, to read */
+            MxIn g = in; MxOut go; memset(&go, 0, sizeof go); g.target = 0;
+            if (gd && mx_translate(&g, &go)) { char pth[300]; snprintf(pth, sizeof pth, "%s/%d_id%d_gl.glsl", gd, s, v->id); FILE *gf = fopen(pth, "w"); if (gf) { fputs(go.glsl, gf); fclose(gf); } }
+        }
         else {
             uint64_t spv_hash = 0;
             {   /* TEST: TOMO_VK_GLSL=<folder>: every translated stage's text as <stage>_<hash>.glsl */
@@ -240,6 +247,7 @@ static void vstage_build(VStage *v, const SSrc *src) {
             }
             if (in.screen_scale) { InterlockedIncrement64(&g_rs_stages); if (strstr(out.glsl, "mx_fcs)")) InterlockedIncrement64(&g_rs_fcs); if (strstr(out.glsl, "mx_tf(")) InterlockedIncrement64(&g_rs_tf); }
             v->mod = module_from_glsl(s, out.glsl, what, &spv_hash);
+            memcpy(v->bx_hint, out.bx_hint, sizeof v->bx_hint);
             v->cbufs = out.cbufs; v->ssbos = out.ssbos; v->ssbo_w = out.ssbo_written; v->images = out.images; v->in_attr = out.in_attr; v->out_attr = out.out_attr;
             v->dep = s == 0 ? out.int_dep : 0; v->tex_units = out.tex_units; v->uses_alpha = out.uses_alpha; v->nsmp = out.nsmp;
             for (int i = 0; i < out.nsmp && i < 64; i++) {
@@ -256,6 +264,7 @@ static void vstage_build(VStage *v, const SSrc *src) {
                 v->h = fnv(fnv(v->hb, v->key, 16), &v->fo, 4);
                 memset(&r, 0, sizeof r);
                 r.magic = STAGEREC_MAGIC; r.stage = s; r.code_len = v->code_len; memcpy(r.key, v->key, 16); r.fo = v->fo; r.spv = spv_hash; r.hb = v->hb;
+                memcpy(r.bx_hint, v->bx_hint, sizeof r.bx_hint);
                 r.cbufs = v->cbufs; r.ssbos = v->ssbos; r.ssbo_w = v->ssbo_w; r.images = v->images; r.dep = v->dep; r.tex_units = v->tex_units; r.in_attr = v->in_attr; r.out_attr = v->out_attr;
                 r.uses_alpha = v->uses_alpha; r.nsmp = v->nsmp; memcpy(r.smp, v->smp, sizeof r.smp);
                 snprintf(path, sizeof path, "%s/stage/%d_%016llx.st", vkc_dir(), s, (unsigned long long)v->h);
