@@ -686,10 +686,14 @@ private:
             drop_pending_commit();
             for (const char* n : {"Map.sav", "Mii.sav", "Player.sav"})
                 ok = ok && fs::copy_file(from / n, g_userdata / "save" / n, fs::copy_options::overwrite_existing, e);
-            /* the island's drawings (Palette House creations, face paint: Ugc\*.canvas.zs, *.ugctex.zs) come with it and the
-             * old island's go (they are in the backup); left behind, the imported items were black or orange (issue #16) */
-            if (ok) { fs::remove_all(g_userdata / "save" / "Ugc", e); ok = !e; }
-            if (ok && is_dir(from / "Ugc")) ok = copy_contents(from / "Ugc", g_userdata / "save" / "Ugc");
+            /* the island's folders come with it (Ugc: Palette House creations and face paint; PhotoStudio: the photo
+             * studio's pictures) and the old island's go (they are in the backup); left behind, the imported items were
+             * black or orange (issue #16) */
+            std::vector<fs::path> old, add;
+            for (auto& d : fs::directory_iterator(g_userdata / "save", e)) if (d.is_directory(e)) old.push_back(d.path());
+            for (auto& d : fs::directory_iterator(from, e)) if (d.is_directory(e)) add.push_back(d.path());
+            for (auto& d : old) if (ok) { fs::remove_all(d, e); ok = !e; }
+            for (auto& d : add) if (ok) ok = copy_contents(d, g_userdata / "save" / d.filename());
         }
         note_ = ok ? "Save imported. Your previous save is in the backups." : "The import failed: your previous save is in the backups.";
         note_ok_ = ok;
