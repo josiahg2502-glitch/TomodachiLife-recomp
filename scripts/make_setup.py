@@ -15,6 +15,7 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -115,7 +116,7 @@ def main():
         subprocess.run([a.clang, '-O2', '-w', os.path.join(REPO, 'launcher', 'setup.c'), '-o', built, '-luser32', '-lshell32', '-lole32',
                         '-lcomctl32', '-luuid', '-Wl,/SUBSYSTEM:WINDOWS', '-Wl,/ENTRY:wWinMainCRTStartup'], check=True)
         stamp(built, zipdata, icon())
-        os.replace(built, exe)
+        shutil.copyfile(built, exe)                       # (the temporary folder may be on another drive)
     commit = git('rev-parse', '--short=10', a.ref + '^{commit}').decode().strip()
     print('%s  (%.1f MB): %s at %s, launcher from %s' % (exe, os.path.getsize(exe) / 1048576, a.ref, commit, pkg))
     print('sha256: %s' % hashlib.sha256(open(exe, 'rb').read()).hexdigest())
