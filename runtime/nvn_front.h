@@ -164,6 +164,8 @@ void nvn_front_rt_note(Tex *t);                                             /* V
 Tex *nvn_front_alias_newest(Tex *t, long long after, int same_rw);
 int nvn_front_alias_takers(Tex *t, Tex **to, int max);
 void nvn_front_bl_scan(const uint32_t *w, size_t n, uint32_t *out, int *nout, int max);      /* Vulkan, TEX.B candidates */
+size_t nvn_front_tex_land(Tex *t, int level, int layer, const void *lin);    /* Vulkan, issue #12: GPU texels back into guest memory */
+int nvn_front_rt_cpu_format(int f);
 /* SSBU_COMPUTE_CMP=<folder> (V1 session 5): a dispatch named by the hash of its inputs; its written ranges saved once landed. */
 void nvn_front_ccmp_dispatch(const Range *ubo, const Range *ssbo, uint32_t written, const uint8_t *code, int code_len, unsigned gx, unsigned gy, unsigned gz);
 void nvn_front_ccmp_landed(void);

@@ -633,6 +633,7 @@ static void garbage_collect(void) {
     g_ngarbage = n;
 }
 static void alias_handoff_vk(Tex *t);
+static void rt_note_cpu_read_vk(Tex *t, int level);
 Tex *g_probe_tex[64]; int g_probe_n;                 /* TEST (SSBU_VK_UILOG): colour targets of the logged frame, read back at its present */
 static size_t read_region(Tex *t, const View *vp, const int *r, void *out, int64_t row_stride, int64_t image_stride);
 static void probe_pass(void) {                       /* TEST (SSBU_VK_UILOG): after each pass of the logged frame, the centre texels of its colour target 0 */
@@ -1526,7 +1527,7 @@ static int pass_begin(void) {
         if (!t || t->dead) continue;
         VTex *vt = vt_get(t);
         if (vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { nvn_vk_missing("a depth format bound as colour target"); continue; }
-        alias_pull_vk(t); nvn_front_rt_note(t);
+        alias_pull_vk(t); nvn_front_rt_note(t); rt_note_cpu_read_vk(t, target_level(&R.col[i]));
         t->gpu_written = 1;
         vt_layout(vt, vt->feedback ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         ca[i].imageView = target_view(&R.col[i], vt); ca[i].imageLayout = vt->layout;
@@ -3166,6 +3167,40 @@ static size_t read_region(Tex *t, const View *vp, const int *r, void *out, int64
     R.readbacks++;
     return (size_t)L.span;                         /* the bytes of the game's memory written (callers test it for 0 only) */
 }
+/* Textures in memory the CPU reads, drawn or copied into by the GPU (the face paint's canvas and its BC1 copy, issue #12):
+ * what the GPU wrote goes back to guest memory (nvn_gl.c tex_copy_back / rt_copy_back; the front end lands it, swizzled).
+ * Synchronous here: a read-back and a wait, at the end of the batch that drew into one, or at once after a copy into one.
+ * TOMO_COPYBACK=0: off. */
+static struct { Tex *t; int level; } g_cpurt[32];
+static int g_cpurt_n;
+static LONG64 g_copybacks;
+static int copyback_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("TOMO_COPYBACK"); on = !(e && e[0] == '0'); } return on; }
+static void vk_copy_back(Tex *t, int level) {
+    VTex *vt = t && !t->dead ? t->vk : NULL;
+    if (!copyback_on() || !vt || !t->mem || t->b.packaged || vt->decode || vt->expand || vt->samples > 1 || (t->b.flags & 0x10) || level < 0 || level >= vt->levels) return;
+    int w = lvl_(t->b.width, level), h = lvl_(t->b.height, level), d = vt->is3d ? lvl_(t->b.depth > 0 ? t->b.depth : 1, level) : 1;
+    size_t cap = (size_t)w * h * d * 16 + 4096;      /* at most 16 bytes a texel (RGBA32F; a 4x4 block of 16 bytes is less) */
+    uint8_t *buf = malloc(cap);
+    if (!buf) return;
+    for (int layer = 0; layer < (vt->is3d ? 1 : vt->layers); layer++) {
+        View v;
+        int r[6] = {0, 0, 0, w, h, d};
+        memset(&v, 0, sizeof v); v.set = 0x83; v.lvl0 = level; v.lay0 = layer;
+        if (read_region(t, &v, r, buf, 0, 0) && nvn_front_tex_land(t, level, layer, buf)) g_copybacks++;
+    }
+    free(buf);
+    {   static int nlog; if (nlog++ < 5) printf("nvn_vk: what the GPU wrote into texture %dx%d format 0x%x level %d (memory the CPU reads) goes back to guest memory\n", t->b.width, t->b.height, t->b.format, level); }
+}
+static void rt_copy_back_vk(void) {
+    for (int i = 0; i < g_cpurt_n; i++) if (!g_cpurt[i].t->dead && !g_cpurt[i].t->game_inval) vk_copy_back(g_cpurt[i].t, g_cpurt[i].level);
+    g_cpurt_n = 0;
+}
+static void rt_note_cpu_read_vk(Tex *t, int level) {     /* a colour target of this batch in memory the CPU reads: back at the batch's end */
+    if (!t->cpu_read || t->game_inval || !nvn_front_rt_cpu_format(t->b.format)) return;
+    for (int i = 0; i < g_cpurt_n; i++) if (g_cpurt[i].t == t && g_cpurt[i].level == level) return;
+    if (g_cpurt_n == 32) rt_copy_back_vk();
+    g_cpurt[g_cpurt_n].t = t; g_cpurt[g_cpurt_n++].level = level;
+}
 static void vk_read_texels(void *arg) {
     ReadJob *j = arg;
     if (!V.alive || !j->tex || j->tex->dead) return;
@@ -3226,6 +3261,18 @@ static void blit_tex(Tex *s, const View *sv, const int *sr, Tex *d, const View *
         rv.extent.width = (uint32_t)rs_sw; rv.extent.height = (uint32_t)rs_sh; rv.extent.depth = 1;
         CKPT_OP("resolve (destination image, w, h)", vd->img, rv.extent.width, rv.extent.height, 0);
         vkCmdResolveImage(R.cmd, vs->img, sl, vd->img, dl, 1, &rv);
+        return;
+    }
+    if ((vs->bw > 1 || vs->bh > 1 || vd->bw > 1 || vd->bh > 1) && vs->bpb == vd->bpb && rs_sw == rs_dw && rs_sh == rs_dh && rs_sw > 0 && rs_sh > 0) {
+        /* block-compressed (the face paint's BC1, issue #12): a blit cannot take them (it left the copy empty, and the face
+         * paint was saved black); copied as blocks, as OpenGL's glCopyImageSubData does (d083233), same size and block size */
+        VkImageCopy c;
+        memset(&c, 0, sizeof c);
+        c.srcSubresource = b.srcSubresource; c.dstSubresource = b.dstSubresource;
+        c.srcOffset = b.srcOffsets[0]; c.dstOffset = b.dstOffsets[0];
+        c.extent.width = (uint32_t)rs_sw; c.extent.height = (uint32_t)rs_sh; c.extent.depth = 1;
+        CKPT_OP("block copy (destination image, w, h)", vd->img, c.extent.width, c.extent.height, 0);
+        vkCmdCopyImage(R.cmd, vs->img, sl, vd->img, dl, 1, &c);
         return;
     }
     if (vs->samples > 1 || vd->samples > 1) { nvn_vk_missing("a scaled or depth copy of a multisample texture"); return; }
@@ -3492,6 +3539,7 @@ static void exec(const Cmd *m, int depth) {
         if (a[6] & 4) { dr[0] += dr[3]; dr[3] = -dr[3]; }
         if (a[6] & 8) { dr[1] += dr[4]; dr[4] = -dr[4]; }
         blit_tex(s, &sv, sr, d, &dv, dr, (int)(a[6] & 1));
+        if (d->cpu_read && !d->game_inval) vk_copy_back(d, (dv.set & 0x81) == 0x81 ? dv.lvl0 : 0);      /* issue #12: the face paint's BC1 copy */
         break;
     }
     case OP_DOWNSAMPLE: {
@@ -3561,6 +3609,7 @@ static void vk_submit(void *arg) {
       for (int i = 0; i < j->count; i++) replay(j->handles[i], 0);
       nvn_front_racechk(j->handles, j->count, 2); }
     cb_batch_end();
+    if (g_cpurt_n) rt_copy_back_vk();               /* issue #12: CPU-read targets drawn in this batch, back into guest memory */
     g_tm[7] += t1 - t0; g_tm[3] += tk() - t1;
     nvn_front_count(3, 1);
 }

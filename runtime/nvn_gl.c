@@ -9969,6 +9969,21 @@ int nvn_front_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, Tex **t, View *v
     return r;
 }
 long long nvn_front_frame_next(void) { return (long long)g_st.frames + 1; }
+/* Vulkan back end (nvn_vk_draw.c vk_copy_back, issue #12): one level and layer of t as the GPU drew it, linear and packed,
+ * swizzled into t's guest memory as tex_copy_back's landing does (rb_land_at); the hash follows, so it is not uploaded
+ * again. 0 when t has no such memory. */
+size_t nvn_front_tex_land(Tex *t, int level, int layer, const void *lin) {
+    TexLayout L;
+    if (!t || t->dead || !t->mem || t->b.packaged) return 0;
+    tex_lay(&t->b, &L);
+    if (level < 0 || level >= L.levels || layer < 0 || layer >= (t->b.target == 2 ? 1 : L.layers)) return 0;
+    uint8_t *dst = (uint8_t *)tex_level_ptr(&L, t->mem, level, layer);
+    if (t->limit && dst + L.lvl_size[level] > t->limit) return 0;
+    tex_swizzle_level(&L, level, lin, dst);
+    t->hash = mem_hash(t->mem, t->data_size, t->ww_hashed || (t->b.flags & 0x10) != 0);
+    return L.lvl_linear_size[level];
+}
+int nvn_front_rt_cpu_format(int f) { return rt_cpu_format(f); }
 /* Vulkan back end: the CPU side of ReportCounter / ReportValue / SetRenderEnableConditional by the OpenGL replay's rules
  * (OP_COUNTER_REPORT, OP_RENDER_ENABLE above). The statistics counters (types 1..15) read 0: no Vulkan queries yet. */
 void nvn_front_counter_report(int type, uint64_t addr) {
