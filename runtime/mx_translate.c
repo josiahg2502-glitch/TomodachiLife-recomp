@@ -729,7 +729,7 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned sr = MXB(i, 20, 8);
         const char *v;
         switch (sr) {
-        case 0x00: v = "gl_SubGroupInvocationARB"; break;
+        case 0x00: v = e->in->target == 1 ? "gl_SubgroupInvocationID" : "gl_SubGroupInvocationARB"; break;      /* Vulkan: the KHR subgroup names (header) */
         case 0x11: v = e->in->stage == MX_GEOMETRY || e->in->stage == MX_TESS_CONTROL ? "uint(gl_InvocationID)" : "0u"; break;
         case 0x12: v = "0x3f800000u"; break;                     /* y direction: +1 (the window origin is applied by glClipControl) */
         case 0x13: v = e->in->stage == MX_FRAGMENT ? "(gl_HelperInvocation ? 0xffffffffu : 0u)" : "0u"; break;
@@ -743,11 +743,11 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         case 0x25: v = "gl_WorkGroupID.x"; break;
         case 0x26: v = "gl_WorkGroupID.y"; break;
         case 0x27: v = "gl_WorkGroupID.z"; break;
-        case 0x38: v = "uint(gl_SubGroupEqMaskARB)"; break;
-        case 0x39: v = "uint(gl_SubGroupLtMaskARB)"; break;
-        case 0x3a: v = "uint(gl_SubGroupLeMaskARB)"; break;
-        case 0x3b: v = "uint(gl_SubGroupGtMaskARB)"; break;
-        case 0x3c: v = "uint(gl_SubGroupGeMaskARB)"; break;
+        case 0x38: v = e->in->target == 1 ? "gl_SubgroupEqMask.x" : "uint(gl_SubGroupEqMaskARB)"; break;
+        case 0x39: v = e->in->target == 1 ? "gl_SubgroupLtMask.x" : "uint(gl_SubGroupLtMaskARB)"; break;
+        case 0x3a: v = e->in->target == 1 ? "gl_SubgroupLeMask.x" : "uint(gl_SubGroupLeMaskARB)"; break;
+        case 0x3b: v = e->in->target == 1 ? "gl_SubgroupGtMask.x" : "uint(gl_SubGroupGtMaskARB)"; break;
+        case 0x3c: v = e->in->target == 1 ? "gl_SubgroupGeMask.x" : "uint(gl_SubGroupGeMaskARB)"; break;
         case 0x50: case 0x52: v = "0u"; break;                   /* clocks */
         default: v = NULL; break;
         }
@@ -757,10 +757,10 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         break;
     }
     case MXOP_VOTE: {
-        const char *p = PR(e, MXB(i, 39, 3), (int)MXB(i, 42, 1)), *f = MXB(i, 48, 2) == 0 ? "allInvocationsARB" : MXB(i, 48, 2) == 1 ? "anyInvocationARB" : "allInvocationsEqualARB";
+        const char *p = PR(e, MXB(i, 39, 3), (int)MXB(i, 42, 1)), *f = MXB(i, 48, 2) == 0 ? (e->in->target == 1 ? "subgroupAll" : "allInvocationsARB") : MXB(i, 48, 2) == 1 ? (e->in->target == 1 ? "subgroupAny" : "anyInvocationARB") : (e->in->target == 1 ? "subgroupAllEqual" : "allInvocationsEqualARB");
         emit(e, "bool vp = %s;", p);
         if (PD(e, MXB(i, 45, 3))) emit(e, " %s = %s(vp);", PD(e, MXB(i, 45, 3)), f);
-        if (MXB(i, 0, 8) != 255) emit(e, " %s = uint(ballotARB(vp));", DST);
+        if (MXB(i, 0, 8) != 255) emit(e, e->in->target == 1 ? " %s = subgroupBallot(vp).x;" : " %s = uint(ballotARB(vp));", DST);
         break;
     }
     case MXOP_NOP: case MXOP_DEPBAR: case MXOP_MEMBAR: case MXOP_VOTE_vtg: case MXOP_CCTL: case MXOP_CCTLL: case MXOP_SSY: case MXOP_PBK: case MXOP_PCNT:
@@ -1286,7 +1286,8 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
     case MXOP_FSWZADD: {                       /* FSWZADD Rd, Ra, Rb, swz: (a * ma[k]) + (b * mb[k]), k = the lane's 2 bits of swz (quad derivatives) */
         unsigned swz = MXB(i, 28, 8);
         e->uses_shfl = 1;
-        emit(e, "uint k = (%uu >> ((gl_SubGroupInvocationARB & 3u) << 1u)) & 3u; float ma = k == 0u ? -1.0 : k == 1u ? 1.0 : k == 2u ? -1.0 : 0.0; float mb = k == 2u ? 1.0 : -1.0;", swz);
+        emit(e, e->in->target == 1 ? "uint k = (%uu >> ((gl_SubgroupInvocationID & 3u) << 1u)) & 3u;" : "uint k = (%uu >> ((gl_SubGroupInvocationARB & 3u) << 1u)) & 3u;", swz);
+        emit(e, " float ma = k == 0u ? -1.0 : k == 1u ? 1.0 : k == 2u ? -1.0 : 0.0; float mb = k == 2u ? 1.0 : -1.0;");
         emit(e, " %s = U(F(%s) * ma + F(%s) * mb);", DST, A8, R20);
         break;
     }
@@ -1302,9 +1303,10 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
     case MXOP_SHFL: {                          /* SHFL.<mode> Rd, Pp, Ra, b, c: a lane exchange across the warp (NV_shader_thread_shuffle), width 32 */
         unsigned mode = MXB(i, 30, 2), pp = MXB(i, 48, 3);
         const char *b = MXB(i, 28, 1) ? S(e, "%uu", (unsigned)MXB(i, 20, 5)) : R20;
-        static const char *const fn[4] = {"shuffleNV", "shuffleUpNV", "shuffleDownNV", "shuffleXorNV"};
+        static const char *const fn[4] = {"shuffleNV", "shuffleUpNV", "shuffleDownNV", "shuffleXorNV"}, *const fk[4] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
         e->uses_shfl = 1;
-        emit(e, "%s = %s(%s, %s, 32u);", DST, fn[mode], A8, b);
+        if (e->in->target == 1) emit(e, "%s = %s(%s, %s);", DST, fk[mode], A8, b);       /* Vulkan: KHR shuffles, the whole subgroup (32 lanes on NVIDIA, as the console) */
+        else emit(e, "%s = %s(%s, %s, 32u);", DST, fn[mode], A8, b);
         if (pp != 7) emit(e, " %s = true;", PD(e, pp));
         break;
     }
@@ -1669,11 +1671,13 @@ int mx_translate(const MxIn *in, MxOut *out) {
         if (in->stage == MX_VERTEX) e->out_attr |= in->force_out;      /* declared and set to (0, 0, 0, 1) below */
         const int vk = in->target == 1;
         const char *set0 = vk ? "set = 0, " : "", *set1 = vk ? "set = 1, " : "";
-        if (vk) emit(&h, "#version 460\n#extension GL_ARB_gpu_shader_int64 : enable\n#extension GL_EXT_texture_shadow_lod : enable\n");
+        if (vk) emit(&h, "#version 460\n#extension GL_ARB_gpu_shader_int64 : enable\n#extension GL_EXT_texture_shadow_lod : enable\n"
+                     "#extension GL_KHR_shader_subgroup_vote : enable\n#extension GL_KHR_shader_subgroup_ballot : enable\n"
+                     "#extension GL_KHR_shader_subgroup_shuffle : enable\n#extension GL_KHR_shader_subgroup_shuffle_relative : enable\n");
         else
         emit(&h, "#version 460 compatibility\n#extension GL_ARB_bindless_texture : require\n#extension GL_NV_gpu_shader5 : enable\n#extension GL_ARB_gpu_shader_int64 : enable\n"
                  "#extension GL_ARB_shader_ballot : enable\n#extension GL_ARB_shader_group_vote : enable\n#extension GL_EXT_texture_shadow_lod : enable\n");
-        if (e->uses_shfl) emit(&h, "#extension GL_NV_shader_thread_shuffle : enable\n");
+        if (e->uses_shfl && !vk) emit(&h, "#extension GL_NV_shader_thread_shuffle : enable\n");
         if (e->uses_layer_out || e->uses_vp_out) emit(&h, "#extension GL_ARB_shader_viewport_layer_array : require\n");
         emit(&h, "%s", k_prelude);
         if (vk && in->stage == MX_FRAGMENT && in->screen_scale && e->uses_fcs) emit(&h, "layout(push_constant) uniform MXPC { uvec2 mx_alpha; float mx_point_size; float mx_fcs; };\n");      /* track O */
@@ -1810,7 +1814,8 @@ int mx_translate(const MxIn *in, MxOut *out) {
         for (unsigned p = 0; p < 7; p++) if (e->preds[p]) { emit(&h, "%s p%u = false", any ? "," : " bool", p); any = 1; }
         if (any) emit(&h, ";\n");
         if (e->any_jump) emit(&h, e->linear ? " uint pc = 1u;\n" : " uint pc = 1u;\n for (;;) { switch (pc) {\n");
-        const char *vertex_entry = vk && in->stage == MX_VERTEX ? "\nvoid main() { mx_vertex_main(); gl_Position = mx_position; }\n" : "";
+        const char *vertex_entry = vk && in->stage == MX_VERTEX ? (in->depth_m1 ? "\nvoid main() { mx_vertex_main(); gl_Position = mx_position; gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5; }\n"
+                                                                                 : "\nvoid main() { mx_vertex_main(); gl_Position = mx_position; }\n") : "";
         size_t need = h.len + e->len + strlen(e->exitcode) + strlen(vertex_entry) + 256;
         res = malloc(need);
         memcpy(res, h.s, h.len);

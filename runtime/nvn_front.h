@@ -157,6 +157,12 @@ int nvn_front_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, Tex **t, View *v
  * collects old command lists. Returns the number of the frame just presented. */
 long long nvn_front_frame_end(long long draws, long long skipped, long long clears);
 long long nvn_front_frame_next(void);                                       /* number the frame being presented will get */
+void nvn_front_counter_report(int type, uint64_t addr);                     /* Vulkan replay: OP_COUNTER_REPORT, OP_REPORT_VALUE, conditional rendering */
+void nvn_front_report_value(uint32_t value, uint64_t addr);
+int nvn_front_render_off(int mode1, uint64_t addr);
+void nvn_front_rt_note(Tex *t);                                             /* Vulkan: textures of one shape over the same memory (nvn_gl.c) */
+Tex *nvn_front_alias_newest(Tex *t, long long after, int same_rw);
+int nvn_front_alias_takers(Tex *t, Tex **to, int max);
 /* SSBU_COMPUTE_CMP=<folder> (V1 session 5): a dispatch named by the hash of its inputs; its written ranges saved once landed. */
 void nvn_front_ccmp_dispatch(const Range *ubo, const Range *ssbo, uint32_t written, const uint8_t *code, int code_len, unsigned gx, unsigned gy, unsigned gz);
 void nvn_front_ccmp_landed(void);

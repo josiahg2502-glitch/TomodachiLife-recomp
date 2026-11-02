@@ -2471,6 +2471,7 @@ static volatile LONG g_pw_listed_done;                      /* the start-up queu
 long long nvn_front_warm_pending(long long *total) {
     LONG64 q = g_shw_queued, d = g_shw_done;
     *total = q;
+    if (g_vk) return 0;                     /* the OpenGL warm-up never runs on Vulkan: boot waited its 15-minute limit before starting the game */
     return g_pw_listed_done && !g_shp_queueing ? (q > d ? q - d : 0) : -1;
 }
 static int g_shd_mode = -1;
@@ -4620,6 +4621,38 @@ static void alias_pull(Tex *t) {
         glCopyImageSubData(best->o.gl, tg, l, 0, 0, 0, t->o.gl, tg, l, 0, 0, 0, lvl(w, l), lvl(h, l), t->b.target == 2 ? lvl(t->b.depth > 0 ? t->b.depth : 1, l) : d);
     t->alias_tick = best->rt_tick;
     {   static int nlog; logf_limited(&nlog, 5, "nvn_gl: render target %dx%d format 0x%x takes the picture of the texture drawn last over its memory (another texture object)\n", t->b.width, t->b.height, t->b.format); }
+}
+/* The same rules for the Vulkan back end (nvn_vk_draw.c alias_*): the scan of the textures over the same memory is here, the
+ * copy of one image into another is the back end's. */
+void nvn_front_rt_note(Tex *t) { rt_alias_note(t); }
+/* the newest render target of t's shape over its memory drawn after `after`, with an image of its own; same_rw: also t's rw */
+Tex *nvn_front_alias_newest(Tex *t, long long after, int same_rw) {
+    if (!t->mem || !t->storage) return NULL;
+    uint64_t begin = (uint64_t)(uintptr_t)t->mem;
+    Tex *best = NULL;
+    AcquireSRWLockShared(&g_tex_range_lock);
+    for (size_t i = tex_range_lower(begin); i < g_tex_range_count && g_tex_ranges[i].begin == begin; i++) {
+        Tex *o = g_tex_ranges[i].tex;
+        if (o == t || o->dead || !o->vk || o->vk == t->vk || o->rt_tick <= after || (best && o->rt_tick <= best->rt_tick)) continue;
+        if (o->b.width != t->b.width || o->b.height != t->b.height || o->b.depth != t->b.depth || o->b.format != t->b.format
+            || o->b.target != t->b.target || o->b.levels != t->b.levels || o->b.samples != t->b.samples || (same_rw && o->rw != t->rw)) continue;
+        best = o;
+    }
+    ReleaseSRWLockShared(&g_tex_range_lock);
+    return best;
+}
+/* the textures that take their texels from t (alias_from == t), at most max */
+int nvn_front_alias_takers(Tex *t, Tex **to, int max) {
+    int n = 0;
+    if (!g_alias_any || !t->mem || !t->storage || !t->rt_tick) return 0;
+    uint64_t begin = (uint64_t)(uintptr_t)t->mem;
+    AcquireSRWLockShared(&g_tex_range_lock);
+    for (size_t i = tex_range_lower(begin); i < g_tex_range_count && g_tex_ranges[i].begin == begin && n < max; i++) {
+        Tex *o = g_tex_ranges[i].tex;
+        if (o != t && o->alias_from == t && o->vk && o->vk != t->vk) to[n++] = o;
+    }
+    ReleaseSRWLockShared(&g_tex_range_lock);
+    return n;
 }
 static int g_dbg_noscissor;                       /* SSBU_NOSCISSOR (below) */
 /* Resolution scale: viewports and scissors are kept in the game's pixels and set on the bound targets' storage. */
@@ -9923,6 +9956,21 @@ int nvn_front_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, Tex **t, View *v
     return r;
 }
 long long nvn_front_frame_next(void) { return (long long)g_st.frames + 1; }
+/* Vulkan back end: the CPU side of ReportCounter / ReportValue / SetRenderEnableConditional by the OpenGL replay's rules
+ * (OP_COUNTER_REPORT, OP_RENDER_ENABLE above). The statistics counters (types 1..15) read 0: no Vulkan queries yet. */
+void nvn_front_counter_report(int type, uint64_t addr) {
+    uint64_t d[2] = {0, gpu_ts()};
+    if (type == 16) { d[0] = d[1]; if (addr) tsrep(addr, nvn_front_frame_next(), 1); }
+    else if (type > 0 && type < 16) { static int said[16]; if (!said[type]++) printf("nvn_vk: counter type %d reported: written as 0 (no Vulkan query yet)\n", type); }
+    if (addr) memcpy(P(addr), d, 16);
+}
+void nvn_front_report_value(uint32_t value, uint64_t addr) { if (addr) { uint64_t d[2] = {value, gpu_ts()}; memcpy(P(addr), d, 16); } }
+int nvn_front_render_off(int mode1, uint64_t addr) {          /* mode1: the conditional mode + 1, addr: two 16-byte counters */
+    static int once = -1; if (once < 0) once = !getenv("TOMO_CLEAR_ONCE") || atoi(getenv("TOMO_CLEAR_ONCE"));
+    int eq = addr && rd64(addr) == rd64(addr + 16);
+    if (!eq && once && addr && tsrep(addr, nvn_front_frame_next(), 0)) eq = 1;
+    return mode1 == 1 ? !eq : eq;
+}
 /* V1 session 5: compute outputs of the two back ends compared OFFLINE (tests/vk5_ccmp.py). SSBU_COMPUTE_CMP=<folder>: every
  * dispatch is named by a hash of what it reads from guest memory (machine code, group counts, every bound uniform buffer,
  * every bound storage buffer it does not write; of the written ones the size); when what it wrote has landed in guest memory

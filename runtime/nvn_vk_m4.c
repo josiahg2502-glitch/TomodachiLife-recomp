@@ -24,7 +24,7 @@ typedef struct VStage {
     VkShaderModule mod; struct VStage *next, *next_h;
     VkPipeline lib, lib2; volatile LONG lib_state, lib2_state;      /* session 9 (SSBU_VK_GPL=2): the stage's pipeline library; lib2: a vertex stage with the empty fragment shader state */
 } VStage;
-#define MX_VK_VERSION 6u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
+#define MX_VK_VERSION 7u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
 typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; } StageRec;
 typedef struct { uint32_t magic, key[4], fo, dep, tex; uint64_t vh; } VarRec;      /* ..\cache\vk\stage\<stage>_<hb>.var: the variants of one code */
 #define STAGEREC_MAGIC (0x52545356u + MX_VK_VERSION)
@@ -107,7 +107,7 @@ static int ssrc_of(SSrc *o, const Prog *p, int s) {
     memset(o, 0, sizeof *o);
     if (!st->code || st->code_len <= 0) return 0;
     o->stage = s; o->code = st->code; o->code_len = st->code_len; o->serial = p->serial;
-    if (st->ctl[3] && st->ctl[4]) { o->cdata = st->code - (s == 5 ? 0 : 0x30) + st->ctl[4]; o->cdata_size = st->ctl[3]; }      /* a compute stage has no program header */
+    if (st->cdata_copy && st->ctl[3]) { o->cdata = st->cdata_copy; o->cdata_size = st->ctl[3]; }      /* the front end's copy (relative to the data section, wherever the code starts) */
     memcpy(o->local, st->local, sizeof o->local); o->smem = st->smem_bytes; o->lmem = st->lmem_bytes;
     return 1;
 }
@@ -116,6 +116,7 @@ static uint64_t ssrc_hb(const SSrc *o) {
     uint64_t h = fnv(0xcbf29ce484222325ULL ^ (uint64_t)o->stage, o->code, (size_t)o->code_len);
     if (o->stage == 5) { h = fnv(h, o->local, sizeof o->local); h = fnv(h, &o->smem, 4); h = fnv(h, &o->lmem, 4); }
     if (o->cdata) h = fnv(h ^ o->cdata_size, o->cdata, o->cdata_size);
+    if (o->stage == 0 && !(nvn_front_clip_modes() >> 8 & 0xff)) h = fnv(h, "dm1", 3);      /* the game's depth mode -1..1: another translation of the vertex stage (MxIn.depth_m1) */
     if (o->stage == 1 && RS_ON) h = fnv(h, "rs1", 3);      /* track O: the fragment stages of a run with an internal resolution scale are another translation (MxIn.screen_scale); at 1.0 the hash is the one it always was */
     return fnv(h, &ver, 4);
 }
@@ -229,9 +230,14 @@ static void vstage_build(VStage *v, const SSrc *src) {
         }
         snprintf(what, sizeof what, "program #%d %s stage", src->serial, s == 5 ? "compute" : s ? "fragment" : "vertex");
         if (s == 1 && RS_ON) in.screen_scale = 1;
+        if (s == 0) in.depth_m1 = !(nvn_front_clip_modes() >> 8 & 0xff);
         if (!mx_translate(&in, &out)) { printf("nvn_vk: %s: machine code not translated: %s\n", what, out.why); fflush(stdout); }
         else {
             uint64_t spv_hash = 0;
+            {   /* TEST: TOMO_VK_GLSL=<folder>: every translated stage's text as <stage>_<hash>.glsl */
+                const char *gd = getenv("TOMO_VK_GLSL");
+                if (gd) { char pth[300]; snprintf(pth, sizeof pth, "%s/%d_id%d.glsl", gd, s, v->id); FILE *gf = fopen(pth, "w"); if (gf) { fputs(out.glsl, gf); fclose(gf); } }
+            }
             if (in.screen_scale) { InterlockedIncrement64(&g_rs_stages); if (strstr(out.glsl, "mx_fcs)")) InterlockedIncrement64(&g_rs_fcs); if (strstr(out.glsl, "mx_tf(")) InterlockedIncrement64(&g_rs_tf); }
             v->mod = module_from_glsl(s, out.glsl, what, &spv_hash);
             v->cbufs = out.cbufs; v->ssbos = out.ssbos; v->ssbo_w = out.ssbo_written; v->images = out.images; v->in_attr = out.in_attr; v->out_attr = out.out_attr;

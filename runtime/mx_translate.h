@@ -77,6 +77,9 @@ typedef struct {
      * 2: 2D vertices only (w = 1 within 1e-4): the game's own cameras are made wider (tomo.c persp_wide), so 3D needs no
      * squeeze; a negative mx_wide lets a full-screen quad keep the whole width (nvn_gl.c: a screen pass or a plain fill). */
     int wide;
+    /* Vulkan, vertex stage: the game's depth mode is -1..1 (nvnDeviceSetDepthMode, OpenGL's convention): z becomes (z + w) / 2,
+     * the 0..1 clip space of Vulkan (the same window depth OpenGL's glClipControl gives; no VK_EXT_depth_clip_control needed). */
+    int depth_m1;
 } MxIn;
 
 typedef struct {
