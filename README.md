@@ -71,6 +71,10 @@ speed (2x, 3x, 4x) is on that page.
 Your save lives in `build\userdata` (or the install location you chose). **Playing 1.0.4 upgrades a 1.0.0 save; 1.0.0 cannot
 read it afterwards.** Back it up first (SAVE DATA) if you may go back.
 
+After importing a save, the game may say your system time has changed and ask whether to start with the current time
+setting: choose **Start**. (*Don't Start* asks you to change the console's clock in the HOME Menu, which a PC does not
+have: close the game and start it again.)
+
 ## Controls
 
 The game is played as on a docked Switch.

@@ -2074,14 +2074,15 @@ static void gpu_merge(uint8_t *dst, const uint8_t *gpu, const uint8_t *snap, siz
     for (; i + 4 <= n; i += 4) { uint32_t g, o; memcpy(&g, gpu + i, 4); memcpy(&o, snap + i, 4); if (g != o) memcpy(dst + i, &g, 4); }
     for (; i < n; i++) if (gpu[i] != snap[i]) dst[i] = gpu[i];
 }
-static RbPend g_rbp[64];
-static struct { GLuint buf; void *map; uint64_t cap; int busy; } g_rbs[64];
+#define RB_N 256                                   /* read-backs in flight (was 64: see CBUF_N) */
+static RbPend g_rbp[RB_N];
+static struct { GLuint buf; void *map; uint64_t cap; int busy; } g_rbs[RB_N];
 static int rb_stage(uint64_t size) {               /* a free staging buffer of at least size bytes, or -1 */
     int k, best = -1;
-    for (k = 0; k < 64; k++) if (!g_rbs[k].busy && g_rbs[k].buf && g_rbs[k].cap >= size && (best < 0 || g_rbs[k].cap < g_rbs[best].cap)) best = k;
+    for (k = 0; k < RB_N; k++) if (!g_rbs[k].busy && g_rbs[k].buf && g_rbs[k].cap >= size && (best < 0 || g_rbs[k].cap < g_rbs[best].cap)) best = k;
     if (best >= 0) return best;
-    for (k = 0; k < 64 && g_rbs[k].buf; k++) {}
-    if (k == 64 || !gl_has(glNamedBufferStorage, "glNamedBufferStorage") || !gl_has(glMapNamedBufferRange, "glMapNamedBufferRange")) return -1;
+    for (k = 0; k < RB_N && g_rbs[k].buf; k++) {}
+    if (k == RB_N || !gl_has(glNamedBufferStorage, "glNamedBufferStorage") || !gl_has(glMapNamedBufferRange, "glMapNamedBufferRange")) return -1;
     uint64_t cap = 4096; while (cap < size) cap <<= 1;
     HS_IN("compute results: staging buffer made", 0);
     glCreateBuffers(1, &g_rbs[k].buf);
@@ -2143,7 +2144,7 @@ static void tex_copy_back(Tex *t, const View *v) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("TOMO_COPYBACK"); on = !(e && e[0] == '0'); }      /* TOMO_COPYBACK=0: off, as before */
     if (!on || !t->mem || !t->o.gl || t->b.packaged || t->b.samples > 1 || t->rw || (t->b.flags & 0x10) || (tf && tf->sw_decode) || !fmt_get(t->b.format, &f)) return;
-    if (g_rbp_n >= 56) rb_land(1);                 /* room in the queue */
+    if (g_rbp_n >= RB_N - 8) rb_land(1);                 /* room in the queue */
     TexLayout L;
     tex_lay(&t->b, &L);
     int level = (v->set & 0x81) == 0x81 ? v->lvl0 : 0, is3d = t->b.target == 2, n0 = g_rbp_n;
@@ -2153,7 +2154,7 @@ static void tex_copy_back(Tex *t, const View *v) {
     for (int layer = 0; layer < (is3d ? 1 : L.layers); layer++) {
         const uint8_t *dst = tex_level_ptr(&L, t->mem, level, layer);
         size_t lin = L.lvl_linear_size[level];
-        int st = g_rbp_n < 64 ? rb_stage(lin) : -1;
+        int st = g_rbp_n < RB_N ? rb_stage(lin) : -1;
         if (st < 0 || (t->limit && dst + L.lvl_size[level] > t->limit)) break;
         glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, g_rbs[st].buf);
         if (f.kind == 4) glGetCompressedTextureSubImage(t->o.gl, level, 0, 0, is3d ? 0 : layer, L.lvl_w[level], L.lvl_h[level], is3d ? L.lvl_d[level] : 1, (GLsizei)lin, NULL);
@@ -4787,7 +4788,11 @@ static void compute_flush_at(int line);
 #define compute_flush() compute_flush_at(__LINE__)   /* the line: TOMO_LISTLOG counts read-backs by call site */
 static struct { int line; LONG64 n; } g_cfl_site[32];
 typedef struct { uint64_t addr, size; GLuint buf; int dirty, live, frag; uint8_t *snap; } CBuf;   /* frag: written by a draw's fragment stage only; snap: guest memory when it went to GL (gpu_merge) */
-static CBuf g_cbuf[64];
+/* GPU-written storage buffers held in GL until the batch ends. 64 were too few for a big island (30+ residents: ~66
+ * dispatches and ~200 buffers a batch): every overflow read all of them back with a wait for the GPU, 186 buffers and
+ * 12 ms a frame (issue #7's save, 2026-11-01). */
+#define CBUF_N 256
+static CBuf g_cbuf[CBUF_N];
 static int g_frag_ssbo_pending;               /* a draw's fragment stage wrote a storage buffer since the last storage barrier */
 static int g_cbuf_live;
 static CBuf *cbuf_find(uint64_t addr, uint64_t size);
@@ -4941,7 +4946,7 @@ static int draw_prepare(void) {
             sm[st] = !p ? 0 : p->st[st].glsl_state == 1 ? p->st[st].glsl_ssbos & 0xffff : 0xffff;
         }
         #define OVL(r) ((r).addr && (r).addr < a + z && a < (r).addr + (r).size)
-        for (int k = 0; k < 64 && !hit; k++) {
+        for (int k = 0; k < CBUF_N && !hit; k++) {
             if (!g_cbuf[k].live) continue;
             uint64_t a = g_cbuf[k].addr, z = g_cbuf[k].size;
             hit = OVL(g_draw_ibuf);
@@ -4955,7 +4960,7 @@ static int draw_prepare(void) {
         if (hit && g_listlog_dbg) {         /* TOMO_LISTLOG: which reads of GPU-held buffers flush */
             static int nlog;
             if (nlog++ < 40) {
-                for (int k = 0; k < 64; k++) {
+                for (int k = 0; k < CBUF_N; k++) {
                     if (!g_cbuf[k].live) continue;
                     uint64_t a = g_cbuf[k].addr, z = g_cbuf[k].size;
                     #define OV2(r) ((r).addr && (r).addr < a + z && a < (r).addr + (r).size)
@@ -5411,8 +5416,8 @@ static void compute_flush_at(int line) {
     int any = 0;
     if (!g_cbuf_live) return;
     if (g_rbp_n) rb_land(1);                     /* older read-backs land first: guest memory takes the GPU's writes in order */
-    for (int k = 0; k < 64; k++) if (g_cbuf[k].live && g_cbuf[k].frag && g_cbuf[k].dirty) { glMemoryBarrier(0x2000 | 0x200 /* SHADER_STORAGE | BUFFER_UPDATE */); break; }
-    for (int k = 0; k < 64; k++) {
+    for (int k = 0; k < CBUF_N; k++) if (g_cbuf[k].live && g_cbuf[k].frag && g_cbuf[k].dirty) { glMemoryBarrier(0x2000 | 0x200 /* SHADER_STORAGE | BUFFER_UPDATE */); break; }
+    for (int k = 0; k < CBUF_N; k++) {
         CBuf *b = &g_cbuf[k];
         if (!b->live) continue;
         if (b->dirty) {
@@ -5435,7 +5440,7 @@ static void compute_flush_at(int line) {
 /* Reports and conditional rendering touch 16-32 bytes of guest memory: they wait for GPU-held buffers only over those bytes.
  * The CPU sees the GPU's writes after its fences, which follow the end of the batch, where every buffer goes back (job_submit); flushing at every report stalled on the GPU 15 times a frame (7 ms on the island). */
 static void cbuf_flush_if(uint64_t addr, uint64_t size) {
-    for (int k = 0; k < 64 && g_cbuf_live; k++)
+    for (int k = 0; k < CBUF_N && g_cbuf_live; k++)
         if (g_cbuf[k].live && addr < g_cbuf[k].addr + g_cbuf[k].size && g_cbuf[k].addr < addr + size) { compute_flush(); return; }
 }
 /* End of a batch: the buffers the GPU wrote go back to guest memory without waiting (see RbPend); the ones that do not fit the
@@ -5446,12 +5451,12 @@ static void compute_flush_async(void) {
     if (!g_cbuf_live) return;
     if (!on || !gl_has(glCopyNamedBufferSubData, "glCopyNamedBufferSubData")) { compute_flush(); return; }
     int n0 = g_rbp_n, rest = 0;
-    for (int k = 0; k < 64; k++) if (g_cbuf[k].live && g_cbuf[k].frag && g_cbuf[k].dirty) { glMemoryBarrier(0x2000 | 0x200); break; }
-    for (int k = 0; k < 64; k++) {
+    for (int k = 0; k < CBUF_N; k++) if (g_cbuf[k].live && g_cbuf[k].frag && g_cbuf[k].dirty) { glMemoryBarrier(0x2000 | 0x200); break; }
+    for (int k = 0; k < CBUF_N; k++) {
         CBuf *b = &g_cbuf[k];
         if (!b->live) continue;
         if (b->dirty) {
-            int st = g_rbp_n < 64 ? rb_stage(b->size) : -1;
+            int st = g_rbp_n < RB_N ? rb_stage(b->size) : -1;
             if (st < 0) { rest = 1; continue; }
             HS_IN("compute results: copy to staging", 0);
             glCopyNamedBufferSubData(b->buf, g_rbs[st].buf, 0, 0, (ptrdiff_t)b->size);
@@ -5478,7 +5483,7 @@ static CBuf *cbuf_get(uint64_t addr, uint64_t size) {
     CBuf *b = cbuf_find(addr, size);
     if (b) return b;
     if (g_rbp_n) rb_land_range(addr, size);      /* the GL copy starts from guest memory: what the GPU wrote there before must have landed */
-    for (int k = 0; k < 64 && !b; k++) if (!g_cbuf[k].live) b = &g_cbuf[k];
+    for (int k = 0; k < CBUF_N && !b; k++) if (!g_cbuf[k].live) b = &g_cbuf[k];
     if (!b) { compute_flush(); b = &g_cbuf[0]; }
     if (!b->buf) glCreateBuffers(1, &b->buf);
     glNamedBufferData(b->buf, (ptrdiff_t)size, P(addr), 0x88EA /* DYNAMIC_COPY */);
@@ -9816,7 +9821,7 @@ void nvn_front_memory_retire(uint64_t addr, uint64_t size) {
     if (g_rb == &rb_vk) { Range range = {addr, size}; gl_run(nvn_vk_memory_retire, &range); }
     else { static int on = -1; if (on < 0) { const char *e = getenv("TOMO_RETIRE_BARRIER"); on = e ? atoi(e) : 0; } if (on) gl_barrier();
         int hit = 0;                               /* a hint read from this thread: after the barrier only the render thread changes the list */
-        for (int i = 0; i < g_rbp_n && i < 64 && !hit; i++) hit = addr < g_rbp[i].addr + g_rbp[i].size && g_rbp[i].addr < addr + size;
+        for (int i = 0; i < g_rbp_n && i < RB_N && !hit; i++) hit = addr < g_rbp[i].addr + g_rbp[i].size && g_rbp[i].addr < addr + size;
         if (hit) { Range range = {addr, size}; gl_run(job_rb_land_range, &range); } }   /* OpenGL: no barrier by default since 2026-10-23 (TOMO_RETIRE_BARRIER=1 restores it): the game frees storage only after its fences (nvnSyncWait), which pass through the render thread, and read-backs over the freed range land first (above); the barrier made the game wait 18 ms a frame for the render thread (house close-up 20 -> 25 fps). The sea foam that once drew wrong without it looked the same in a side-by-side check. */
 }
 /* Seam step S2: the OpenGL back end as an RBackend (nvn_front.h); rb_vk is in nvn_vk_draw.c. */
