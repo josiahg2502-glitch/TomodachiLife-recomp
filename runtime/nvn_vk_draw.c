@@ -2400,6 +2400,12 @@ static CB *cb_inside(uint64_t addr, uint64_t size) {
     for (int i = 0; i < n; i++) if (g_cb[i].state == 1 && addr >= g_cb[i].addr && addr + size <= g_cb[i].addr + g_cb[i].size) return &g_cb[i];
     return NULL;
 }
+static int cb_touches(uint64_t addr, uint64_t size) {     /* a live, pending or landing CB over the range: a guest-memory command there waits for it (cb_sync) */
+    if (!g_cb_live && !g_cb_pending) return 0;
+    int n = g_cb_scan ? g_cb_hi : 256;
+    for (int i = 0; i < n; i++) if ((g_cb[i].state == 1 || g_cb[i].state == 2 || g_cb[i].state == 4) && addr < g_cb[i].addr + g_cb[i].size && g_cb[i].addr < addr + size) return 1;
+    return 0;
+}
 static int cb_overlap(uint64_t addr, uint64_t size) {
     int n = g_cb_scan ? g_cb_hi : 256;
     for (int i = 0; i < n; i++) if (g_cb[i].state == 1 && addr < g_cb[i].addr + g_cb[i].size && g_cb[i].addr < addr + size) return 1;
@@ -3444,9 +3450,9 @@ static void exec(const Cmd *m, int depth) {
     case OP_IMAGESTRIDE: R.image_stride = (int64_t)a[0]; break;
     case OP_BARRIER: if (a[0] & 0x10) nvn_front_barrier_texmem(); break;      /* ordering bits: every draw is recorded in order; feedback is handled at the draw */
     case OP_DISPATCH: { LONG64 t0 = tk(); compute_dispatch((uint32_t)a[0], (uint32_t)a[1], (uint32_t)a[2]); g_tm[2] += tk() - t0; break; }
-    case OP_COPY_BUF_BUF: CB_WHY(CBW_GCMD, a[0], a[2]); cb_sync(); if (g_cb_nkept) { cb_kept_range(a[0], a[2], 3); cb_kept_range(a[1], a[2], 3); } if (a[0] && a[1]) memmove(P(a[1]), P(a[0]), (size_t)a[2]); R.gen++; break;      /* guest memory is read / written: what compute wrote must be there (as OpenGL's compute_flush) */
-    case OP_UPDATE_UBO: CB_WHY(CBW_GCMD, a[0] + a[2], a[3]); cb_sync(); if (g_cb_nkept) cb_kept_range(a[0] + a[2], a[3], 3); if (a[0]) memcpy((uint8_t *)P(a[0]) + a[2], blob, (size_t)a[3]); R.gen++; break;
-    case OP_CLEAR_BUF: CB_WHY(CBW_GCMD, a[0], a[1]); cb_sync(); if (g_cb_nkept) cb_kept_range(a[0], a[1], 3); if (a[0]) { uint32_t v = (uint32_t)a[2]; for (uint64_t i = 0; i + 4 <= a[1]; i += 4) memcpy((uint8_t *)P(a[0]) + i, &v, 4); } R.gen++; break;
+    case OP_COPY_BUF_BUF: if (cb_touches(a[0], a[2]) || cb_touches(a[1], a[2])) { CB_WHY(CBW_GCMD, a[0], a[2]); cb_sync(); } if (g_cb_nkept) { cb_kept_range(a[0], a[2], 3); cb_kept_range(a[1], a[2], 3); } if (a[0] && a[1]) memmove(P(a[1]), P(a[0]), (size_t)a[2]); R.gen++; break;      /* guest memory is read / written: what compute wrote must be there (as OpenGL's compute_flush) */
+    case OP_UPDATE_UBO: if (cb_touches(a[0] + a[2], a[3])) { CB_WHY(CBW_GCMD, a[0] + a[2], a[3]); cb_sync(); }      /* only over what compute writes (OpenGL lands only overlapping ranges too): 2 waits for the GPU a frame on the island, 5 ms */ if (g_cb_nkept) cb_kept_range(a[0] + a[2], a[3], 3); if (a[0]) memcpy((uint8_t *)P(a[0]) + a[2], blob, (size_t)a[3]); R.gen++; break;
+    case OP_CLEAR_BUF: if (cb_touches(a[0], a[1])) { CB_WHY(CBW_GCMD, a[0], a[1]); cb_sync(); } if (g_cb_nkept) cb_kept_range(a[0], a[1], 3); if (a[0]) { uint32_t v = (uint32_t)a[2]; for (uint64_t i = 0; i + 4 <= a[1]; i += 4) memcpy((uint8_t *)P(a[0]) + i, &v, 4); } R.gen++; break;
     case OP_CLEARCOLOR: {
         unsigned i = (unsigned)a[0] & 7, mask = (unsigned)a[2] & 15;
         if (!R.have_targets || R.render_off || (int)i >= R.ncol || !R.col[i].tex) break;
