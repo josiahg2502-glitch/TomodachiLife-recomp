@@ -25,7 +25,7 @@ typedef struct VStage {
     VkPipeline lib, lib2; volatile LONG lib_state, lib2_state;      /* session 9 (SSBU_VK_GPL=2): the stage's pipeline library; lib2: a vertex stage with the empty fragment shader state */
     uint32_t bx_hint[8];                           /* TEX.B: where its handles are loaded from (MxOut.bx_hint; nvn_vk_draw.c bx_scan) */
 } VStage;
-#define MX_VK_VERSION 11u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
+#define MX_VK_VERSION 12u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
 typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64];  uint32_t bx_hint[8];} StageRec;
 typedef struct { uint32_t magic, key[4], fo, dep, tex; uint64_t vh; } VarRec;      /* ..\cache\vk\stage\<stage>_<hb>.var: the variants of one code */
 #define STAGEREC_MAGIC (0x52545356u + MX_VK_VERSION)
@@ -370,7 +370,7 @@ static void layout_bindings(VStage *v, int s, VkDescriptorSetLayoutBinding *b0, 
     VkFlags sf = s ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
     for (unsigned n = 1; n < 18; n++) if (v->cbufs >> n & 1) { VkDescriptorSetLayoutBinding b = {40u * (unsigned)s + n, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, sf, NULL}; b0[(*n0)++] = b; }
     for (unsigned k = 0; k < 16; k++) if (v->ssbos >> k & 1) { VkDescriptorSetLayoutBinding b = {40u * (unsigned)s + 20 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, sf, NULL}; b0[(*n0)++] = b; }
-    for (int i = 0; i < v->nsmp; i++) { VkDescriptorSetLayoutBinding b = {v->smp[i].binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, sf, NULL}; b1[(*n1)++] = b; }
+    for (int i = 0; i < v->nsmp; i++) { VkDescriptorSetLayoutBinding b = {v->smp[i].binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, v->smp[i].unit >= 128 ? MX_BX : 1, sf, NULL}; b1[(*n1)++] = b; }      /* unit 128 +: a TEX.B array */
 }
 static Pipe *pipe_find(const PKey *k, uint64_t h) { for (Pipe *p = g_pipes[h & 1023]; p; p = p->next) if (!memcmp(&p->k, k, sizeof *k)) return p; return NULL; }      /* g_sh_lock held */
 static Pipe *pipe_new(const PKey *k, VStage *vs, VStage *fs, uint64_t h, int state) {                                                                                 /* g_sh_lock held */
@@ -577,13 +577,14 @@ static int gpl_sep(void) { static int m = -1; if (m < 0) m = D.has_gpl && vk_gpl
 static void gpl_universal(void) {
     EnterCriticalSection(&g_gpl_lock);
     if (!g_ulayout) {
-        static VkDescriptorSetLayoutBinding b0[66], b1[128];
+        static VkDescriptorSetLayoutBinding b0[66], b1[136];
         int n0 = 0, n1 = 0;
         for (unsigned s = 0; s < 2; s++) {
             VkFlags sf = s ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
             for (unsigned n = 1; n < 18; n++) { VkDescriptorSetLayoutBinding b = {40u * s + n, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, sf, NULL}; b0[n0++] = b; }
             for (unsigned k = 0; k < 16; k++) { VkDescriptorSetLayoutBinding b = {40u * s + 20 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, sf, NULL}; b0[n0++] = b; }
             for (unsigned u = 0; u < 32; u++) { VkDescriptorSetLayoutBinding b = {40u * s + u, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, sf, NULL}; b1[n1++] = b; b.binding += 240; b1[n1++] = b; }
+            for (unsigned k = 0; k < 2; k++) { VkDescriptorSetLayoutBinding b = {400u + 2u * s + k, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MX_BX, sf, NULL}; b1[n1++] = b; }      /* TEX.B arrays (mx_translate.c BXA) */
         }
         for (int i = 0; i < 2; i++) {
             VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};

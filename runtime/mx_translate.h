@@ -113,7 +113,7 @@ const char *mx_opcode_name(uint64_t insn);
 #define MX_BL_BITS 18
 /* Vulkan, TEX.B / TMML.B: the handle in the register is compared with up to MX_BX candidates the back end finds in the
  * draw's constant buffers (c2 words 224 + k, 0xffffffff = none); candidate k is bound as unit 128 + k (MxOut.cbufs bit 0). */
-#define MX_BX 32
+#define MX_BX 128
 int mx_bl_misslog(void);
 
 #endif

@@ -275,7 +275,7 @@ static struct {
     TexPool *tpool; SamplerPool *spool;
     Prog *prog[6];
     Range ubo[6][16], ssbo[6][32], vbuf[32];
-    uint64_t nvn_tex[6][32], c2[6][128];      /* c2: words 224.. = the draw's TEX.B candidates (bx_scan) */
+    uint64_t nvn_tex[6][32], c2[6][176];      /* c2: words 224.. = the draw's TEX.B candidates (bx_scan) */
     uint32_t tex_int[6], tex_sint[6];
     uint32_t vattr[32]; int nattr;
     struct { uint32_t stride, divisor; } vstream[32];
@@ -1604,7 +1604,7 @@ static VkDescriptorSet set_alloc(VkDescriptorSetLayout layout) {
 }
 static struct { uint64_t key; VkDescriptorSet set; uint32_t gen; VkDescriptorSetLayout dl; int n, off; } g_tset[4096];      /* texture sets of the command buffer being recorded */
 static struct { VTex *d2, *d1, *d3; VkImageView v[7]; } g_dummy;
-static struct { VkImageView view; VkSampler smp; VkImageLayout layout; } g_dtex[140], g_tset_list[32768];      /* g_tset_list: the lists of the cached sets, for the full comparison */
+static struct { VkImageView view; VkSampler smp; VkImageLayout layout; } g_dtex[640], g_tset_list[32768];      /* g_tset_list: the lists of the cached sets, for the full comparison */
 static int g_ndtex;
 /* ---- PR #32: the device loss report. vk_fatal (nvn_vk.c) calls vkd_lost_report once on VK_ERROR_DEVICE_LOST, before the
  * process ends with code 5. What it can say:
@@ -1768,15 +1768,23 @@ static VTex *depth_shadow(VTex *vt) {                  /* the copy of depth targ
 }
 /* The image view and sampler of one declared sampler of stage s. May end the pass (upload, layout change). */
 static uint32_t g_bx[6][MX_BX];                     /* TEX.B on Vulkan: the candidate handles of the draw, per stage (0xffffffff = none) */
-static void bx_scan(int s, const VStage *v) {      /* the bindless handles in the stage's constant buffers are its candidates (MX_BX, mx_translate.h) */
+static uint32_t g_bx_force;                         /* resolve_sampler of a TEX.B array slot: the candidate's handle */
+static void resolve_sampler(int s, VStage *v, int i);
+static void resolve_stage(int s, VStage *v) {     /* every sampler of the stage; a TEX.B array (unit 128 +) takes MX_BX slots, one per candidate */
+    for (int i = 0; i < v->nsmp; i++)
+        if (v->smp[i].unit >= 128) for (int k = 0; k < MX_BX; k++) { g_bx_force = g_bx[s][k]; resolve_sampler(s, v, i); }
+        else resolve_sampler(s, v, i);
+}
+static int bx_cmp(const void *a, const void *b) { uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
+static void bx_scan(int s, const VStage *v) {      /* TEX.B on Vulkan: the bindless handles in the stage's constant buffers are its candidates (MX_BX, sorted: the shader searches them) */
+    static uint32_t words[16384], tmp[MX_BX + 1];
     uint32_t *c2w = (uint32_t *)R.c2[s] + 224;
-    int n = 0;
+    int n = 0, m = 0;
     if (!(v->cbufs & 1)) return;
-    if (v->bx_hint[0]) {                           /* the translator saw the loads that give the handles (cbuf, offset): only those positions, record */
-        static uint32_t words[16384];              /* stride 16 .. 4096 (the smallest whose distinct handles fit: every larger one is a subset) */
-        for (unsigned stride = 16; stride <= 4096 && !n; stride <<= 1) {
-            uint32_t tmp[MX_BX + 1];
-            int m = 0;
+    if (v->bx_hint[0]) {                           /* the translator saw the loads that give the handles (cbuf, offset): those positions of every
+                                                    * record, at the smallest record stride (16 .. 4096) whose distinct handles fit (a larger one is a subset) */
+        for (unsigned stride = 16; stride <= 4096; stride <<= 1) {
+            m = 0;
             for (int q = 0; q < 8 && v->bx_hint[q] && m <= MX_BX; q++) {
                 uint32_t hn = v->bx_hint[q] - 1u, b = hn >> 16, off = hn & 0xffffu;
                 const Range *r = b >= 3 && b < 18 ? &R.ubo[s][b - 3] : NULL;
@@ -1786,21 +1794,17 @@ static void bx_scan(int s, const VStage *v) {      /* the bindless handles in th
                 for (size_t pos = (off % stride) & ~3u; pos + 4 <= lim && nw < 16384; pos += stride) memcpy(&words[nw++], (const uint8_t *)P(r->addr) + pos, 4);
                 nvn_front_bl_scan(words, nw, tmp, &m, MX_BX + 1);
             }
-            if (getenv("TOMO_BX_DUMP")) { static int nl; if (nl++ < 12) printf("nvn_vk_bx: stage %d hints %08x %08x %08x %08x stride %u: %d handles\n", s, v->bx_hint[0], v->bx_hint[1], v->bx_hint[2], v->bx_hint[3], stride, m); }
-            if (m <= MX_BX) { memcpy(g_bx[s], tmp, sizeof tmp[0] * (size_t)m); n = m; if (!n) break; }
+            if (m <= MX_BX) break;
         }
+        n = m < MX_BX ? m : MX_BX;                 /* (none fit: the first MX_BX of the largest stride) */
+        memcpy(g_bx[s], tmp, sizeof tmp[0] * (size_t)n);
     }
     else for (unsigned b = 3; b < 18 && n < MX_BX; b++) {
         const Range *r = &R.ubo[s][b - 3];
         if ((v->cbufs >> b & 1) && r->addr && r->size) nvn_front_bl_scan((const uint32_t *)P(r->addr), (size_t)(r->size < 65536 ? r->size : 65536) / 4, g_bx[s], &n, MX_BX);
     }
-    {   static int dumped;                         /* TEST (TOMO_BX_DUMP=1): once, every handle of the first TEX.B draw's buffers with its offset */
-        if (!dumped && getenv("TOMO_BX_DUMP") && v->bx_hint[0] == strtoul(getenv("TOMO_BX_DUMP"), NULL, 16)) { dumped = 1;
-            printf("nvn_vk_bx: stage %d c3 at %llx, %llu bytes bound\n", s, (unsigned long long)R.ubo[s][0].addr, (unsigned long long)R.ubo[s][0].size);
-            for (unsigned b = 3; b < 18; b++) { const Range *r = &R.ubo[s][b - 3]; if (!(v->cbufs >> b & 1) || !r->addr || !r->size) continue;
-                const uint32_t *w = (const uint32_t *)P(r->addr); size_t nw = 65536 / 4;      /* TEST: also past the bound size */
-                for (size_t q = 0; q < nw; q++) { uint32_t one[1]; int m = 0; nvn_front_bl_scan(&w[q], 1, one, &m, 1); if (m) printf("nvn_vk_bx: stage %d c%u +0x%zx: handle %08x\n", s, b, q * 4, w[q]); } } } }
-    if (n == MX_BX) { static int said; if (!said++) printf("nvn_vk: a TEX.B draw has %d or more bindless handles in its constant buffers: only the first %d can be sampled\n", MX_BX, MX_BX); }
+    if (m > MX_BX || n == MX_BX) { static int said; if (!said++) printf("nvn_vk: a TEX.B draw has %d or more bindless handles in its constant buffers: only %d can be sampled\n", MX_BX, MX_BX); }
+    qsort(g_bx[s], (size_t)n, sizeof g_bx[s][0], bx_cmp);
     for (int k = 0; k < MX_BX; k++) { if (k >= n) g_bx[s][k] = 0xffffffffu; c2w[k] = g_bx[s][k]; }
 }
 static void resolve_sampler(int s, VStage *v, int i) {
@@ -1808,8 +1812,8 @@ static void resolve_sampler(int s, VStage *v, int i) {
     Tex *t = NULL;
     View view;
     SamplerParams sp;
-    int r = u < 32 ? nvn_front_handle(R.tpool, R.spool, R.nvn_tex[s][u], &t, &view, &sp)
-          : u >= 128 && u < 128 + MX_BX && g_bx[s][u - 128] != 0xffffffffu ? nvn_front_handle(R.tpool, R.spool, g_bx[s][u - 128], &t, &view, &sp) : 0;      /* 128 + k: TEX.B candidate k */
+    int r = u >= 128 ? (g_bx_force != 0xffffffffu ? nvn_front_handle(R.tpool, R.spool, g_bx_force, &t, &view, &sp) : 0)      /* TEX.B array slot (resolve_stage) */
+          : u < 32 ? nvn_front_handle(R.tpool, R.spool, R.nvn_tex[s][u], &t, &view, &sp) : 0;
     DTexInfo *di = D.has_ckpt ? &g_dtex_info[g_ndtex] : NULL;      /* PR #32: for the device loss report, only with the markers on */
     if (di) { memset(di, 0, sizeof *di); di->dim = v->smp[i].dim; di->unit = (uint8_t)u; di->stage = (uint8_t)s; di->dummy = 1; }
     g_dtex[g_ndtex].view = g_dummy.v[v->smp[i].dim]; g_dtex[g_ndtex].smp = g_smp_default; g_dtex[g_ndtex].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -2589,7 +2593,7 @@ static void compute_pipe_make(VStage *v) {         /* any thread */
         for (unsigned n = 0; n < 18; n++) if (v->cbufs >> n & 1) { VkDescriptorSetLayoutBinding b = {n, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b0[n0++] = b; }
         for (unsigned k = 0; k < 16; k++) if (v->ssbos >> k & 1) { VkDescriptorSetLayoutBinding b = {20 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b0[n0++] = b; }
         if (v->ssbo_w) { VkDescriptorSetLayoutBinding b = {38, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b0[n0++] = b; }
-        for (int i = 0; i < v->nsmp; i++) { VkDescriptorSetLayoutBinding b = {v->smp[i].binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b1[n1++] = b; }
+        for (int i = 0; i < v->nsmp; i++) { VkDescriptorSetLayoutBinding b = {v->smp[i].binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, v->smp[i].unit >= 128 ? MX_BX : 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}; b1[n1++] = b; }
         for (int i = 0; i < 2; i++) {
             VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
             li.bindingCount = (uint32_t)(i ? n1 : n0); li.pBindings = i ? b1 : b0;
@@ -2616,7 +2620,7 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
     /* textures, then buffers (both may submit: upload, ring wrap, copy-back), then the mask word, then the commands */
     g_ndtex = 0;
     bx_scan(5, v);
-    for (int i = 0; i < v->nsmp; i++) resolve_sampler(5, v, i);
+    resolve_stage(5, v);
     if (g_ncdisp == 2048 || g_cb_pending) { CB_WHY(g_ncdisp == 2048 ? CBW_FULL : CBW_OTHER, 0, 0); cb_sync(); }
     uint64_t wm_off = 0;
     for (int attempt = 0; ; attempt++) {           /* a copy-back in here (cb_sync) frees the CBs chosen before it: everything is then chosen again */
@@ -2653,7 +2657,7 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
     if (g_pt_on > 0 && g_pt_slot[R.cur].last_what != 1) pt_mark(0, 0, 0, 0, 0, 0, 1);
     static VkWriteDescriptorSet w[80];
     static VkDescriptorBufferInfo bi[40];
-    static VkDescriptorImageInfo ii[64];
+    static VkDescriptorImageInfo ii[640];
     VkDescriptorSet sets[2];
     int nw = 0, ib = 0;
     sets[0] = set_alloc(v->cdl[0]); sets[1] = set_alloc(v->cdl[1]);
@@ -2671,10 +2675,11 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
         w[nw].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[nw].dstSet = sets[0]; w[nw].dstBinding = 38; w[nw].descriptorCount = 1;
         w[nw].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[nw].pBufferInfo = &bi[ib]; nw++; ib++;
     }
-    for (int i = 0; i < v->nsmp; i++) {
-        ii[i].sampler = g_dtex[i].smp; ii[i].imageView = g_dtex[i].view; ii[i].imageLayout = g_dtex[i].layout;
-        w[nw].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[nw].dstSet = sets[1]; w[nw].dstBinding = v->smp[i].binding; w[nw].descriptorCount = 1;
-        w[nw].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[nw].pImageInfo = &ii[i]; nw++;
+    for (int i = 0, it = 0; i < v->nsmp; i++) {
+        const int cnt = v->smp[i].unit >= 128 ? MX_BX : 1;      /* a TEX.B array: MX_BX slots */
+        for (int q = 0; q < cnt; q++) { ii[it + q].sampler = g_dtex[it + q].smp; ii[it + q].imageView = g_dtex[it + q].view; ii[it + q].imageLayout = g_dtex[it + q].layout; }
+        w[nw].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[nw].dstSet = sets[1]; w[nw].dstBinding = v->smp[i].binding; w[nw].descriptorCount = (uint32_t)cnt;
+        w[nw].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[nw].pImageInfo = &ii[it]; nw++; it += cnt;
     }
     if (nw) vkUpdateDescriptorSets(V.device, (uint32_t)nw, w, 0, NULL);
     vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, v->cp);
@@ -2778,8 +2783,8 @@ static int draw_prepare(unsigned prim) {
     /* 1. textures (may upload, change layouts, end the pass) */
     g_ndtex = 0;
     bx_scan(0, vs); if (fs) bx_scan(1, fs);
-    for (int i = 0; i < vs->nsmp; i++) resolve_sampler(0, vs, i);
-    if (fs) for (int i = 0; i < fs->nsmp; i++) resolve_sampler(1, fs, i);
+    resolve_stage(0, vs);
+    if (fs) resolve_stage(1, fs);
     /* 2. buffers: every range the draw reads, into the ring (may wrap the ring = submit) */
     static BufRef bufs[80];
     int nbuf = 0;
@@ -2891,7 +2896,7 @@ static int draw_prepare(unsigned prim) {
     {
         static VkWriteDescriptorSet w[220];
         static VkDescriptorBufferInfo bi[80];
-        static VkDescriptorImageInfo ii[140];
+        static VkDescriptorImageInfo ii[640];
         /* M4: buffers change with every draw: pushed into the command buffer (no set, no pool) when the device can; the
          * textures of a draw repeat: one set per distinct list (layout, views, samplers, image layouts) per command buffer */
         VkDescriptorSet sets[2] = {NULL, NULL};
@@ -2931,8 +2936,10 @@ static int draw_prepare(unsigned prim) {
                     for (int i = 0; i < v->nsmp; i++) {
                         ii[it].sampler = g_dtex[it].smp; ii[it].imageView = g_dtex[it].view; ii[it].imageLayout = g_dtex[it].layout;
                         memset(&w[n1], 0, sizeof w[n1]);
-                        w[n1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[n1].dstSet = sets[1]; w[n1].dstBinding = v->smp[i].binding; w[n1].descriptorCount = 1;
-                        w[n1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[n1].pImageInfo = &ii[it]; n1++; it++;
+                        const int cnt = v->smp[i].unit >= 128 ? MX_BX : 1;      /* a TEX.B array: MX_BX slots */
+                        for (int q = 1; q < cnt; q++) { ii[it + q].sampler = g_dtex[it + q].smp; ii[it + q].imageView = g_dtex[it + q].view; ii[it + q].imageLayout = g_dtex[it + q].layout; }
+                        w[n1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[n1].dstSet = sets[1]; w[n1].dstBinding = v->smp[i].binding; w[n1].descriptorCount = (uint32_t)cnt;
+                        w[n1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[n1].pImageInfo = &ii[it]; n1++; it += cnt;
                     }
                 }
                 vkUpdateDescriptorSets(V.device, (uint32_t)n1, w, 0, NULL);
