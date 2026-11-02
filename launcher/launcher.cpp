@@ -47,6 +47,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef LAUNCHER_VERSION
@@ -165,6 +166,186 @@ bool shell_op(UINT func, const fs::path& from, const fs::path& to = {}) {
 bool copy_contents(const fs::path& from, const fs::path& to) { fs::create_directories(to); return shell_op(FO_COPY, from / "*", to); }
 bool recycle(const fs::path& p) { return shell_op(FO_DELETE, p); }
 
+/* ------------------------------------------------------------------ a small JSON reader (find_inputs.py --json, install.py's ##ssbu lines) */
+struct Json {
+    enum Kind { kNull, kBool, kNum, kStr, kArr, kObj } kind = kNull;
+    bool b = false;
+    double n = 0;
+    std::string s;
+    std::vector<Json> a;
+    std::vector<std::pair<std::string, Json>> o;
+    const Json& operator[](const char* key) const {
+        static const Json none;
+        for (const auto& kv : o) if (kv.first == key) return kv.second;
+        return none;
+    }
+    std::string str() const { return kind == kStr ? s : std::string(); }
+};
+struct JsonReader {
+    const char *p, *e;
+    void ws() { while (p < e && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++; }
+    bool word(const char* w) { const size_t n = strlen(w); if (size_t(e - p) < n || memcmp(p, w, n)) return false; p += n; return true; }
+    static void utf8(std::string& out, unsigned c) {
+        if (c < 0x80) out += char(c);
+        else if (c < 0x800) { out += char(0xC0 | c >> 6); out += char(0x80 | (c & 0x3F)); }
+        else if (c < 0x10000) { out += char(0xE0 | c >> 12); out += char(0x80 | (c >> 6 & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+        else { out += char(0xF0 | c >> 18); out += char(0x80 | (c >> 12 & 0x3F)); out += char(0x80 | (c >> 6 & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+    }
+    bool hex4(unsigned& c) {
+        if (e - p < 4) return false;
+        c = 0;
+        for (int i = 0; i < 4; i++) { const char h = *p++; c = c << 4 | unsigned(isdigit((unsigned char)h) ? h - '0' : (tolower((unsigned char)h) - 'a' + 10)); }
+        return true;
+    }
+    bool string(std::string& out) {
+        if (p >= e || *p != '"') return false;
+        for (p++; p < e && *p != '"'; ) {
+            if (*p != '\\') { out += *p++; continue; }
+            if (++p >= e) return false;
+            const char c = *p++;
+            if (c == 'u') {
+                unsigned u = 0, lo = 0;
+                if (!hex4(u)) return false;
+                if (u >= 0xD800 && u < 0xDC00 && e - p >= 6 && p[0] == '\\' && p[1] == 'u') { p += 2; if (!hex4(lo)) return false; u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00); }
+                utf8(out, u);
+            } else out += c == 'n' ? '\n' : c == 't' ? '\t' : c == 'r' ? '\r' : c == 'b' ? '\b' : c == 'f' ? '\f' : c;
+        }
+        if (p >= e) return false;
+        p++;
+        return true;
+    }
+    bool value(Json& v, int depth = 0) {
+        ws();
+        if (p >= e || depth > 64) return false;
+        if (*p == '{') {
+            v.kind = Json::kObj; p++; ws();
+            if (p < e && *p == '}') { p++; return true; }
+            for (;;) {
+                std::string k;
+                ws();
+                if (!string(k)) return false;
+                ws();
+                if (p >= e || *p++ != ':') return false;
+                v.o.emplace_back(std::move(k), Json());
+                if (!value(v.o.back().second, depth + 1)) return false;
+                ws();
+                if (p < e && *p == ',') { p++; continue; }
+                if (p < e && *p == '}') { p++; return true; }
+                return false;
+            }
+        }
+        if (*p == '[') {
+            v.kind = Json::kArr; p++; ws();
+            if (p < e && *p == ']') { p++; return true; }
+            for (;;) {
+                v.a.emplace_back();
+                if (!value(v.a.back(), depth + 1)) return false;
+                ws();
+                if (p < e && *p == ',') { p++; continue; }
+                if (p < e && *p == ']') { p++; return true; }
+                return false;
+            }
+        }
+        if (*p == '"') { v.kind = Json::kStr; return string(v.s); }
+        if (word("true")) { v.kind = Json::kBool; v.b = true; return true; }
+        if (word("false")) { v.kind = Json::kBool; return true; }
+        if (word("null")) return true;
+        char* end = nullptr;
+        v.n = strtod(p, &end);
+        if (end == p) return false;
+        v.kind = Json::kNum; p = end;
+        return true;
+    }
+};
+Json parse_json(const std::string& text) {
+    JsonReader r{text.data(), text.data() + text.size()};
+    Json v;
+    if (!r.value(v)) v = Json();
+    return v;
+}
+
+/* ------------------------------------------------------------------ the installer's scripts, run without a window
+ * Their output lines are read on a thread and copied to a log. The process is in a job object that kills it, and every
+ * process it started (setup.py, the compilers), when the launcher closes: the installer resumes where it was next time. */
+class Child {
+public:
+    ~Child() { stop(); }
+    bool start(const std::wstring& cmd, const fs::path& cwd, const fs::path& log) {
+        stop();
+        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+        HANDLE rd = nullptr, wr = nullptr;
+        if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
+        SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+        HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdOutput = si.hStdError = wr;
+        si.hStdInput = nul;
+        PROCESS_INFORMATION pi{};
+        std::wstring c = cmd;
+        const BOOL ok = CreateProcessW(nullptr, c.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, cwd.wstring().c_str(), &si, &pi);
+        CloseHandle(wr);
+        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+        if (!ok) { CloseHandle(rd); return false; }
+        job_ = CreateJobObjectW(nullptr, nullptr);
+        if (job_) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+            li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &li, sizeof li);
+            AssignProcessToJobObject(job_, pi.hProcess);
+        }
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        proc_ = pi.hProcess;
+        std::error_code e;
+        fs::create_directories(log.parent_path(), e);
+        FILE* lf = _wfopen(log.wstring().c_str(), L"ab");
+        reader_ = std::thread([this, rd, lf] {
+            char buf[4096];
+            std::string part;
+            DWORD n = 0;
+            while (ReadFile(rd, buf, sizeof buf, &n, nullptr) && n) {
+                if (lf) { fwrite(buf, 1, n, lf); fflush(lf); }
+                part.append(buf, n);
+                for (size_t i; (i = part.find('\n')) != std::string::npos; part.erase(0, i + 1)) {
+                    std::string line = part.substr(0, i);
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    std::lock_guard<std::mutex> lock(m_);
+                    lines_.push_back(std::move(line));
+                }
+            }
+            if (!part.empty()) { std::lock_guard<std::mutex> lock(m_); lines_.push_back(part); }
+            if (lf) fclose(lf);
+            CloseHandle(rd);
+        });
+        return true;
+    }
+    bool running() const { return proc_ && WaitForSingleObject(proc_, 0) == WAIT_TIMEOUT; }
+    bool started() const { return proc_ != nullptr; }
+    // after the process ended: its exit code, once every line was read
+    int finish() {
+        if (reader_.joinable()) reader_.join();
+        DWORD code = 1;
+        if (proc_) { GetExitCodeProcess(proc_, &code); CloseHandle(proc_); proc_ = nullptr; }
+        if (job_) { CloseHandle(job_); job_ = nullptr; }
+        return int(code);
+    }
+    std::vector<std::string> take_lines() { std::lock_guard<std::mutex> lock(m_); std::vector<std::string> v; v.swap(lines_); return v; }
+    void stop() {
+        if (job_) TerminateJobObject(job_, 1);
+        else if (proc_) TerminateProcess(proc_, 1);
+        if (proc_ || job_ || reader_.joinable()) finish();
+        take_lines();
+    }
+private:
+    HANDLE job_ = nullptr, proc_ = nullptr;
+    std::thread reader_;
+    std::mutex m_;
+    std::vector<std::string> lines_;
+};
+
 /* ------------------------------------------------------------------ pictures */
 Image load_image(SDL_Renderer* r, const fs::path& path) {
     int w = 0, h = 0, n = 0;
@@ -212,7 +393,7 @@ const char* const k_keys[][2] = {                         // nnpad_sdl.c g_kb_de
     {"D-pad", "I J K L"}, {"L / R", "Q / E"}, {"ZL / ZR", "A / S"}, {"+ / -", "Enter / Backspace"}, {"Fullscreen", "F11"}, {"Settings", "F1"}};
 
 /* ------------------------------------------------------------------ the launcher */
-enum class Screen { kMain, kSettings, kSaves, kControls, kMore, kMii };
+enum class Screen { kMain, kSettings, kSaves, kControls, kMore, kMii, kInstall };
 struct Item {
     std::string label, value;
     bool chevrons = false;     // a setting: left / right change the value
@@ -238,17 +419,29 @@ public:
         return "There is no Mii in slot " + std::to_string(slot) + ".";
     }
     bool game_running() const { return game_.hProcess != nullptr; }
+    // --auto-install <dump folder> (tests): the INSTALL screen's whole way with that dump and no questions; 0 = installed
+    void auto_install(const std::string& dump) { auto_dump_ = dump; start_setup(); }
+    int auto_result() const { return auto_result_; }
     void open_screen(const std::string& s) {
         if (s == "settings") go(Screen::kSettings);
         if (s == "saves") go(Screen::kSaves);
         if (s == "controls") go(Screen::kControls);
         if (s == "more") go(Screen::kMore);
+        if (s == "install") { setup_ = Setup::kReady; go(Screen::kInstall); }      // (--shot: the screen as before any file is found)
     }
 
     void event(SDL_Event& e) {
         SDL_ConvertEventToRenderCoordinates(r_, &e);
         switch (e.type) {
-        case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: quit_ = true; break;
+        case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            if (setup_ == Setup::kInstall && !quit_armed_) {      // closing stops the install: once more to be sure
+                quit_armed_ = true;
+                note_ = "Closing stops the install (it goes on where it was when you press PLAY again). Close again to stop.";
+                note_ok_ = false;
+                break;
+            }
+            quit_ = true;
+            break;
         case SDL_EVENT_KEY_DOWN:
             switch (e.key.key) {
             case SDLK_UP: case SDLK_W: move(-1); break;
@@ -317,6 +510,7 @@ public:
             SDL_ShowWindow(window_); SDL_RaiseWindow(window_);
             refresh();
         }
+        poll_setup();
         std::string chosen;
         bool done = false;
         {
@@ -324,7 +518,13 @@ public:
             chosen.swap(dialog_result_);
             std::swap(done, dialog_done_);
         }
-        if (done && !chosen.empty() && dialog_for_ == kForImport) import_save(fs::u8path(chosen));
+        if (done && !chosen.empty() && dialog_for_ >= kForBase) {      // INSTALL: a game file, the update, the keys, a dump folder
+            if (dialog_for_ == kForBase) { in_base_ = chosen; in_dump_.clear(); }
+            else if (dialog_for_ == kForUpdate) in_update_ = chosen;
+            else if (dialog_for_ == kForKeys) in_keys_ = chosen;
+            else if (dialog_for_ == kForDump) { in_dump_ = chosen; in_base_.clear(); }
+            build_items();
+        } else if (done && !chosen.empty() && dialog_for_ == kForImport) import_save(fs::u8path(chosen));
         else if (done && !chosen.empty() && dialog_for_ == kForMii) load_ltd(fs::u8path(chosen));
         else if (done && !chosen.empty()) {
             game_dir_ = chosen;
@@ -375,15 +575,15 @@ public:
             const std::string v = fit(list_[i].value, vpx, layout_.right_chevron - x - tw - H * 0.08f);
             const float vx = layout_.right_chevron - H * 0.03f - font_.width(r_, v, vpx);
             const std::string& raw = list_[i].value;
-            Color vc = raw.rfind("Found", 0) == 0 || raw == "On" || raw.rfind("Saved", 0) == 0 ? kGood
-                     : raw == "Choose..." || raw == "Press again" ? kGold
+            Color vc = raw.rfind("Found", 0) == 0 || raw.rfind("Chosen", 0) == 0 || raw == "On" || raw.rfind("Saved", 0) == 0 ? kGood
+                     : raw == "Choose..." || raw == "Press again" || raw == "About 40 minutes" ? kGold
                      : raw == "Wrong folder" || raw == "Not installed" ? kBad : kDim;
             vc.a = c.a;
             font_.draw(r_, vx, y - px * 0.04f, v, vpx, vc);
         }
         if (screen_ == Screen::kControls) draw_keys();
         draw_status();
-        draw_toast();
+        if (installed()) draw_toast();      // (before the install there are no shaders to count)
         const std::string version = std::string("Version ") + LAUNCHER_VERSION;
         const float vpx = H * 0.030f;
         font_.draw(r_, W * 0.95f - font_.width(r_, version, vpx), H * 0.94f, version, vpx, kWhite);
@@ -412,7 +612,6 @@ private:
     // the game DLL is built from the player's dump by the installer: the runtime package alone (its zip unpacked and the
     // launcher started from there) has the exe but not this
     bool installed() const { return exe_ok() && is_file(g_work / "tomodachi_game.dll"); }
-    fs::path installer() const { return g_repo / "Install Tomodachi Life.bat"; }
     // exefs\main.elf of the game folder; a dump made by the installer keeps only main (the console's format) and setup.py
     // converts it into build\binaries\<version>\main.elf: the newest of those then.
     // shortcut: that one is taken for any game folder without main.elf, matching or not; a folder check would need the NSO
@@ -523,13 +722,35 @@ private:
             list_ = {{"OPEN LOGS FOLDER", ""}, {"EDIT GRAPHICS.INI", ""}, {"CLEAR SHADER CACHE", armed_ == 2 ? "Press again" : mb}, {"OPEN PORT FOLDER", ""}, {"BACK", ""}};
             break;
         }
+        case Screen::kInstall: {
+            const auto name = [](const std::string& p, const char* none, bool found) {
+                if (p.empty()) return std::string(none);
+                return std::string(found ? "Found: " : "Chosen: ") + fs::u8path(p).filename().u8string();
+            };
+            if (setup_ == Setup::kBootstrap || setup_ == Setup::kScan) list_ = {{"GETTING READY", "One moment"}, {"BACK", ""}};
+            else if (setup_ == Setup::kInstall) list_ = {{"STOP THE INSTALL", armed_ == 0 ? "Press again" : "You can go on later"}};
+            else if (setup_ == Setup::kFailed) list_ = {{"TRY AGAIN", ""}, {"OPEN THE LOG", ""}, {"BACK", ""}};
+            else if (!in_dump_.empty())
+                list_ = {{"GAME FOLDER", name(in_dump_, "", in_auto_dump_)}, {"USE GAME FILES INSTEAD", "Choose..."}, {"INSTALL", "About 40 minutes"}, {"BACK", ""}};
+            else {
+                const bool ok = !in_base_.empty() && !in_keys_.empty();
+                list_ = {{"GAME", name(in_base_, "Choose...", in_auto_base_)}, {"UPDATE 1.0.4", name(in_update_, "Optional: Choose...", in_auto_update_)},
+                         {"PROD.KEYS", name(in_keys_, "Choose...", in_auto_keys_)}, {"OR A DUMP FOLDER", "Choose..."},
+                         {"INSTALL", ok ? "About 40 minutes" : "Choose the game and keys first"}, {"BACK", ""}};
+            }
+            break;
+        }
         }
         if (selected_ >= int(list_.size())) selected_ = int(list_.size()) - 1;
     }
 
     void go(Screen s) { screen_ = s; selected_ = 0; selection_y_ = 0; first_ = 0; fade_ = 0; armed_ = -1; note_.clear(); build_items(); }
     void move(int d) { const int n = int(list_.size()); selected_ = (selected_ + d + n) % n; if (armed_ >= 0) { armed_ = -1; build_items(); } }
-    void back() { if (screen_ == Screen::kMii) go(Screen::kSaves); else if (screen_ != Screen::kMain) go(Screen::kMain); }
+    void back() {
+        if (screen_ == Screen::kInstall && setup_ == Setup::kInstall) return;      // STOP THE INSTALL is the way out
+        if (screen_ == Screen::kInstall) { child_.stop(); setup_ = Setup::kIdle; }
+        if (screen_ == Screen::kMii) go(Screen::kSaves); else if (screen_ != Screen::kMain) go(Screen::kMain);
+    }
 
     void change(int d) {
         if (screen_ != Screen::kSettings || selected_ >= int(options().size())) return;
@@ -552,6 +773,7 @@ private:
         switch (screen_) {
         case Screen::kMain:
             if (i == kPlay) play();
+            else if (i == kGame && !installed() && can_install()) start_setup();
             else if (i == kGame) choose_game();
             else if (i == kSettings) go(Screen::kSettings);
             else if (i == kSaves) go(Screen::kSaves);
@@ -587,6 +809,36 @@ private:
         case Screen::kControls:
             if (i == 1) edit_file(g_pads_ini);
             else if (i == 2) back();
+            break;
+        case Screen::kInstall:
+            if (setup_ == Setup::kInstall) {                    // STOP THE INSTALL, pressed twice
+                if (armed_ != 0) { armed_ = 0; build_items(); break; }
+                child_.stop();
+                setup_ = Setup::kIdle;
+                go(Screen::kMain);
+                note_ = "The install stopped. Press PLAY to go on where it was.";
+                break;
+            }
+            if (setup_ == Setup::kBootstrap || setup_ == Setup::kScan) { if (i == 1) back(); break; }
+            if (setup_ == Setup::kFailed) {
+                if (i == 0) start_setup();
+                else if (i == 1) open_path(g_build / "logs" / "launcher_install.log");
+                else back();
+                break;
+            }
+            if (!in_dump_.empty()) {
+                if (i == 0) choose_folder(kForDump, in_dump_);
+                else if (i == 1) { in_dump_.clear(); build_items(); }
+                else if (i == 2) start_install();
+                else back();
+                break;
+            }
+            if (i == 0) choose_file(kForBase, "Tomodachi Life (base game)", "nsp;nsz;xci;xcz");
+            else if (i == 1) choose_file(kForUpdate, "The update 1.0.4", "nsp;nsz");
+            else if (i == 2) choose_file(kForKeys, "Your console's keys", "keys");
+            else if (i == 3) choose_folder(kForDump, "");
+            else if (i == 4) { if (!in_base_.empty() && !in_keys_.empty()) start_install(); }
+            else back();
             break;
         case Screen::kMore:
             if (i == 0) open_path(g_work);
@@ -737,8 +989,161 @@ private:
         build_items();
     }
 
-    enum { kForGame, kForImport, kForMii };
+    enum { kForGame, kForImport, kForMii, kForBase, kForUpdate, kForKeys, kForDump };      // (kForBase and later: INSTALL)
     void choose_game(bool then_play = false) { play_after_dialog_ = then_play; choose_folder(kForGame, game_dir_.string()); }
+    void choose_file(int purpose, const char* what, const char* patterns) {
+        dialog_for_ = purpose;
+        static SDL_DialogFileFilter filter;
+        filter = {what, patterns};
+        SDL_ShowOpenFileDialog(
+            [](void* self, const char* const* list, int) {
+                auto* l = static_cast<Launcher*>(self);
+                std::lock_guard<std::mutex> lock(l->dialog_mutex_);
+                l->dialog_result_ = list && list[0] ? list[0] : "";
+                l->dialog_done_ = true;
+            },
+            this, window_, &filter, 1, nullptr, false);
+    }
+
+    /* ---------------------------------------------------------------- INSTALL
+     * The launcher runs the installer itself, without a window of its own: scripts\bootstrap.ps1 puts the private Python
+     * in deps\python (once), scripts\find_inputs.py --json finds the player's game files and keys, and scripts\install.py
+     * --progress-json builds the game; its "##ssbu {json}" lines drive the progress bar (the plan's steps and their
+     * expected seconds, each step's start and end, the compile's file counts). Its output goes to build\logs\
+     * launcher_install.log. install.py is resumable: STOP, closing the launcher or an error lose nothing. */
+    bool can_install() const { return is_file(g_repo / "scripts" / "install.py"); }
+    fs::path python() const {
+        if (is_file(g_repo / "deps" / "python" / "python.exe")) return g_repo / "deps" / "python" / "python.exe";
+        std::string p;
+        if (FILE* f = _wfopen((g_build / "python_path.txt").wstring().c_str(), L"rb")) { char b[1024]; if (fgets(b, sizeof b, f)) p = b; fclose(f); }
+        while (!p.empty() && (p.back() == '\n' || p.back() == '\r' || p.back() == ' ')) p.pop_back();
+        return p.empty() ? fs::path() : fs::u8path(p);
+    }
+    static std::wstring q(const fs::path& p) {      // a quoted argument (a trailing backslash doubled, as CommandLineToArgvW reads it)
+        const std::wstring w = p.wstring();
+        return L"\"" + w + (!w.empty() && w.back() == L'\\' ? L"\\" : L"") + L"\"";
+    }
+    fs::path install_log() const { return g_build / "logs" / "launcher_install.log"; }
+    void start_setup() {
+        go(Screen::kInstall);
+        fail_.clear(); hint_.clear(); last_line_.clear();
+        quit_armed_ = false;
+        SetEnvironmentVariableA("PYTHONIOENCODING", "utf-8");      // find_inputs.py prints file names such as "Tomodachi Life(TM)_ ..."
+        SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
+        if (python().empty() || !is_file(python())) start_bootstrap();
+        else start_scan();
+    }
+    void start_bootstrap() {
+        setup_ = Setup::kBootstrap;
+        const std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + q(g_repo / "scripts" / "bootstrap.ps1") + L" -NoLaunch";
+        if (!child_.start(cmd, g_repo, install_log())) setup_failed("Windows could not start PowerShell.", "");
+        build_items();
+    }
+    void start_scan() {
+        setup_ = Setup::kScan;
+        scan_out_.clear();
+        const std::wstring cmd = q(python()) + L" -u " + q(g_repo / "scripts" / "find_inputs.py") + L" --json";
+        if (!child_.start(cmd, g_repo, install_log())) setup_failed("The installer's Python could not be started.", python().u8string());
+        build_items();
+    }
+    void scan_done() {
+        const Json r = parse_json(scan_out_), &best = r["best"];
+        in_base_ = best["base"].str(); in_update_ = best["update"].str(); in_keys_ = best["prod_keys"].str();
+        in_firmware_ = best["firmware"].str(); in_dump_ = best["dump"].str();
+        in_auto_base_ = !in_base_.empty(); in_auto_update_ = !in_update_.empty(); in_auto_keys_ = !in_keys_.empty(); in_auto_dump_ = !in_dump_.empty();
+        setup_ = Setup::kReady;
+        selected_ = 0;
+        if (!auto_dump_.empty()) { in_dump_ = auto_dump_; in_base_.clear(); start_install(); return; }
+        build_items();
+        if (!in_dump_.empty() || (!in_base_.empty() && !in_keys_.empty())) selected_ = int(list_.size()) - 2;      // INSTALL
+    }
+    void start_install() {
+        std::wstring cmd = q(python()) + L" -u " + q(g_repo / "scripts" / "install.py") + L" --no-gui --progress-json";
+        if (!in_dump_.empty()) cmd += L" --dump " + q(fs::u8path(in_dump_));
+        else {
+            if (!in_base_.empty()) cmd += L" --base " + q(fs::u8path(in_base_));
+            if (!in_update_.empty()) cmd += L" --update " + q(fs::u8path(in_update_));
+            if (!in_keys_.empty()) cmd += L" --keys " + q(fs::u8path(in_keys_));
+        }
+        if (!in_firmware_.empty()) cmd += L" --firmware " + q(fs::u8path(in_firmware_));
+        steps_.clear(); step_ = -1; step_done_ = step_total_ = 0;
+        last_line_.clear(); fail_.clear(); hint_.clear();
+        setup_ = Setup::kInstall;
+        armed_ = -1;
+        if (!child_.start(cmd, g_repo, install_log())) setup_failed("The installer's Python could not be started.", python().u8string());
+        build_items();
+    }
+    void setup_failed(const std::string& why, const std::string& hint) {
+        setup_ = Setup::kFailed;
+        fail_ = why; hint_ = hint;
+        if (!auto_dump_.empty()) { printf("FAILED: %s %s\n", why.c_str(), hint.c_str()); fflush(stdout); auto_result_ = 1; quit_ = true; }
+        selected_ = 0;
+        build_items();
+    }
+    void setup_line(const std::string& l) {
+        if (setup_ == Setup::kScan) { scan_out_ += l; scan_out_ += '\n'; return; }
+        if (!auto_dump_.empty()) { printf("%s\n", l.c_str()); fflush(stdout); }
+        if (setup_ == Setup::kInstall && l.rfind("##ssbu ", 0) == 0) { install_event(parse_json(l.substr(7))); return; }
+        const size_t a = l.find_first_not_of(" \t");
+        if (a != std::string::npos) last_line_ = l.substr(a);
+    }
+    void install_event(const Json& j) {
+        const std::string ev = j["ev"].str();
+        if (ev == "plan") {
+            steps_.clear();
+            for (const Json& s : j["steps"].a) steps_.push_back({s["id"].str(), s["title"].str(), std::max(1.0, s["est_s"].n), 0});
+        } else if (ev == "step") {
+            const std::string id = j["id"].str(), st = j["state"].str();
+            int k = 0;
+            while (k < int(steps_.size()) && steps_[k].id != id) k++;
+            if (k == int(steps_.size())) steps_.push_back({id, id, 1, 0});
+            if (st == "start") { steps_[k].state = 1; step_ = k; step_t0_ = SDL_GetTicks(); step_done_ = step_total_ = 0; }
+            else { steps_[k].state = 2; if (st == "fail" && fail_.empty()) fail_ = j["msg"].str(); }
+        } else if (ev == "progress") {
+            step_done_ = j["done"].n; step_total_ = j["total"].n;
+        } else if (ev == "error") {
+            fail_ = j["msg"].str(); hint_ = j["hint"].str();
+        } else if (ev == "done" && !j["ok"].b && fail_.empty()) fail_ = j["msg"].str();
+    }
+    // how far the install is (0..1) and the seconds left, from the plan's expected seconds
+    void install_progress(double& frac, double& left) const {
+        double total = 0, done = 0;
+        for (const Step& s : steps_) total += s.est;
+        for (int k = 0; k < int(steps_.size()); k++) {
+            if (steps_[k].state == 2) done += steps_[k].est;
+            else if (k == step_) {
+                const double el = (SDL_GetTicks() - step_t0_) / 1000.0;
+                const double f = step_total_ > 0 ? step_done_ / step_total_ : std::min(0.95, el / steps_[k].est);
+                done += steps_[k].est * std::min(1.0, f);
+            }
+        }
+        frac = total > 0 ? std::min(1.0, done / total) : 0;
+        left = std::max(0.0, total - done);
+    }
+    void poll_setup() {
+        if (!child_.started()) return;
+        for (const std::string& l : child_.take_lines()) setup_line(l);
+        if (child_.running()) return;
+        const int code = child_.finish();
+        for (const std::string& l : child_.take_lines()) setup_line(l);
+        if (setup_ == Setup::kBootstrap) {
+            if (code == 0 && is_file(python())) start_scan();
+            else setup_failed("The installer could not set up its Python (it needs the internet the first time).", last_line_);
+        } else if (setup_ == Setup::kScan) {
+            if (code == 0) scan_done();
+            else setup_failed("Looking for your game files failed.", last_line_);
+        } else if (setup_ == Setup::kInstall) {
+            if (code == 0 && installed()) {
+                setup_ = Setup::kIdle;
+                logo_ = load_image(r_, g_work / "title-logo.png");          // made from your game files by the install
+                background_ = load_image(r_, g_work / "launcher-background.jpg");
+                refresh();
+                go(Screen::kMain);
+                note_ = "Installed. Press PLAY.";
+                if (!auto_dump_.empty()) { printf("INSTALLED\n"); fflush(stdout); auto_result_ = 0; quit_ = true; }
+            } else setup_failed(fail_.empty() ? "The install stopped with an error." : fail_, hint_.empty() ? last_line_ : hint_);
+        }
+    }
     void choose_folder(int purpose, const std::string& def) {
         dialog_for_ = purpose;
         SDL_ShowOpenFolderDialog(
@@ -754,8 +1159,8 @@ private:
     void play() {
         if (game_running()) return;
         launch_error_.clear();
-        if (!installed()) {      // the installer of this folder, else the release page with the download that has it
-            if (is_file(installer())) open_path(installer());
+        if (!installed()) {      // the install, here; else (the runtime package unpacked alone) the release page with the download
+            if (can_install()) start_setup();
             else ShellExecuteW(nullptr, L"open", kReleases, nullptr, nullptr, SW_SHOWNORMAL);
             return;
         }
@@ -846,6 +1251,7 @@ private:
         const float icon = px * 0.75f, ix = x - icon * 1.55f;
         std::string line, detail;
         Color c = kGood;
+        if (screen_ == Screen::kInstall) { draw_install_status(x, y, px, icon, ix); return; }
         if (screen_ != Screen::kMain) {
             if (!note_.empty()) { line = note_; c = note_ok_ ? kGood : kBad; }
             if (screen_ == Screen::kSettings) detail = "Saved to graphics.ini as you change it. The game reads it when it starts.";
@@ -883,18 +1289,59 @@ private:
         } else {
             c = kBad; paint_.cross(ix, y - px * 0.7f, icon * 0.8f, H * 0.0035f, c);
             line = installed() ? (lini_.get("game", "").empty() ? "Choose the game folder." : "That folder is not Tomodachi Life (exefs\\ and romfs\\).")
-                 : is_file(installer()) ? "Not installed yet: press PLAY to run Install Tomodachi Life.bat."
-                 : is_file(g_build / "state.json") ? "The install is not complete: run Install Tomodachi Life.bat again."
+                 : !note_.empty() ? note_
+                 : can_install() ? (is_file(g_build / "state.json") ? "The install is not finished: press PLAY to go on." : "Not installed yet: press PLAY to install.")
                  : "This folder is not the game, only a part its installer downloads.";
         }
         font_.draw(r_, x, y, fit(line, px, layout_.w * 0.6f), px, c);
-        if (!installed() && !is_file(installer()) && !is_file(g_build / "state.json"))
-            detail = "Press PLAY, download Tomodachi-Life-PC.zip, run Install Tomodachi Life.bat.";
+        if (!installed() && !can_install())
+            detail = "Press PLAY and download Tomodachi Life PC Setup.exe from the release page.";
+        else if (!installed()) detail = "It builds the game on this PC from your own game files and keys: about 40 minutes, once.";
         else if (selected_ == kGame) detail = game_dir_.string();
         else if (ready()) detail = std::string("Nintendo Switch \x7f Living the Dream \x7f ") + (save_size_ ? "Island saved " + save_when_ : std::string("New island")) +
                                    " \x7f " + (gfx_.get("resolution_scale", "1.0") == "2.0" ? "4K" : gfx_.get("resolution_scale", "1.0") == "1.0" ? "1080p" : gfx_.get("resolution_scale", "1.0") + "x");
         else detail = "Needs your own dump of the game: exefs\\ and romfs\\ in one folder";
         draw_line(x, y + H * 0.048f, fit(detail, px * 0.8f, layout_.w * 0.62f), px * 0.8f, kDim);
+    }
+
+    void draw_install_status(float x, float y, float px, float icon, float ix) {      // INSTALL: what is happening, a progress bar
+        const float H = layout_.h, W = layout_.w;
+        std::string line, detail;
+        Color c = kGood;
+        if (!note_.empty() && setup_ == Setup::kInstall) { line = note_; c = kBad; detail = last_line_; }
+        else if (setup_ == Setup::kBootstrap) {
+            paint_.spinner(ix + icon / 2, y - px * 0.33f, icon * 0.5f, H * 0.0035f, time_, kGood);
+            line = "Getting the installer ready (a minute or two, once)...";
+            detail = last_line_;
+        } else if (setup_ == Setup::kScan) {
+            paint_.spinner(ix + icon / 2, y - px * 0.33f, icon * 0.5f, H * 0.0035f, time_, kGood);
+            line = "Looking for your game files and keys on this PC...";
+            detail = "Downloads, Desktop, Documents and emulator folders.";
+        } else if (setup_ == Setup::kFailed) {
+            c = kBad; paint_.cross(ix, y - px * 0.7f, icon * 0.8f, H * 0.0035f, c);
+            line = fail_;
+            detail = hint_;
+        } else if (setup_ == Setup::kInstall) {
+            double frac = 0, left = 0;
+            install_progress(frac, left);
+            const std::string title = step_ >= 0 && step_ < int(steps_.size()) ? steps_[step_].title : "Starting";
+            char b[160];
+            const int mins = int(left / 60 + 0.5);
+            snprintf(b, sizeof b, "%s  -  %d %%  -  %s", title.c_str(), int(frac * 100), mins <= 1 ? "about a minute left" : ("about " + std::to_string(mins) + " minutes left").c_str());
+            line = b;
+            detail = last_line_;
+            const float bx = x, by = y - H * 0.105f, bw = std::min(W * 0.6f, H * 1.05f), bh = H * 0.016f;      // above the line
+            paint_.round_rect(bx, by, bw, bh, bh / 2, {1, 1, 1, 0.18f});
+            paint_.round_rect(bx, by, std::max(bh, bw * float(frac)), bh, bh / 2, kGold);
+            paint_.spinner(ix + icon / 2, y - px * 0.33f, icon * 0.5f, H * 0.0035f, time_, kGood);
+        } else {
+            const bool ok = !in_dump_.empty() || (!in_base_.empty() && !in_keys_.empty());
+            if (ok) { paint_.check(ix, y - px * 0.78f, icon, H * 0.0035f, c); line = "Ready: press INSTALL."; }
+            else { c = kBad; paint_.cross(ix, y - px * 0.7f, icon * 0.8f, H * 0.0035f, c); line = in_base_.empty() ? "Choose your Tomodachi Life game file (.nsp, .nsz or .xci)." : "Choose your console's prod.keys."; }
+            detail = "From your own Switch. The game is built on this PC: about 40 minutes, once.";
+        }
+        font_.draw(r_, x, y, fit(line, px, W * 0.6f), px, c);
+        if (!detail.empty()) draw_line(x, y + H * 0.048f, fit(detail, px * 0.8f, W * 0.62f), px * 0.8f, kDim);
     }
 
     void draw_keys() {      // CONTROLS: the keyboard's keys, on a card at the right
@@ -953,6 +1400,17 @@ private:
     std::mutex dialog_mutex_;
     std::string dialog_result_;
     bool dialog_done_ = false;
+    // INSTALL
+    enum class Setup { kIdle, kBootstrap, kScan, kReady, kInstall, kFailed };
+    struct Step { std::string id, title; double est; int state; };      // state: 0 waiting, 1 running, 2 finished
+    Setup setup_ = Setup::kIdle;
+    Child child_;
+    std::string scan_out_, in_base_, in_update_, in_keys_, in_firmware_, in_dump_, last_line_, fail_, hint_, auto_dump_;
+    bool in_auto_base_ = false, in_auto_update_ = false, in_auto_keys_ = false, in_auto_dump_ = false, quit_armed_ = false;
+    std::vector<Step> steps_;
+    int step_ = -1, auto_result_ = 1;
+    double step_done_ = 0, step_total_ = 0;
+    Uint64 step_t0_ = 0;
 };
 
 /* the window icon: the game's logo, else a smiling yellow face drawn here */
@@ -996,6 +1454,8 @@ int main(int argc, char** argv) {
     for (int i = 1; i + 2 < argc; i++) if (!strcmp(argv[i], "--import-mii")) { import_mii = argv[i + 1]; import_slot = atoi(argv[i + 2]); }
     if (import_mii) import_dir = "";
     if (import_dir) shot = "";
+    const char* auto_dump = nullptr;      // --auto-install <dump folder>: the install without questions (tests); the exit code says how it went
+    for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--auto-install")) auto_dump = argv[i + 1];
     paths_init();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return 1;
     int ww = 1600, wh = 900;
@@ -1004,14 +1464,16 @@ int main(int argc, char** argv) {
         ww = usable.w * 7 / 10; wh = ww * 9 / 16;
         if (wh > usable.h * 8 / 10) { wh = usable.h * 8 / 10; ww = wh * 16 / 9; }
     }
-    SDL_Window* window = SDL_CreateWindow("Tomodachi Life", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot ? SDL_WINDOW_HIDDEN : 0));
+    SDL_Window* window = SDL_CreateWindow("Tomodachi Life", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot || auto_dump ? SDL_WINDOW_HIDDEN : 0));
     SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
     if (!renderer) { SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Tomodachi Life", SDL_GetError(), nullptr); return 1; }
     SDL_SetRenderVSync(renderer, 1);
     SDL_SetWindowMinimumSize(window, 960, 540);
     set_icon(window);
+    int rc = 0;
     {
         Launcher launcher(window, renderer);
+        if (auto_dump) launcher.auto_install(auto_dump);
         if (import_mii) { printf("%s\n", launcher.import_mii_now(import_mii, import_slot).c_str()); fflush(stdout); }
         else if (import_dir) { printf("%s\n", launcher.import_now(import_dir).c_str()); fflush(stdout); }
         SDL_Texture* target = shot ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, 1600, 900) : nullptr;
@@ -1038,9 +1500,10 @@ int main(int argc, char** argv) {
             }
             SDL_RenderPresent(renderer);
         }
+        if (auto_dump) rc = launcher.auto_result();
     }
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
-    return 0;
+    return rc;
 }

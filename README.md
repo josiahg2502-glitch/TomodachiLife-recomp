@@ -31,19 +31,20 @@ Both 1.0.0 and 1.0.4 run. Other updates are not supported yet.
 
 ## Install
 
-1. Download **`Tomodachi-Life-PC.zip`** from the [newest release](https://github.com/josiahg2502-glitch/TomodachiLife-recomp/releases)
-   and unpack it into a folder of its own, for example `C:\Games\TomodachiLife`. (GitHub's "Source code (zip)" holds the
-   same files. A zip named `tomodachi-runtime-...` is not the game: it is a part the installer downloads by itself.)
-2. Double-click **`Install Tomodachi Life.bat`**. It sets up a private copy of Python inside the folder (nothing is installed
-   system-wide), then opens the installer window.
-3. The window looks for your game files and keys (Downloads, Desktop, Documents and emulator folders). Check what it
-   found, choose anything it missed, then press **Install**. A dump you already made (a folder with `exefs\` and
-   `romfs\` inside) works too: the base game row's **Folder...** button; no keys are needed then.
-4. Wait. The first install takes about 40 minutes on a recent PC (an hour or more on older ones): it unpacks your game,
-   translates its code and compiles it (about 25 minutes), and at the end compiles every shader of the game for your
-   graphics card (about 13 minutes, with progress lines). You can stop it and press **Resume** later; finished steps are
-   not repeated.
-5. Start the game with the **Tomodachi Life** shortcut on your desktop, or `Play Tomodachi Life.bat`.
+1. Download **`Tomodachi Life PC Setup.exe`** from the [newest release](https://github.com/josiahg2502-glitch/TomodachiLife-recomp/releases)
+   and run it. Windows may say it protected your PC (the setup is not signed): click **More info**, then **Run anyway**.
+2. Choose where it goes (`C:\Games\TomodachiLife` by default; about 15 GB). The launcher opens.
+3. It finds your game files and keys by itself (Downloads, Desktop, Documents and emulator folders). Choose anything it
+   missed, then press **INSTALL**. A dump you already made (a folder with `exefs\` and `romfs\` inside) works too: **OR A
+   DUMP FOLDER**; no keys are needed then.
+4. Wait. The first install takes about 40 minutes on a recent PC (an hour or more on older ones): it translates the
+   game's code and compiles it (about 25 minutes), then compiles every shader for your graphics card (about 13 minutes).
+   You can stop it, or close the launcher, and go on later: finished steps are not repeated.
+5. Press **PLAY**. Next time, start it with the **Tomodachi Life** shortcut on your desktop.
+
+The same files as a zip, for those who prefer it: **`Tomodachi-Life-PC.zip`** (unpack it into a folder of its own and run
+`build\work\TomodachiLauncher.exe`, or `Install Tomodachi Life.bat` for the older installer window). A zip named
+`tomodachi-runtime-...` is not the game: it is a part the installer downloads by itself.
 
 The installer downloads only what it needs, each file checked against a fixed SHA-256: Python 3.13 (python.org), LLVM/clang
 9 (the official build, repackaged as a zip), the prebuilt runtime of this release (our own code only), libopus and FFmpeg.
