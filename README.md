@@ -39,9 +39,10 @@ Both 1.0.0 and 1.0.4 run. Other updates are not supported yet.
 3. The window looks for your game files and keys (Downloads, Desktop, Documents and emulator folders). Check what it
    found, choose anything it missed, then press **Install**. A dump you already made (a folder with `exefs\` and
    `romfs\` inside) works too: the base game row's **Folder...** button; no keys are needed then.
-4. Wait. The first install takes about 45 minutes to an hour and a half: it unpacks your game, translates its code,
-   compiles it, and at the end compiles every shader of the game for your graphics card (10-30 minutes of that, with
-   progress lines). You can stop it and press **Resume** later; finished steps are not repeated.
+4. Wait. The first install takes about 40 minutes on a recent PC (an hour or more on older ones): it unpacks your game,
+   translates its code and compiles it (about 25 minutes), and at the end compiles every shader of the game for your
+   graphics card (about 13 minutes, with progress lines). You can stop it and press **Resume** later; finished steps are
+   not repeated.
 5. Start the game with the **Tomodachi Life** shortcut on your desktop, or `Play Tomodachi Life.bat`.
 
 The installer downloads only what it needs, each file checked against a fixed SHA-256: Python 3.13 (python.org), LLVM/clang
