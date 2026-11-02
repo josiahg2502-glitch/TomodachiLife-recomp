@@ -715,8 +715,20 @@ def step_link(cx):
             files = json.load(f)['files']
         for name in files:
             if name.lower().endswith(('.exe', '.dll')):
-                shutil.copy2(os.path.join(cx.runtime_dir, name), os.path.join(cx.work, name))
-                if sha256_file(os.path.join(cx.work, name)) != files[name]['sha256']:
+                dst = os.path.join(cx.work, name)
+                if os.path.exists(dst + '.old'):              # what a running launcher left last time
+                    try:
+                        os.remove(dst + '.old')
+                    except OSError:
+                        pass
+                if os.path.exists(dst) and sha256_file(dst) == files[name]['sha256']:
+                    continue                                  # already this one (the launcher that runs this install, its SDL3.dll)
+                try:
+                    shutil.copy2(os.path.join(cx.runtime_dir, name), dst)
+                except PermissionError:                       # in use (the launcher runs the install): a running file can be renamed
+                    os.replace(dst, dst + '.old')
+                    shutil.copy2(os.path.join(cx.runtime_dir, name), dst)
+                if sha256_file(dst) != files[name]['sha256']:
                     raise Fail('%s does not match the runtime package after copying' % name)
         how = 'from the runtime package'
     else:

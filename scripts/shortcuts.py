@@ -53,8 +53,12 @@ def plan(repo=REPO):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_location
     exe = os.path.join(build_location.get(repo), 'work', 'TomodachiLauncher.exe')
-    icon = exe + ',0' if os.path.isfile(exe) else ''
-    play = {'name': PLAY_NAME, 'target': os.path.join(repo, 'Play Tomodachi Life.bat'), 'cwd': repo,
+    # the launcher itself (no console window): it installs what is missing too; the logo's .ico, since the launcher's own
+    # icon cannot be written while it runs the install
+    ico = os.path.join(os.path.dirname(exe), 'tomodachi.ico')
+    icon = ico if os.path.isfile(ico) else exe + ',0' if os.path.isfile(exe) else ''
+    play = {'name': PLAY_NAME, 'target': exe if os.path.isfile(exe) else os.path.join(repo, 'Play Tomodachi Life.bat'),
+            'cwd': os.path.dirname(exe) if os.path.isfile(exe) else repo,
             'desc': 'Tomodachi Life: Living the Dream, native PC build', 'icon': icon}
     inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install Tomodachi Life.bat'), 'cwd': repo,
             'desc': 'Install, repair or update Tomodachi Life native', 'icon': ''}
