@@ -114,7 +114,7 @@ SETUP_STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', '
 # expected seconds, measured 2026-10-28 on a PC with 9 jobs, 16 GB (compile scales with 12 / jobs)
 EST = {'update': 10, 'precheck': 10, 'packages': 30, 'inputs': 10, 'dump': 180, 'tools': 30, 'media': 20,
        'deps': 5, 'stage': 3, 'convert': 3, 'tables': 5, 'lift': 30, 'sdk': 15, 'compile': 1260,
-       'link': 30, 'prepare': 60, 'shortcuts': 3, 'unblock': 5}
+       'link': 30, 'prepare': 900, 'shortcuts': 3, 'unblock': 5}      # prepare: every shader compiled (829 s on an RTX 3060)
 TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'packages': 'Python packages',
           'inputs': 'Find your game files', 'dump': 'Prepare the game files', 'tools': 'Build tools', 'media': 'Sound and movies',
           'deps': 'Check tools and game files', 'stage': 'Lay out the sources', 'convert': 'Convert the game code',
