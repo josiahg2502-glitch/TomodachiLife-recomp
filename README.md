@@ -123,6 +123,8 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 - Very large islands (30+ residents) run slowly on some PCs; we are working on it (issues #7, #18).
 - Now and then a Mii's line shows without its voice (seen once in Mii News); the session log now records every line and
   voice, so please send `build\work\play_*.log` with the time it happened.
+- Some sounds are louder or carry farther than on the Switch: shop and ride music without its fade in and out, street
+  lamps heard from far away (issue #8).
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and
   send `build\work\play_*.log` of that session.
 - Local Play over the internet worked on a simulated link (lag and lost packets) but not yet between two real home routers;
