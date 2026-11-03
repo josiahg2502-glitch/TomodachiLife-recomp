@@ -62,6 +62,17 @@ static inline void r1m(uint64_t a) {
     static inline uint##bits##_t rd##bits(uint64_t a) { uint##bits##_t v; memcpy(&v, (void *)(uintptr_t)a, sizeof v); return v; } \
     static inline void wr##bits(uint64_t a, uint##bits##_t v) { R1M(a, sizeof v); memcpy((void *)(uintptr_t)a, &v, sizeof v); }
 DEF_MEM(8) DEF_MEM(16) DEF_MEM(32) DEF_MEM(64)
+/* LDAR / LDAXR (rda) and STLR / STLXR's ordering (wrl), DMB / DSB (DMB_*): the guest's lock-free code and lock releases are
+ * ordered by these. Plain accesses let the compiler move a spinlock's releasing store above the stores it protects (a newer
+ * clang does, LLVM 9 happened not to: the Linux and Android builds corrupted the game's lists, 2026-11-03), and an arm64 host
+ * reorders them itself. On x86 the acquire / release forms cost no instruction, only the full fence is an mfence. */
+#define DEF_MEM_AR(bits) \
+    static inline uint##bits##_t rda##bits(uint64_t a) { return __atomic_load_n((uint##bits##_t *)(uintptr_t)a, __ATOMIC_ACQUIRE); } \
+    static inline void wrl##bits(uint64_t a, uint##bits##_t v) { R1M(a, sizeof v); __atomic_store_n((uint##bits##_t *)(uintptr_t)a, v, __ATOMIC_RELEASE); }
+DEF_MEM_AR(8) DEF_MEM_AR(16) DEF_MEM_AR(32) DEF_MEM_AR(64)
+#define DMB_LD() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define DMB_ST() __atomic_thread_fence(__ATOMIC_RELEASE)
+#define DMB_ALL() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 
 /* STXR: store only if the location still holds the value the matching LDXR read. Returns 0 on success. */
 void stx_diag(Ctx *c, uint64_t a, uint64_t expected, uint64_t seen, uint64_t v, int bits);

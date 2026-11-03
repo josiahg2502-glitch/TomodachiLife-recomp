@@ -313,8 +313,10 @@ class Fn:
             return SET(bits(w, 4, 0), 1, '0ULL')        # fpcr / fpsr read
         if (w & 0xffffffe0) in (0xd51b4400, 0xd51b4420):
             return ';'                                   # fpcr / fpsr write
-        if (w & 0xfffff0ff) in (0xd503305f, 0xd50330bf, 0xd503309f, 0xd50330df):
-            return ';'                                   # clrex / dmb / dsb / isb
+        if (w & 0xfffff0ff) in (0xd50330bf, 0xd503309f):   # dmb / dsb: CRm's low bits 1 = loads, 2 = stores, else all (runtime.h)
+            return {1: 'DMB_LD();', 2: 'DMB_ST();'}.get(bits(w, 11, 8) & 3, 'DMB_ALL();')
+        if (w & 0xfffff0ff) in (0xd503305f, 0xd50330df):
+            return ';'                                   # clrex / isb
         raise Unimpl('system')
 
     # ---- loads and stores
@@ -417,18 +419,18 @@ class Fn:
                     if load:
                         return '{ uint64_t a = %s; c->ex_addr = a; c->ex_val = rd64(a); %s %s }' % (XS(rn), SET(rt, 0, 'c->ex_val'), SET(rt2, 0, 'c->ex_val >> 32'))
                     return SET(bits(w, 20, 16), 0, 'stx64(c, %s, ((uint64_t)%s << 32) | %s)' % (XS(rn), W(rt2), W(rt)))
-                if load:                                 # two X registers: ex_val / ex_val2, checked by stxp64 (16-byte CAS)
-                    return ('{ uint64_t a = %s; uint64_t lo = rd64(a), hi = rd64(a + 8); c->ex_addr = a; c->ex_val = lo; c->ex_val2 = hi; %s %s }'
-                            % (XS(rn), SET(rt, 1, 'lo'), SET(rt2, 1, 'hi')))
+                if load:                                 # two X registers: ex_val / ex_val2, checked by stxp64 (16-byte CAS); ldaxp: then a load fence
+                    return ('{ uint64_t a = %s; uint64_t lo = rd64(a), hi = rd64(a + 8); %sc->ex_addr = a; c->ex_val = lo; c->ex_val2 = hi; %s %s }'
+                            % (XS(rn), 'DMB_LD(); ' if bits(w, 15, 15) else '', SET(rt, 1, 'lo'), SET(rt2, 1, 'hi')))
                 return SET(bits(w, 20, 16), 0, 'stxp64(c, %s, %s, %s)' % (XS(rn), X(rt), X(rt2)))
             nb = 8 << size
             rs = bits(w, 20, 16)
-            if o2:                                       # ldar / stlr: ordered, not exclusive
+            if o2:                                       # ldar / stlr: ordered, not exclusive (acquire / release: runtime.h rda / wrl)
                 if load:
-                    return SET(rt, 1, 'rd%d(%s)' % (nb, XS(rn)))
-                return 'wr%d(%s, %s);' % (nb, XS(rn), R(rt, size == 3))
-            if load:                                     # ldxr / ldaxr: remember address and value
-                return '{ uint64_t a = %s; c->ex_addr = a; c->ex_val = rd%d(a); %s }' % (XS(rn), nb, SET(rt, 1, 'c->ex_val'))
+                    return SET(rt, 1, 'rda%d(%s)' % (nb, XS(rn)))
+                return 'wrl%d(%s, %s);' % (nb, XS(rn), R(rt, size == 3))
+            if load:                                     # ldxr / ldaxr: remember address and value (ldaxr: an acquire load)
+                return '{ uint64_t a = %s; c->ex_addr = a; c->ex_val = rd%s%d(a); %s }' % (XS(rn), 'a' if bits(w, 15, 15) else '', nb, SET(rt, 1, 'c->ex_val'))
             # stxr / stlxr: succeeds only if the value is still the one loaded (compare-and-swap)
             return SET(rs, 0, 'stx%d(c, %s, %s)' % (nb, XS(rn), R(rt, size == 3)))
         if bits(w, 31, 31) == 0 and bits(w, 29, 24) in (0x0c, 0x0d):   # AdvSIMD structure load/store
