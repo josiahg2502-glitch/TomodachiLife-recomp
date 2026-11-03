@@ -769,6 +769,18 @@ private:
     // the game DLL is built from the player's dump by the installer: the runtime package alone (its zip unpacked and the
     // launcher started from there) has the exe but not this
     bool installed() const { return exe_ok() && is_file(g_work / "tomodachi_game.dll"); }
+    // installed by the installer for another release than version.txt (1.0.0 recorded none; scripts/install.py writes
+    // "version" into build\install_state.json when it finishes): PLAY runs INSTALL first, which takes this release's runtime
+    // package and redoes only what changed. A build made without the installer (no install_state.json) is never asked.
+    bool outdated() const {
+        std::string st, want;
+        if (FILE* f = _wfopen((g_build / "install_state.json").wstring().c_str(), L"rb")) { char b[4096]; for (size_t n; (n = fread(b, 1, sizeof b, f)) > 0;) st.append(b, n); fclose(f); }
+        if (FILE* f = _wfopen((g_repo / "version.txt").wstring().c_str(), L"rb")) { char b[64] = ""; if (fgets(b, sizeof b, f)) want = b; fclose(f); }
+        while (!want.empty() && strchr("\r\n \t", want.back())) want.pop_back();
+        return !st.empty() && !want.empty() && can_install() && parse_json(st)["version"].str() != want;
+    }
+    // an update keeps the built game: the new runtime is linked and the shaders prepared again for it
+    std::string install_time() const { return installed() ? "About 15 minutes (update)" : "About 40 minutes"; }
     // exefs\main.elf of the game folder; a dump made by the installer keeps only main (the console's format) and setup.py
     // converts it into build\binaries\<version>\main.elf: the newest of those then.
     // shortcut: that one is taken for any game folder without main.elf, matching or not; a folder check would need the NSO
@@ -837,7 +849,7 @@ private:
         list_.clear();
         switch (screen_) {
         case Screen::kMain:
-            list_ = {{"PLAY", game_running() ? "Running" : ""},
+            list_ = {{"PLAY", game_running() ? "Running" : outdated() ? "Updates first" : ""},
                      {"GAME", !installed() ? "Not installed" : game_ok() ? game_version() : lini_.get("game", "").empty() ? "Choose..." : "Wrong folder"},
                      {"SETTINGS", ""},
                      {"SAVE DATA", save_size_ ? "Saved " + save_when_ : "New island"},
@@ -888,12 +900,12 @@ private:
             else if (setup_ == Setup::kInstall) list_ = {{"STOP THE INSTALL", armed_ == 0 ? "Press again" : "You can go on later"}};
             else if (setup_ == Setup::kFailed) list_ = {{"TRY AGAIN", ""}, {"OPEN THE LOG", ""}, {"BACK", ""}};
             else if (!in_dump_.empty())
-                list_ = {{"GAME FOLDER", name(in_dump_, "", in_auto_dump_)}, {"USE GAME FILES INSTEAD", "Choose..."}, {"INSTALL", "About 40 minutes"}, {"BACK", ""}};
+                list_ = {{"GAME FOLDER", name(in_dump_, "", in_auto_dump_)}, {"USE GAME FILES INSTEAD", "Choose..."}, {"INSTALL", install_time()}, {"BACK", ""}};
             else {
                 const bool ok = !in_base_.empty() && !in_keys_.empty();
                 list_ = {{"GAME", name(in_base_, "Choose...", in_auto_base_)}, {"UPDATE 1.0.4", name(in_update_, "Optional: Choose...", in_auto_update_)},
                          {"PROD.KEYS", name(in_keys_, "Choose...", in_auto_keys_)}, {"OR A DUMP FOLDER", "Choose..."},
-                         {"INSTALL", ok ? "About 40 minutes" : "Choose the game and keys first"}, {"BACK", ""}};
+                         {"INSTALL", ok ? install_time() : "Choose the game and keys first"}, {"BACK", ""}};
             }
             break;
         }
@@ -1316,7 +1328,7 @@ private:
     void play() {
         if (game_running()) return;
         launch_error_.clear();
-        if (!installed()) {      // the install, here; else (the runtime package unpacked alone) the release page with the download
+        if (!installed() || outdated()) {      // the install (or the update), here; else (the runtime package unpacked alone) the release page
             if (can_install()) start_setup();
             else ShellExecuteW(nullptr, L"open", kReleases, nullptr, nullptr, SW_SHOWNORMAL);
             return;

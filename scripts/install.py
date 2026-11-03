@@ -1105,6 +1105,12 @@ def main(argv=None):
         say(msg)
         P.emit(ev='done', ok=not cx.blockers, msg=msg)
         return 0
+    try:                                         # the release installed: the launcher updates an older one before PLAY (installed_version)
+        with open(os.path.join(REPO, 'version.txt')) as f:
+            cx.st.d['version'] = f.read().strip()
+        cx.st.save()
+    except OSError:
+        pass
     say('Done: start "Tomodachi Life.exe" in this folder (or the Tomodachi Life shortcut)')
     P.emit(ev='done', ok=True, msg='Ready: start "Tomodachi Life.exe"')
     return 0
