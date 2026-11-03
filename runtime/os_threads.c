@@ -18,17 +18,14 @@ int display_l1_trace(void); double display_l1_ms(void); const char *guest_thread
 #endif
 #define L1O(what, key) do { if (display_l1_trace()) { const char *n_ = guest_thread_name_of(GetCurrentThreadId()); printf("l1-trace: %+8.2f %-26s lr %09llx %s %llx%c", display_l1_ms(), n_ ? n_ : "?", (unsigned long long)c->x[30], what, (unsigned long long)(key), 10); } } while (0)
 
-/* Owner (thread id) and recursion count of a held CRITICAL_SECTION (mutex_fresh, the held-lock reports). glibc's recursive
- * mutex keeps both: the owner's kernel thread id, which is GetCurrentThreadId there. */
+/* Owner (thread id) and recursion count of a held CRITICAL_SECTION (IsMutexLockedByCurrentThread, mutex_fresh, the held-lock
+ * reports). POSIX builds: plat_posix.c keeps both in the CRITICAL_SECTION (owner = GetCurrentThreadId). */
 #ifdef _WIN32
 #define CS_OWNER(cs) ((DWORD)(uintptr_t)(cs)->OwningThread)
 #define CS_DEPTH(cs) ((cs)->RecursionCount)
-#elif defined(__GLIBC__)
-#define CS_OWNER(cs) ((DWORD)(cs)->__data.__owner)
-#define CS_DEPTH(cs) ((long)(cs)->__data.__count)
-#else   /* shortcut: bionic and macOS keep them private, so mutex_fresh and the reports see no owner; read them there if a hang needs it */
-#define CS_OWNER(cs) 0UL
-#define CS_DEPTH(cs) 0L
+#else
+#define CS_OWNER(cs) ((DWORD)(cs)->owner)
+#define CS_DEPTH(cs) ((long)(cs)->depth)
 #endif
 
 #define A0 (c->x[0])
@@ -630,11 +627,16 @@ static void os_GetThreadCoreMask(Ctx *c) {            /* (int *outIdealCore, Bit
     if (A1) wr64(A1, o->core_mask);
 }
 static void os_GetCurrentCoreNumber(Ctx *c) {
+    Obj *self = thread_obj(t_thread);
+    /* A thread kept on one core: that core, wherever the host runs it. The game asks once, at the thread's start, and keeps
+     * per-core data by the answer; a job thread that was not on its processor yet (Android: the affinity had not taken)
+     * or ran elsewhere after the relaxing took another core's number, and two threads shared that core's data. */
+    if (self->core_mask && !(self->core_mask & (self->core_mask - 1))) { RET(__builtin_ctzll(self->core_mask)); return; }
     if (console_cores()) {                                /* the core the thread is on now, as the console answers */
         DWORD_PTR here = (DWORD_PTR)1 << GetCurrentProcessorNumber();
-        for (int i = 0; i < 3; i++) if (g_cc_core[i] == here) { RET(i); return; }
+        for (int i = 0; i < 3; i++) if (g_cc_core[i] == here && (self->core_mask >> i & 1)) { RET(i); return; }      /* (a core of its mask only) */
     }
-    RET((int64_t)thread_obj(t_thread)->ideal_core);
+    RET((int64_t)self->ideal_core);
 }
 static void os_AvailableCoreMask(Ctx *c) { RET(7); }
 static void nothing(Ctx *c) { (void)c; }
@@ -718,7 +720,15 @@ static void mtx_lock(Ctx *c) {
     EnterCriticalSection(&o->cs);
     o->lock_from = c->x[30];
 }
-static void mtx_unlock(Ctx *c) { LeaveCriticalSection(&obj(A0)->cs); }
+static void mtx_unlock(Ctx *c) {
+#ifndef _WIN32                                        /* POSIX refuses an unlock by another thread than the owner (Windows and the console do it) */
+    static volatile LONG nlog;
+    if (LeaveCriticalSection(&obj(A0)->cs) && InterlockedIncrement(&nlog) <= 16)
+        printf("nn::os: UnlockMutex of %llx REFUSED (not locked by this thread), called from %llx\n", (unsigned long long)A0, (unsigned long long)c->x[30] - 4);
+#else
+    LeaveCriticalSection(&obj(A0)->cs);
+#endif
+}
 static void mtx_trylock(Ctx *c) { Obj *o = obj(A0); int ok = TryEnterCriticalSection(&o->cs) ? 1 : 0; if (ok) o->lock_from = c->x[30]; RET(ok); }
 /* Diagnosis (the time-limit report): every guest mutex held right now, its owner and where it was locked. A mutex a
  * thread holds while it waits for something else, or one left locked, is the usual deadlock. */
@@ -734,14 +744,8 @@ void os_held_report(FILE *out) {
                     (long)CS_DEPTH(&o->cs), (unsigned long long)o->lock_from);
         }
 }
-/* hitch.c (SSBU_HITCH): host thread id that owns the guest mutex `key` now, 0 = nobody. Diagnostics only. */
-#ifdef _WIN32
-DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)(uintptr_t)obj(key)->cs.OwningThread : 0; }
-#elif defined(__APPLE__)
-DWORD os_mutex_owner(uint64_t key) { (void)key; return 0; }       /* macOS: a pthread mutex does not show its owner */
-#else
-DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)CS_OWNER(&obj(key)->cs) : 0; }     /* glibc: the owner's tid (bionic: 0) */
-#endif
+/* Host thread id that owns the guest mutex `key` now, 0 = nobody: IsMutexLockedByCurrentThread (mtx_is_mine), hitch.c. */
+DWORD os_mutex_owner(uint64_t key) { return key ? CS_OWNER(&obj(key)->cs) : 0; }
 static void pmtx_lock(Ctx *c) { EnterCriticalSection(&obj(A0)->cs); RET(0); }
 static void pmtx_unlock(Ctx *c) { LeaveCriticalSection(&obj(A0)->cs); RET(0); }
 static void pmtx_trylock(Ctx *c) { RET(TryEnterCriticalSection(&obj(A0)->cs) ? 0 : 16); }   /* EBUSY */
@@ -1205,6 +1209,7 @@ static void pt_create(Ctx *c) {
     LeaveCriticalSection(&o->cs);
     if (!o->thread) { VirtualFree(stack, 0, MEM_RELEASE); o->stack = 0; o->is_pthread = 0; RET(P_EAGAIN); return; }
     SetThreadPriority(o->thread, host_priority(o->priority));
+   
     apply_sched(o->thread, o->core_mask, o->priority);
     wr64(A0, o->key);
     ResumeThread(o->thread);

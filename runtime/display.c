@@ -702,6 +702,8 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
 #ifdef __ANDROID__
     flags |= SDL_WINDOW_FULLSCREEN;                /* a handheld: the whole screen, without the system bars (SDLActivity's immersive mode) */
+#else
+    if (getenv("SSBU_SHOW") && !atoi(getenv("SSBU_SHOW"))) flags |= SDL_WINDOW_HIDDEN;      /* test runs: no window on the desktop (as the Windows build) */
 #endif
     if (go->window_mode) {
         const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());

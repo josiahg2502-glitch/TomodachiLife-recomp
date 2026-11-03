@@ -174,23 +174,34 @@ void Sleep(DWORD ms);
     ({ void *plat_c_ = (void *)(c); __atomic_compare_exchange_n((void *volatile *)(p), &plat_c_, (void *)(x), 0, PLAT_SC, PLAT_SC); (PVOID)plat_c_; })
 
 /* ---- locks and condition variables ---- */
-typedef pthread_mutex_t CRITICAL_SECTION;                /* recursive, like the Windows one */
+/* Recursive, like the Windows one. owner / depth are what Windows' OwningThread / RecursionCount give, kept by Enter / Leave
+ * on every C library: bionic and macOS do not show a mutex's owner, and nn::os::IsMutexLockedByCurrentThread was always false
+ * on Android (the game's resource code decides on it). */
+typedef struct { pthread_mutex_t m; volatile DWORD owner; volatile LONG depth; } CRITICAL_SECTION;
 typedef CRITICAL_SECTION *LPCRITICAL_SECTION;
 void InitializeCriticalSection(CRITICAL_SECTION *cs);
 #define InitializeCriticalSectionAndSpinCount(cs, n) (InitializeCriticalSection(cs), TRUE)
 #define InitializeCriticalSectionEx(cs, n, f) (InitializeCriticalSection(cs), TRUE)
-#define EnterCriticalSection(cs) pthread_mutex_lock(cs)
-#define LeaveCriticalSection(cs) pthread_mutex_unlock(cs)
-#define TryEnterCriticalSection(cs) (pthread_mutex_trylock(cs) == 0)
-#define DeleteCriticalSection(cs) pthread_mutex_destroy(cs)
+/* Enter / Leave / the SRW calls report a failing pthread call (plat_posix.c): a failure is a lock NOT taken or NOT given back,
+ * which Windows never has (it deadlocks, or LeaveCriticalSection from another thread unlocks); the value is the error. */
+int plat_cs_enter(CRITICAL_SECTION *cs);
+int plat_cs_leave(CRITICAL_SECTION *cs);
+BOOL plat_cs_try(CRITICAL_SECTION *cs);
+#define EnterCriticalSection(cs) plat_cs_enter(cs)
+#define LeaveCriticalSection(cs) plat_cs_leave(cs)
+#define TryEnterCriticalSection(cs) plat_cs_try(cs)
+#define DeleteCriticalSection(cs) pthread_mutex_destroy(&(cs)->m)
 typedef pthread_rwlock_t SRWLOCK;
 typedef SRWLOCK *PSRWLOCK;
 #define SRWLOCK_INIT PTHREAD_RWLOCK_INITIALIZER
 #define InitializeSRWLock(l) pthread_rwlock_init((l), NULL)
-#define AcquireSRWLockExclusive(l) pthread_rwlock_wrlock(l)
-#define ReleaseSRWLockExclusive(l) pthread_rwlock_unlock(l)
-#define AcquireSRWLockShared(l) pthread_rwlock_rdlock(l)
-#define ReleaseSRWLockShared(l) pthread_rwlock_unlock(l)
+int plat_srw_wr(SRWLOCK *l);
+int plat_srw_rd(SRWLOCK *l);
+int plat_srw_unlock(SRWLOCK *l);
+#define AcquireSRWLockExclusive(l) plat_srw_wr(l)
+#define ReleaseSRWLockExclusive(l) plat_srw_unlock(l)
+#define AcquireSRWLockShared(l) plat_srw_rd(l)
+#define ReleaseSRWLockShared(l) plat_srw_unlock(l)
 #define TryAcquireSRWLockExclusive(l) (pthread_rwlock_trywrlock(l) == 0)
 #define TryAcquireSRWLockShared(l) (pthread_rwlock_tryrdlock(l) == 0)
 /* A futex sequence counter: works with either kind of lock, as the Windows one does. */

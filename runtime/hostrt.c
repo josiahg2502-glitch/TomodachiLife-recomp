@@ -436,6 +436,16 @@ static void dump_guest_registers(void) {
     for (int i = 0; i < 31; i++)
         printf("  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 3 == 2 ? "\n" : "");
     printf("  sp  %016llx\n", (unsigned long long)c->x[31]);
+    if (getenv("SSBU_CRASH_MEM")) {                   /* (diagnosis) 64 bytes at each register that points into memory; off by default: game data (names) */
+        int cxxrt_readable(uint64_t p, size_t n);     /* nncxxrt.c */
+        for (int i = 0; i < 32; i++) {
+            uint64_t p = c->x[i] & ~7ull;
+            if (p < 0x10000 || !cxxrt_readable(p, 64)) continue;
+            printf("  [x%d] %llx:", i, (unsigned long long)p);
+            for (int k = 0; k < 8; k++) printf(" %016llx", (unsigned long long)rd64(p + 8ull * k));
+            printf("\n");
+        }
+    }
 }
 
 /* ---------------------------------------------------------------- imports */
@@ -1258,6 +1268,7 @@ static void crash_signal(int sig, siginfo_t *si, void *uc) {
     }
     dump_guest_registers();
     print_host_guest_stack();
+    { void dump_guest_threads(FILE *out); dump_guest_threads(stdout); }      /* os_threads.c: where every other game thread was */
     fflush(stdout);
     crash_file_report(sig, si, u);                  /* the console report is out: a fault in what follows cannot take it away */
     diag_minidump(NULL, "crash");

@@ -187,11 +187,13 @@ BOOL GetSystemTimes(FILETIME *idle, FILETIME *kernel, FILETIME *user) {
     if (user) ft_set(user, (u + n) * k);
     return TRUE;
 }
+static uint64_t g_start_ft;                       /* creation time: when this library was loaded (the start-up timeline counts from it) */
+__attribute__((constructor)) static void plat_note_start(void) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); g_start_ft = ts_to_ft(&ts); }
 BOOL GetProcessTimes(HANDLE p, FILETIME *create, FILETIME *exit_, FILETIME *kernel, FILETIME *user) {
     (void)p;
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
-    if (create) ft_set(create, 0);
+    if (create) ft_set(create, g_start_ft);
     if (exit_) ft_set(exit_, 0);
     if (kernel) ft_set(kernel, (uint64_t)ru.ru_stime.tv_sec * 10000000ULL + (uint64_t)ru.ru_stime.tv_usec * 10);
     if (user) ft_set(user, (uint64_t)ru.ru_utime.tv_sec * 10000000ULL + (uint64_t)ru.ru_utime.tv_usec * 10);
@@ -221,8 +223,8 @@ static BOOL cv_wait(CONDITION_VARIABLE *cv, DWORD ms, void (*unlock)(void *), vo
     if (r == -1 && e == ETIMEDOUT) { t_lasterr = 1460; return FALSE; }      /* ERROR_TIMEOUT */
     return TRUE;
 }
-static void cs_unlock(void *l) { pthread_mutex_unlock(l); }
-static void cs_lock(void *l) { pthread_mutex_lock(l); }
+static void cs_unlock(void *l) { plat_cs_leave(l); }
+static void cs_lock(void *l) { plat_cs_enter(l); }
 static void srw_unlock(void *l) { pthread_rwlock_unlock(l); }
 static void srw_lock_x(void *l) { pthread_rwlock_wrlock(l); }
 static void srw_lock_s(void *l) { pthread_rwlock_rdlock(l); }
@@ -232,11 +234,42 @@ BOOL SleepConditionVariableSRW(CONDITION_VARIABLE *cv, SRWLOCK *l, DWORD ms, ULO
 }
 void WakeConditionVariable(CONDITION_VARIABLE *cv) { __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST); futex(&cv->seq, FUTEX_WAKE_PRIVATE, 1, NULL); }
 void WakeAllConditionVariable(CONDITION_VARIABLE *cv) { __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST); futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL); }
+void plat_symbolize(uintptr_t pc, char *out, size_t n);
+static void lock_err(const char *what, int e, void *at) {         /* the first 16 failing lock calls, with their caller */
+    static volatile int n;
+    char s[256];
+    if (__atomic_add_fetch(&n, 1, __ATOMIC_RELAXED) > 16) return;
+    plat_symbolize((uintptr_t)at, s, sizeof s);
+    printf("plat: %s FAILED (%s), called from %s\n", what, strerror(e), s);
+    fflush(stdout);
+}
+__attribute__((noinline)) int plat_cs_enter(CRITICAL_SECTION *cs) {
+    int e = pthread_mutex_lock(&cs->m);
+    if (e) { lock_err("EnterCriticalSection", e, __builtin_return_address(0)); return e; }
+    if (!cs->depth++) cs->owner = GetCurrentThreadId();
+    return 0;
+}
+__attribute__((noinline)) int plat_cs_leave(CRITICAL_SECTION *cs) {
+    int mine = cs->owner == GetCurrentThreadId() && cs->depth > 0;
+    if (mine && !--cs->depth) cs->owner = 0;            /* (still held here: nobody sees it half done) */
+    int e = pthread_mutex_unlock(&cs->m);
+    if (e) { if (mine && !cs->depth++) cs->owner = GetCurrentThreadId(); lock_err("LeaveCriticalSection", e, __builtin_return_address(0)); }
+    return e;
+}
+BOOL plat_cs_try(CRITICAL_SECTION *cs) {
+    if (pthread_mutex_trylock(&cs->m)) return FALSE;
+    if (!cs->depth++) cs->owner = GetCurrentThreadId();
+    return TRUE;
+}
+__attribute__((noinline)) int plat_srw_wr(SRWLOCK *l) { int e = pthread_rwlock_wrlock(l); if (e) lock_err("AcquireSRWLockExclusive", e, __builtin_return_address(0)); return e; }
+__attribute__((noinline)) int plat_srw_rd(SRWLOCK *l) { int e = pthread_rwlock_rdlock(l); if (e) lock_err("AcquireSRWLockShared", e, __builtin_return_address(0)); return e; }
+__attribute__((noinline)) int plat_srw_unlock(SRWLOCK *l) { int e = pthread_rwlock_unlock(l); if (e) lock_err("ReleaseSRWLock", e, __builtin_return_address(0)); return e; }
 void InitializeCriticalSection(CRITICAL_SECTION *cs) {         /* a CRITICAL_SECTION is re-entrant on Windows: a recursive mutex */
     pthread_mutexattr_t a;
     pthread_mutexattr_init(&a);
     pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(cs, &a);
+    pthread_mutex_init(&cs->m, &a);
+    cs->owner = 0; cs->depth = 0;
     pthread_mutexattr_destroy(&a);
 }
 BOOL InitOnceExecuteOnce(INIT_ONCE *once, PINIT_ONCE_FN fn, PVOID param, PVOID *ctx) {
@@ -266,6 +299,7 @@ typedef struct PlatObj {
     int64_t due_ns;                  /* timers: CLOCK_MONOTONIC deadline */
     /* threads */
     pthread_t th; pid_t tid; DWORD exit_code; int started;
+    volatile DWORD_PTR pending_mask; /* bionic: an affinity set before the thread had its kernel id, applied by the thread itself */
     LPTHREAD_START_ROUTINE fn; LPVOID arg;
     /* files, finds, mappings */
     int fd;
@@ -312,6 +346,7 @@ static void *thread_tramp(void *p) {
     pthread_mutex_lock(&o->m);
     while (!o->started) pthread_cond_wait(&o->cv, &o->m);     /* CREATE_SUSPENDED: held until ResumeThread */
     pthread_mutex_unlock(&o->m);
+    if (o->pending_mask) SetThreadAffinityMask(PSEUDO_THREAD, o->pending_mask);
     DWORD r = o->fn(o->arg);
     pthread_mutex_lock(&o->m);
     o->exit_code = r; o->signaled = 1;
@@ -359,8 +394,9 @@ DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
 #ifndef __APPLE__                                 /* macOS has no thread affinity: the mask is accepted, not applied */
     cpu_set_t set; CPU_ZERO(&set);
     for (int i = 0; i < 64; i++) if (mask >> i & 1) CPU_SET(i, &set);
-#ifdef __ANDROID__                                /* bionic: the thread's kernel id (0 before it has started: not applied) */
+#ifdef __ANDROID__                                /* bionic: the thread's kernel id; before it has one the thread applies the mask itself (thread_tramp) */
     pid_t tid = h == PSEUDO_THREAD ? os_tid() : (pid_t)((PlatObj *)h)->tid;
+    if (h != PSEUDO_THREAD) ((PlatObj *)h)->pending_mask = mask;
     if (tid && sched_setaffinity(tid, sizeof set, &set)) return 0;
 #else
     if (pthread_setaffinity_np(th, sizeof set, &set)) return 0;
