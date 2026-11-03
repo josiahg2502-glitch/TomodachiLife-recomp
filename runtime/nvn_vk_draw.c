@@ -465,6 +465,17 @@ static uint64_t ring_raw(const void *p, uint64_t n) {
     R.ring_pos += n;
     return off;
 }
+/* R.c2[s] (1408 bytes: texture sizes, TEX.B candidates) went into the ring at every draw of every stage: ~15 MB a frame of
+ * the 70-Mii title's ~60, whose ring then wrapped (a wait for the whole GPU) every 4.6 frames. The copy made last is used
+ * again while its words are the same; ring bytes stay as written until the ring wraps. */
+static uint64_t g_c2_last[6][176], g_c2_off[6];
+static LONG64 g_c2_wraps[6] = {-1, -1, -1, -1, -1, -1};
+static uint64_t c2_ring(int s) {
+    if (g_c2_wraps[s] == R.ring_wraps && !memcmp(g_c2_last[s], R.c2[s], sizeof R.c2[s])) return g_c2_off[s];
+    uint64_t off = ring_raw(R.c2[s], sizeof R.c2[s]);
+    memcpy(g_c2_last[s], R.c2[s], sizeof R.c2[s]); g_c2_off[s] = off; g_c2_wraps[s] = R.ring_wraps;
+    return off;
+}
 static int g_dprof;                                /* SSBU_VK_DRAWPROF (draw_prepare): also the stream ring's part of it */
 static LONG64 g_dprof_snap, g_dprof_copy, g_dprof_bytes, g_dprof_hits, g_dprof_puts;
 static uint64_t ring_put(uint64_t addr, uint64_t size) {
@@ -3059,7 +3070,7 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
             if (!(v->cbufs >> n & 1)) continue;
             BufRef *b = &bufs[nbuf++];
             b->zero = 0; b->buf = R.ring;
-            if (n == 2) { b->off = ring_raw(R.c2[5], sizeof R.c2[5]); b->size = sizeof R.c2[5]; }
+            if (n == 2) { b->off = c2_ring(5); b->size = sizeof R.c2[5]; }
             else if (n == 1 && st->cdata_copy && st->ctl[3]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)st->cdata_copy, b->size); }
             else if (n >= 3 && R.ubo[5][n - 3].addr && R.ubo[5][n - 3].size) buf_ref(R.ubo[5][n - 3].addr, R.ubo[5][n - 3].size, al, b);
             else b->zero = 1;                      /* c0 outside the storage descriptors, or nothing bound: zeros (OpenGL: nothing bound) */
@@ -3263,7 +3274,7 @@ static int draw_prepare(unsigned prim) {
             if (!(v->cbufs >> n & 1)) continue;
             BufRef *b = &bufs[nbuf++];
             b->zero = 0; b->buf = R.ring;
-            if (n == 2) { b->off = ring_raw(R.c2[s], sizeof R.c2[s]); b->size = sizeof R.c2[s]; }
+            if (n == 2) { b->off = c2_ring(s); b->size = sizeof R.c2[s]; }
             else if (n == 1 && st->cdata_copy && st->ctl[3]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)st->cdata_copy, b->size); }
             else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) buf_ref(R.ubo[s][n - 3].addr, R.ubo[s][n - 3].size, sal, b);
             else b->zero = 1;
