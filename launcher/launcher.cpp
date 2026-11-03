@@ -18,6 +18,7 @@
  * --shot <file.bmp> [main|settings|saves|controls|more]: draws that screen off screen into a picture and exits.
  * --import <folder>: SAVE DATA > IMPORT A SAVE with that folder (no dialog), the result printed; for tests.
  * --import-mii <file.ltd> <slot>: IMPORT A MII over the resident in that slot (0..69), no dialog; for tests.
+ * --bootstrap: the installer's private Python (boot::bootstrap), no window; the INSTALL screen's first step runs it.
  * Built by scripts\build_launcher.sh (clang, SDL3 of ..\ssbu-recomp\deps, third_party\stb). */
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -26,6 +27,9 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
+#include <wincrypt.h>
+#include <urlmon.h>
+#pragma comment(lib, "urlmon.lib")
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -60,13 +64,14 @@ using namespace paint;
 namespace {
 
 /* ------------------------------------------------------------------ paths */
-fs::path g_work, g_build, g_repo, g_ini, g_pads_ini, g_launcher_ini, g_userdata, g_saves, g_cache, g_exe, g_play_exe;
+fs::path g_self, g_work, g_build, g_repo, g_ini, g_pads_ini, g_launcher_ini, g_userdata, g_saves, g_cache, g_exe, g_play_exe;
 const wchar_t* const kReleases = L"https://github.com/josiahg2502-glitch/TomodachiLife-recomp/releases";      // the player's download
 
 void paths_init() {
     wchar_t p[MAX_PATH];
     GetModuleFileNameW(nullptr, p, MAX_PATH);
-    g_work = fs::path(p).parent_path();                 // build\work
+    g_self = fs::path(p);
+    g_work = g_self.parent_path();                      // build\work
     g_build = g_work.parent_path();
     g_repo = g_build.parent_path();
     g_ini = g_build / "config" / "graphics.ini";
@@ -80,6 +85,149 @@ void paths_init() {
 }
 bool is_file(const fs::path& p) { std::error_code e; return fs::is_regular_file(p, e); }
 bool is_dir(const fs::path& p) { std::error_code e; return fs::is_directory(p, e); }
+
+/* ------------------------------------------------------------------ --bootstrap: the installer's private Python
+ * The INSTALL screen's first step runs this exe again as "TomodachiLauncher.exe --bootstrap" (its output goes to
+ * build\logs\launcher_install.log): the python.org embeddable package into deps\python, checked against its SHA-256, pip
+ * from its pinned wheel, then requirements.txt, as scripts\bootstrap.ps1 does by hand (keep the pins the same in both).
+ * The launcher used to run that script in a hidden PowerShell with the execution policy bypassed, which is the shape of
+ * malware: antivirus programs warned about it (2026-11-02). Now no PowerShell is involved: the download and the hash are
+ * Windows calls and the zips are unpacked by Windows' own tar.exe, as Setup.exe does. */
+namespace boot {
+const wchar_t* const kEmbedUrl = L"https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip";
+const char* const kEmbedSha = "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297";
+const wchar_t* const kPipUrl = L"https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl";
+const char* const kPipSha = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e";
+
+void say(const std::string& s) { printf("%s\n", s.c_str()); fflush(stdout); }      // the INSTALL screen shows the last line
+std::wstring quote(const fs::path& p) { const std::wstring w = p.wstring(); return L"\"" + w + (!w.empty() && w.back() == L'\\' ? L"\\" : L"") + L"\""; }
+
+std::string sha256(const fs::path& p) {                    // lower-case hex; "" when the file cannot be read
+    std::string out;
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH h = 0;
+    FILE* f = _wfopen(p.wstring().c_str(), L"rb");
+    if (f && CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) && CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)) {
+        std::vector<unsigned char> buf(1 << 16);
+        bool ok = true;
+        for (size_t n; ok && (n = fread(buf.data(), 1, buf.size(), f)) > 0;) ok = CryptHashData(h, buf.data(), (DWORD)n, 0) != 0;
+        unsigned char d[32];
+        DWORD dn = sizeof d;
+        if (ok && !ferror(f) && CryptGetHashParam(h, HP_HASHVAL, d, &dn, 0))
+            for (DWORD i = 0; i < dn; i++) { char x[3]; snprintf(x, sizeof x, "%02x", d[i]); out += x; }
+    }
+    if (h) CryptDestroyHash(h);
+    if (prov) CryptReleaseContext(prov, 0);
+    if (f) fclose(f);
+    return out;
+}
+
+bool fetch(const wchar_t* url, const fs::path& file, const char* sha) {      // a download kept from an earlier try is used while its hash is right
+    if (is_file(file) && sha256(file) == sha) return true;
+    std::error_code e;
+    fs::remove(file, e);
+    const std::string name = file.filename().u8string();
+    say("Downloading " + name + " ...");
+    const HRESULT hr = URLDownloadToFileW(nullptr, url, file.wstring().c_str(), 0, nullptr);
+    if (FAILED(hr)) { char m[64]; snprintf(m, sizeof m, "0x%08lx", (unsigned long)hr); say("The download of " + name + " failed (" + m + "): is this PC online?"); return false; }
+    const std::string got = sha256(file);
+    if (got != sha) { fs::remove(file, e); say("The download of " + name + " is not the file expected (SHA-256 " + got + "); try again later."); return false; }
+    return true;
+}
+
+int run(const std::wstring& cmd) {                         // a program writing into this process's output (the install log); its exit code
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi{};
+    std::wstring c = cmd;
+    if (!CreateProcessW(nullptr, c.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g_repo.wstring().c_str(), &si, &pi)) return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)code;
+}
+
+bool unzip(const fs::path& zip, const fs::path& dir) {     // Windows 10 1803 and later have tar.exe, which reads zips
+    wchar_t sys[MAX_PATH];
+    GetSystemDirectoryW(sys, MAX_PATH);
+    const int code = run(quote(fs::path(sys) / "tar.exe") + L" -xf " + quote(zip) + L" -C " + quote(dir));
+    if (code) say("Unpacking " + zip.filename().u8string() + " failed (tar.exe exit " + std::to_string(code) + "): this needs Windows 10 (1803 or later) or 11.");
+    return code == 0;
+}
+
+bool python_ok(const fs::path& exe) { return is_file(exe) && run(quote(exe) + L" -c \"import zstandard, PIL, Crypto, lz4\"") == 0; }
+
+bool site_on(const fs::path& py) {                         // the embeddable package's pythonXY._pth has "#import site": site-packages on
+    std::error_code e;
+    for (const auto& de : fs::directory_iterator(py, e)) {
+        const std::wstring n = de.path().filename().wstring();
+        if (n.rfind(L"python", 0) != 0 || n.size() < 5 || n.compare(n.size() - 5, 5, L"._pth")) continue;
+        std::string txt, out;
+        if (FILE* f = _wfopen(de.path().wstring().c_str(), L"rb")) { char b[4096]; for (size_t k; (k = fread(b, 1, sizeof b, f)) > 0;) txt.append(b, k); fclose(f); }
+        for (size_t i = 0; i < txt.size();) {
+            size_t j = txt.find('\n', i);
+            std::string line = txt.substr(i, j == std::string::npos ? std::string::npos : j - i);
+            i = j == std::string::npos ? txt.size() : j + 1;
+            const size_t a = line.find_first_not_of(" \t"), b = a == std::string::npos ? a : line.find_first_not_of(" \t", a + 1);
+            if (a != std::string::npos && line[a] == '#' && b != std::string::npos && line.compare(b, 11, "import site") == 0) line = line.substr(b);
+            out += line + (j == std::string::npos ? "" : "\n");
+        }
+        FILE* f = _wfopen(de.path().wstring().c_str(), L"wb");
+        if (!f) return false;
+        fwrite(out.data(), 1, out.size(), f);
+        fclose(f);
+        return true;
+    }
+    return false;
+}
+
+bool packages(const fs::path& dl, const fs::path& py, const fs::path& exe) {      // site-packages, pip, requirements.txt
+    const fs::path site = py / "Lib" / "site-packages";
+    std::error_code e;
+    if (!site_on(py)) { say("The Python package has no python._pth to change."); return false; }
+    const fs::path whl = dl / "pip-26.2.1-py3-none-any.whl";      // a wheel is a zip: unpacking it is installing pip
+    if (!fetch(kPipUrl, whl, kPipSha)) return false;
+    fs::create_directories(site, e);
+    if (!unzip(whl, site)) return false;
+    // the embeddable Python leaves the script's folder out of sys.path (its ._pth isolates it), and our scripts import their
+    // neighbours: a .pth line puts the running script's folder first, as a normal Python does
+    if (FILE* f = _wfopen((site / "ssbu_scriptdir.pth").wstring().c_str(), L"wb")) {
+        fputs("import sys, os; a = sys.argv[0] if sys.argv else ''; (a and os.path.isfile(a) and sys.path.insert(0, os.path.dirname(os.path.abspath(a))))\r\n", f);
+        fclose(f);
+    }
+    say("Installing pip and the Python packages (about 30 MB) ...");
+    if (run(quote(exe) + L" -m pip --version")) { say("pip could not be installed into deps\\python."); return false; }
+    const int code = run(quote(exe) + L" -m pip install --only-binary=:all: --no-warn-script-location --disable-pip-version-check -r " + quote(g_repo / "requirements.txt"));
+    if (code) { say("pip install -r requirements.txt failed (code " + std::to_string(code) + "): is this PC online?"); return false; }
+    if (!python_ok(exe)) { say("The private Python does not import its packages."); return false; }
+    return true;
+}
+
+int bootstrap() {
+    const fs::path dl = g_build / "downloads", py = g_repo / "deps" / "python", exe = py / "python.exe";
+    std::error_code e;
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);      // (URLDownloadToFile)
+    if (!python_ok(exe)) {
+        fs::create_directories(dl, e);
+        const fs::path zip = dl / "python-3.13.16-embed-amd64.zip";
+        if (!fetch(kEmbedUrl, zip, kEmbedSha)) return 1;
+        fs::remove_all(py, e);                              // (a half-made one of an earlier try too)
+        fs::create_directories(py, e);
+        if (!unzip(zip, py) || !packages(dl, py, exe)) { fs::remove_all(py, e); return 1; }      // the next try unpacks the kept download again
+    }
+    fs::create_directories(g_build, e);
+    if (FILE* f = _wfopen((g_build / "python_path.txt").wstring().c_str(), L"wb")) { fputs(exe.u8string().c_str(), f); fputs("\r\n", f); fclose(f); }
+    say("The installer's Python is ready.");
+    return 0;
+}
+} // namespace boot
+
 void open_path(const fs::path& p) { ShellExecuteW(nullptr, L"open", p.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL); }
 void edit_file(const fs::path& p) { ShellExecuteW(nullptr, L"open", L"notepad.exe", p.wstring().c_str(), nullptr, SW_SHOWNORMAL); }
 
@@ -1006,7 +1154,7 @@ private:
     }
 
     /* ---------------------------------------------------------------- INSTALL
-     * The launcher runs the installer itself, without a window of its own: scripts\bootstrap.ps1 puts the private Python
+     * The launcher runs the installer itself, without a window of its own: this exe with --bootstrap puts the private Python
      * in deps\python (once), scripts\find_inputs.py --json finds the player's game files and keys, and scripts\install.py
      * --progress-json builds the game; its "##ssbu {json}" lines drive the progress bar (the plan's steps and their
      * expected seconds, each step's start and end, the compile's file counts). Its output goes to build\logs\
@@ -1035,8 +1183,8 @@ private:
     }
     void start_bootstrap() {
         setup_ = Setup::kBootstrap;
-        const std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + q(g_repo / "scripts" / "bootstrap.ps1") + L" -NoLaunch";
-        if (!child_.start(cmd, g_repo, install_log())) setup_failed("Windows could not start PowerShell.", "");
+        const std::wstring cmd = q(g_self) + L" --bootstrap";      // this exe again: boot::bootstrap
+        if (!child_.start(cmd, g_repo, install_log())) setup_failed("The installer's first step could not be started.", g_self.u8string());
         build_items();
     }
     void start_scan() {
@@ -1445,6 +1593,7 @@ void set_icon(SDL_Window* win) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && !strcmp(argv[1], "--bootstrap")) { paths_init(); return boot::bootstrap(); }      // the INSTALL screen's first step: no window
     const char* shot = nullptr;
     std::string shot_screen;
     const char* import_dir = nullptr;

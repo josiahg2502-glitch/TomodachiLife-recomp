@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-click install: from your own game files to a playable build. Started by `Install Tomodachi Life.bat` (through the installer window).
+"""One-click install: from your own game files to a playable build. Started by the launcher's INSTALL screen (or the older installer window).
 
     python scripts/install.py [--no-gui] [--progress-json] [--dry-run] [--base F] [--update F] [--keys F]
                               [--dump DIR] [--firmware DIR] [--runtime ZIP | --no-runtime] [--jobs N]
@@ -28,7 +28,9 @@ also written to build\\install_state.json; scripts/setup.py keeps its own build\
               deps\\ffmpeg, both SHA-256 checked.
  8. build     scripts/setup.py: deps stage convert tables lift sdk compile link prepare.
  9. shortcuts "Tomodachi Life" on the desktop and in the Start menu, "Tomodachi Life - Installer" in the Start menu (scripts/shortcuts.py).
-10. unblock   Unblock-File over tools, scripts and the built exe / dlls (cheap, idempotent).
+(A 10th step cleared the downloaded-file mark over the scripts and exes, through PowerShell with its execution policy
+bypassed; with the launcher's hidden PowerShell it made antivirus programs warn about the release, 2026-11-02. Nothing needs
+it: the mark does not stop Python or the programs the installer starts.)
 
 --dry-run says what each step would do ("would ...") and changes nothing: no downloads, no writes outside build\\logs.
 
@@ -114,13 +116,13 @@ SETUP_STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', '
 # expected seconds, measured 2026-10-28 on a PC with 9 jobs, 16 GB (compile scales with 12 / jobs)
 EST = {'update': 10, 'precheck': 10, 'packages': 30, 'inputs': 10, 'dump': 180, 'tools': 30, 'media': 20,
        'deps': 5, 'stage': 3, 'convert': 3, 'tables': 5, 'lift': 30, 'sdk': 15, 'compile': 1260,
-       'link': 30, 'prepare': 900, 'shortcuts': 3, 'unblock': 5}      # prepare: every shader compiled (829 s on an RTX 3060)
+       'link': 30, 'prepare': 900, 'shortcuts': 3}      # prepare: every shader compiled (829 s on an RTX 3060)
 TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'packages': 'Python packages',
           'inputs': 'Find your game files', 'dump': 'Prepare the game files', 'tools': 'Build tools', 'media': 'Sound and movies',
           'deps': 'Check tools and game files', 'stage': 'Lay out the sources', 'convert': 'Convert the game code',
           'tables': 'Tables', 'lift': 'Translate the game code', 'sdk': 'System library',
           'compile': 'Compile the game', 'link': 'Link the game', 'prepare': 'Shaders and launcher',
-          'shortcuts': 'Shortcuts', 'unblock': 'Unblock files'}
+          'shortcuts': 'Shortcuts'}
 
 
 class Stop(Exception):
@@ -638,6 +640,31 @@ def fetch_suyu():
     return dst
 
 
+def run_elevated(exe, params):
+    """exe with params after Windows' administrator prompt (ShellExecuteEx "runas", as Start-Process -Verb RunAs did through
+    PowerShell); waits for it. -> its exit code, None when the prompt was answered No."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SEI(ctypes.Structure):          # SHELLEXECUTEINFOW
+        _fields_ = [('cbSize', wintypes.DWORD), ('fMask', wintypes.ULONG), ('hwnd', wintypes.HWND), ('lpVerb', wintypes.LPCWSTR),
+                    ('lpFile', wintypes.LPCWSTR), ('lpParameters', wintypes.LPCWSTR), ('lpDirectory', wintypes.LPCWSTR),
+                    ('nShow', ctypes.c_int), ('hInstApp', wintypes.HINSTANCE), ('lpIDList', ctypes.c_void_p), ('lpClass', wintypes.LPCWSTR),
+                    ('hkeyClass', wintypes.HKEY), ('dwHotKey', wintypes.DWORD), ('hIconOrMonitor', wintypes.HANDLE), ('hProcess', wintypes.HANDLE)]
+    sei = SEI(cbSize=ctypes.sizeof(SEI), fMask=0x40, lpVerb='runas', lpFile=exe, lpParameters=params, nShow=1)      # SEE_MASK_NOCLOSEPROCESS
+    if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)) or not sei.hProcess:
+        return None
+    k32 = ctypes.windll.kernel32
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.WaitForSingleObject(sei.hProcess, 0xFFFFFFFF)
+    code = wintypes.DWORD(1)
+    k32.GetExitCodeProcess(sei.hProcess, ctypes.byref(code))
+    k32.CloseHandle(sei.hProcess)
+    return code.value
+
+
 def fetch(name):
     url, sha, folder, probe = TOOLS[name]
     dst = os.path.join(DEPS, folder)
@@ -670,8 +697,7 @@ def fetch(name):
             if getattr(e, 'winerror', None) != 740:
                 raise
             say('   the LLVM installer asks for administrator rights: answer Yes in the Windows prompt')
-            ps = "Start-Process -FilePath '%s' -ArgumentList '/S','/D=%s' -Verb RunAs -Wait" % (arc.replace("'", "''"), dst.replace("'", "''"))
-            subprocess.run(['powershell', '-NoProfile', '-Command', ps], check=True)
+            run_elevated(arc, '/S /D=' + dst)      # (NSIS: /D= last and unquoted)
         if not os.path.exists(os.path.join(dst, 'bin', 'clang.exe')):
             raise Stop('LLVM was not installed into %s (was the Windows prompt answered No?)' % dst, 'Start the installer again.')
     os.remove(arc)
@@ -932,7 +958,7 @@ def step_build(cx, P):
         P.end(cur['id'], 'done')
 
 
-# ------------------------------------------------------------------------------------------------------ 9. shortcuts, 10. unblock
+# ------------------------------------------------------------------------------------------------------ 9. shortcuts
 def step_shortcuts(cx):
     import shortcuts
     res = shortcuts.create_all(REPO, dry=cx.a.dry_run)
@@ -944,29 +970,6 @@ def step_shortcuts(cx):
     if cx.a.dry_run:
         return 'dry', 'would make %d shortcut(s)' % len(res)
     return 'done', '%d shortcut(s): %s' % (len(res), ', '.join(l.split(' ', 1)[0] for l in res))
-
-
-_UNBLOCK_PS = r"""
-$ErrorActionPreference = 'SilentlyContinue'
-$dirs = @($env:SSBU_UNBLOCK -split '\|' | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
-if ($dirs.Count) {
-  Get-ChildItem -LiteralPath $dirs -Recurse -File |
-    Where-Object { $_.Extension -in '.exe','.dll','.ps1','.bat','.cmd','.py','.pyd' } | Unblock-File
-}
-Get-ChildItem -LiteralPath $env:SSBU_REPO -File -Filter *.bat | Unblock-File
-"""
-
-
-def step_unblock(cx):
-    dirs = [os.path.join(REPO, 'tools'), os.path.join(REPO, 'scripts'), os.path.join(BUILD, 'work')]
-    if cx.a.dry_run:
-        return 'dry', 'would run Unblock-File over tools, scripts, build\\work and the .bat files'
-    if os.name != 'nt':
-        return 'skip', 'Windows only'
-    env = dict(os.environ, SSBU_UNBLOCK='|'.join(dirs), SSBU_REPO=REPO)
-    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', _UNBLOCK_PS],
-                       capture_output=True, text=True, errors='replace', env=env, timeout=600)
-    return ('done', 'files unblocked') if r.returncode == 0 else ('skip', 'Unblock-File did not run (code %d)' % r.returncode)
 
 
 # ------------------------------------------------------------------------------------------------------ main
@@ -997,7 +1000,6 @@ def make_plan(cx):
         ids += SETUP_STEPS
         if not a.no_shortcuts:
             ids.append('shortcuts')
-        ids.append('unblock')
     plan = []
     for s in ids:
         e = EST[s]
@@ -1092,7 +1094,6 @@ def main(argv=None):
         step_build(cx, P)
         if not a.no_shortcuts:
             run_step(cx, P, 'shortcuts', step_shortcuts)
-        run_step(cx, P, 'unblock', step_unblock)
     except Stop as e:
         say('STOPPED: %s' % e.msg)
         if e.hint:

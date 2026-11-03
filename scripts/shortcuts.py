@@ -76,7 +76,7 @@ def create_all(repo=REPO, dry=False):
     if os.name != 'nt':
         return ['fail shortcuts are only made on Windows']
     env = dict(os.environ, SSBU_LNK_JSON=json.dumps(items))
-    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', _PS],
+    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', _PS],      # (the execution policy is about script files, not -Command)
                        capture_output=True, text=True, errors='replace', env=env, timeout=120)
     out = [l.strip() for l in r.stdout.splitlines() if l.strip()]
     if r.returncode:

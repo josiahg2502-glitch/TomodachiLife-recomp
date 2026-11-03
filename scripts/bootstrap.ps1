@@ -1,9 +1,11 @@
-# Install Tomodachi Life.bat runs this. It puts a private Python 3.13 into <repo>\deps\python (the python.org "embeddable" package,
+# Run by hand (the older installer window; README.md). It puts a private Python 3.13 into <repo>\deps\python (the python.org "embeddable" package,
 # checked against its SHA-256), installs pip and requirements.txt there, then opens the installer window
 # (scripts\installer_window.ps1). Nothing is installed system-wide, PATH and the registry are not touched; deleting the
 # deps folder removes everything. Only if that private install fails it falls back to a Python already on the PC
 # (or the per-user python.org installer) and the older tkinter window (scripts\installer_gui.py).
 # Structure of the download/verify/install steps adapted from WindowSmash's tools\install_windowsmash.ps1 (SNO2207).
+# The launcher does the same steps itself, without PowerShell (TomodachiLauncher.exe --bootstrap, launcher\launcher.cpp
+# boot::): keep the pinned downloads below the same as there.
 param([switch]$NoLaunch)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -142,7 +144,7 @@ try {
         Set-Content -Path (Join-Path $repo 'build\python_path.txt') -Value $pyExe -Encoding ASCII
         if (-not $NoLaunch) {
             # The installer window runs right here, in this PowerShell (Windows PowerShell is STA, as WinForms needs). It used
-            # to start a hidden second PowerShell with -ExecutionPolicy Bypass, and with the Mark-of-the-Web cleared over the
+            # to start a hidden second PowerShell with its execution policy bypassed, and with the Mark-of-the-Web cleared over the
             # whole folder that made Windows Defender's machine learning call this script a trojan (Trojan:Script/Wacatac.H!ml,
             # 2026-10-30) and remove it.
             & (Join-Path $repo 'scripts\installer_window.ps1')
