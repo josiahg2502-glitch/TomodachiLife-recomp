@@ -10200,11 +10200,13 @@ void nvn_front_count(int what, long long n) {
 int nvn_front_clip_modes(void) { return g_origin_mode | g_depth_mode << 8; }
 const char *nvn_front_op_name(unsigned op) { return k_op_name[op < OP_COUNT ? op : 0]; }
 void *nvn_front_hwnd(void) { return g_hwnd; }
-static void job_vk_shutdown(void *arg) { (void)arg; nvn_vk_shutdown(); }
+static volatile LONG g_vk_shutdown_began;
+static void job_vk_shutdown(void *arg) { (void)arg; InterlockedExchange(&g_vk_shutdown_began, 1); nvn_vk_shutdown(); }
 /* At exit (nvn_gl_report): the render thread destroys the Vulkan objects. It is given 3 s: a render thread that is held
  * in a job at that moment is left alone (the process is ending) and that is said. */
 static void vk_shutdown_at_exit(void) {
     static Job j;
+    { void nvn_vk_exiting(void); nvn_vk_exiting(); }      /* the batches still queued skip their draws: the job below is reached at once */
     if (GetCurrentThreadId() == g_render_tid) { nvn_vk_shutdown(); return; }
     j.fn = job_vk_shutdown; j.arg = NULL; j.next = NULL; j.done = CreateEventA(NULL, FALSE, FALSE, NULL);
     EnterCriticalSection(&g_job_lock);
@@ -10217,6 +10219,12 @@ static void vk_shutdown_at_exit(void) {
      * the job") was printed while the shutdown was running; the process then left with the cache half written. Now: 60 s. */
     if (WaitForSingleObject(j.done, 3000) != WAIT_OBJECT_0) {
         LONG64 t0 = GetTickCount64();
+        /* a render thread that has not even begun the job is held (lavapipe in WSL: inside vkQueuePresentKHR for minutes,
+         * 2026-11-03): the process ends without the shutdown (ExitProcess: no driver clean-up runs on another thread's feet) */
+        if (!g_vk_shutdown_began && WaitForSingleObject(j.done, 2000) != WAIT_OBJECT_0 && !g_vk_shutdown_began) {
+            printf("nvn_vk: the render thread did not begin the shutdown within 5 s (held in a driver call): the process ends without it\n"); fflush(stdout);
+            return;
+        }
         printf("nvn_vk: shutdown still running after 3 s (the pipeline cache is being written); waiting for it, at most 60 s\n"); fflush(stdout);
         if (WaitForSingleObject(j.done, 60000) != WAIT_OBJECT_0) printf("nvn_vk: shutdown NOT finished after 63 s: the render thread is held or never took the job\n");
         else printf("nvn_vk: shutdown finished %.1f s after the first 3 s\n", (double)(GetTickCount64() - t0) / 1000.0);

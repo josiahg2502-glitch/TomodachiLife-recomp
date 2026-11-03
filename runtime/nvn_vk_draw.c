@@ -345,9 +345,11 @@ static LONG64 g_tl_t0, g_tl_first, g_tl_last, g_tl_sum[8], g_tl_n;      /* sums:
 static void slot_wait(Slot *s) {
     if (!s->pending) return;
     LONG64 t0 = tk();
-    VkResult r = vkWaitForFences(V.device, 1, &s->fence, VK_TRUE, 20000000000ull);
+    /* a CPU device (lavapipe) draws on the processor: an island frame while the workers compiled took over 20 s (WSL, 2026-11-03) */
+    const int secs = V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 300 : 20;
+    VkResult r = vkWaitForFences(V.device, 1, &s->fence, VK_TRUE, (uint64_t)secs * 1000000000ull);
     g_tm[0] += tk() - t0;
-    if (r != VK_SUCCESS) vkd_fail("a submitted command buffer did not finish within 20 s (%s): the GPU is stuck or the device is lost", vk_result_name(r));
+    if (r != VK_SUCCESS) vkd_fail("a submitted command buffer did not finish within %d s (%s): the GPU is stuck or the device is lost", secs, vk_result_name(r));
     VKC(vkResetFences(V.device, 1, &s->fence));
     if (g_ts_on > 0) {                             /* SSBU_VK_GPUTIME=1: the GPU's own clock at the first and the last command of this buffer */
         uint64_t ts[2] = {0, 0};
@@ -444,15 +446,21 @@ static uint64_t ring_raw(const void *p, uint64_t n) {
     R.ring_pos += n;
     return off;
 }
+static int g_dprof;                                /* SSBU_VK_DRAWPROF (draw_prepare): also the stream ring's part of it */
+static LONG64 g_dprof_snap, g_dprof_copy, g_dprof_bytes, g_dprof_hits, g_dprof_puts;
 static uint64_t ring_put(uint64_t addr, uint64_t size) {
     unsigned h = (unsigned)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 2654435761u) >> 19;
+    if (g_dprof > 0) g_dprof_puts++;
     for (int probe = 0; probe < 8; probe++) {
         unsigned i = (h + (unsigned)probe) & 8191;
-        if (R.acache[i].gen == R.gen && R.acache[i].addr == addr && R.acache[i].size == size) return R.acache[i].off;
+        if (R.acache[i].gen == R.gen && R.acache[i].addr == addr && R.acache[i].size == size) { if (g_dprof > 0) g_dprof_hits++; return R.acache[i].off; }
         if (R.acache[i].gen != R.gen) { h = i; break; }
     }
+    LONG64 t0 = g_dprof > 0 ? tk() : 0;
     const uint8_t *cp = nvn_front_snap_copy(addr, size);      /* the game rewrote it after the submission: what it held then */
+    LONG64 t1 = g_dprof > 0 ? tk() : 0;
     uint64_t off = ring_raw(cp ? cp : P(addr), size);
+    if (g_dprof > 0) { g_dprof_snap += t1 - t0; g_dprof_copy += tk() - t1; g_dprof_bytes += (LONG64)size; }
     h &= 8191;
     R.acache[h].addr = addr; R.acache[h].size = size; R.acache[h].off = off; R.acache[h].gen = R.gen;
     return off;
@@ -3115,7 +3123,29 @@ static void vi_key(PKey *k, const uint64_t *voff, uint32_t ints, uint32_t sints)
     nvk_vl_set(k, nvk_vl_id(&l));
 #endif
 }
+/* SSBU_VK_DRAWPROF=1 (test): draw_prepare's time by part, per draw, printed every 20000 prepared draws (g_dprof: above ring_put) */
+static LONG64 g_dprof_t[7], g_dprof_n, g_dprof_last;
+static void dprof_mark(int part) { LONG64 t = tk(); g_dprof_t[part] += t - g_dprof_last; g_dprof_last = t; }
+#define DPROF(part) do { if (g_dprof > 0) dprof_mark(part); } while (0)
+static void dprof_draw_done(void) {
+    if (++g_dprof_n < 20000) return;
+    LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+    double us = 1e6 / (double)fq.QuadPart / (double)g_dprof_n, all = 0;
+    for (int i = 0; i < 7; i++) all += (double)g_dprof_t[i] * us;
+    printf("nvn_vk_drawprof: us per draw over %lld draws: stages %.2f, textures %.2f, buffers %.2f, pass+pipeline %.2f, vertex input %.2f, descriptors %.2f, push constants %.2f; all %.2f\n",
+           (long long)g_dprof_n, g_dprof_t[0] * us, g_dprof_t[1] * us, g_dprof_t[2] * us, g_dprof_t[3] * us, g_dprof_t[4] * us, g_dprof_t[5] * us, g_dprof_t[6] * us, all);
+    printf("nvn_vk_drawprof:   stream ring per draw: %.1f ranges (%.1f found in this batch's cache), %.0f bytes copied; snapshot look-ups %.2f us, copies %.2f us (with any ring-wrap wait)\n",
+           (double)g_dprof_puts / (double)g_dprof_n, (double)g_dprof_hits / (double)g_dprof_n, (double)g_dprof_bytes / (double)g_dprof_n, g_dprof_snap * us, g_dprof_copy * us);
+    memset(g_dprof_t, 0, sizeof g_dprof_t); g_dprof_n = 0; g_dprof_snap = g_dprof_copy = g_dprof_bytes = g_dprof_hits = g_dprof_puts = 0;
+}
+/* At exit (vk_shutdown_at_exit): draws still queued are left out. On lavapipe a batch of new pipelines held the render
+ * thread for minutes and the shutdown job behind it was never reached (every WSL run killed by its timeout, 2026-11-03). */
+static volatile LONG g_vk_exiting;
+void nvn_vk_exiting(void) { InterlockedExchange(&g_vk_exiting, 1); }
 static int draw_prepare(unsigned prim) {
+    if (g_vk_exiting) return 0;
+    if (!g_dprof) g_dprof = getenv("SSBU_VK_DRAWPROF") && atoi(getenv("SSBU_VK_DRAWPROF")) ? 1 : -1;
+    if (g_dprof > 0) g_dprof_last = tk();
     {   /* TEST (SSBU_VK_UILOG): the state of the draws into the window texture in the logged frame */
         static int uil = -2; if (uil == -2) uil = getenv("SSBU_VK_UILOG") ? atoi(getenv("SSBU_VK_UILOG")) : -1;
         Tex *c0 = R.ncol ? R.col[0].tex : NULL;
@@ -3147,6 +3177,7 @@ static int draw_prepare(unsigned prim) {
     if (vs) { uint32_t need = fs ? fs->in_attr & ~(vs->out_attr & ~vs->fo) : 0; if (need != vs->fo) vs = vstage_get(R.prog[0], 0, key0, need); }
     if (g_skip_flag) { g_skip_flag = 0; if (!vs || (!depth_only && !fs)) return 0; }      /* shader_wait = skip: the draw is left out (counted in vstage_get) */
     if (!vs || (!depth_only && !fs)) { nvn_vk_missing("a draw whose vertex or fragment stage could not be translated or compiled (the log names the stage)"); return 0; }
+    DPROF(0);
     {   static int uil = -2; if (uil == -2) uil = getenv("SSBU_VK_UILOG") ? atoi(getenv("SSBU_VK_UILOG")) : -1;      /* TEST: the window texture's draws: their stages */
         Tex *c0 = R.ncol ? R.col[0].tex : NULL;
         if (uil > 0 && g_battle_frames == uil && c0 && wintex_is(c0)) {
@@ -3166,6 +3197,7 @@ static int draw_prepare(unsigned prim) {
     bx_scan(0, vs); if (fs) bx_scan(1, fs);
     resolve_stage(0, vs);
     if (fs) resolve_stage(1, fs);
+    DPROF(1);
     /* 2. buffers: every range the draw reads, into the ring (may wrap the ring = submit) */
     static BufRef bufs[80];
     int nbuf = 0;
@@ -3204,6 +3236,7 @@ static int draw_prepare(unsigned prim) {
     }
     if (nvn_front_draw_tag()) { memcpy(g_dt_voff, voff, sizeof g_dt_voff); memcpy(g_dt_vb, vbufs, sizeof g_dt_vb); }      /* round 17, test (SSBU_DRAWTAG) */
     R.cb_draws += from_cb;
+    DPROF(2);
     /* 3. pass and pipeline */
     if (!pass_begin()) return 0;
     PKey k;
@@ -3224,6 +3257,7 @@ static int draw_prepare(unsigned prim) {
     if (D.has_eds3 && (R.dyn3_dirty || R.dyn3_samples != k.samples)) { set_dynamic_state3(k.samples); R.dyn3_dirty = 0; }
     if (g_topo_last != (int)topo[prim]) { vkCmdSetPrimitiveTopology(R.cmd, (VkPrimitiveTopology)topo[prim]); g_topo_last = (int)topo[prim]; }
     vkCmdSetPrimitiveRestartEnable(R.cmd, R.restart && ((D.has_plr && !(g_vk_test & 16)) || prim == 3 || prim == 5 || prim == 6));      /* SSBU_VK_TEST bit 16 (session 14, test): no restart in list topologies */
+    DPROF(3);
     /* 4. vertex input */
     {
         VkVertexInputBindingDescription2EXT bd[17];
@@ -3273,6 +3307,7 @@ static int draw_prepare(unsigned prim) {
         if (nb) vkCmdBindVertexBuffers(R.cmd, 0, nb, vb, vo);
         }
     }
+    DPROF(4);
     /* 5. descriptors */
     {
         static VkWriteDescriptorSet w[220];
@@ -3333,6 +3368,7 @@ static int draw_prepare(unsigned prim) {
             vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 1, 1, &sets[1], 0, NULL);
         }
     }
+    DPROF(5);
     {   uint32_t pc[4] = {(uint32_t)R.alpha_func, 0, 0, 0};
         memcpy(&pc[1], &R.alpha_ref, 4); memcpy(&pc[2], &R.point_size, 4);
         if (RS_ON) {                               /* track O: mx_fcs = game pixels per image pixel of this pass (fragment stages translated with screen_scale); points shrink with the image */
@@ -3341,6 +3377,7 @@ static int draw_prepare(unsigned prim) {
         }
         vkCmdPushConstants(R.cmd, p->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
     }
+    if (g_dprof > 0) { dprof_mark(6); dprof_draw_done(); }
     return 1;
 }
 
