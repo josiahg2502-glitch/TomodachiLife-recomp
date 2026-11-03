@@ -524,6 +524,16 @@ static void os_StartThread(Ctx *c) {
     }
     if (o->thread) { SetThreadPriority(o->thread, host_priority(o->priority)); apply_sched(o->thread, o->core_mask, o->priority); ResumeThread(o->thread); }
 }
+void os_name_this_thread(const char *name) {         /* host threads the game did not make (guest main, render) get a name for profilers too */
+#ifdef _WIN32
+    typedef HRESULT (WINAPI *set_desc_t)(HANDLE, PCWSTR);
+    set_desc_t set_desc = (set_desc_t)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription");
+    wchar_t w[64];
+    if (set_desc && MultiByteToWideChar(CP_UTF8, 0, name, -1, w, 64) > 0) set_desc(GetCurrentThread(), w);
+#else
+    (void)name;
+#endif
+}
 /* boot.c, on the main guest thread before the game starts: main.npdm gives it core 0 and priority 44 - 28 = 16 */
 void os_apply_main_sched(void) {
     if (!console_cores()) return;

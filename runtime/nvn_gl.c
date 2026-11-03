@@ -1082,6 +1082,7 @@ static DWORD WINAPI ww_scan_thread(LPVOID arg) {
     }
     return 0;
 }
+#define WW_SKIP (~0ull)                              /* a batch's ww_seq when it reads no guest memory (batch_state_only): no scan */
 static uint64_t ww_scan_request(void) {             /* game thread, at a submission: 0 = the render thread scans itself */
     if (g_wws_sync < 0) g_wws_sync = getenv("TOMO_WW_SYNC") != NULL || getenv("SSBU_NO_WRITEWATCH") != NULL;
     if (g_wws_sync) return 0;
@@ -4116,14 +4117,19 @@ void nvn_gl_lists_pool_gone(uint64_t pool) { list_invalidate(pool, 0, ~0ull >> 1
 /* Render thread, once per frame: drop the lists whose memory the game reused or released (a few frames later: replays queued
  * before the reuse still run), those of a finalized handle, and lists without known memory after two seconds unused. Above
  * 1 GB of recorded lists the ones unused for 20 seconds go too (shortcut: a guard against a game that never reuses its
- * command memory; raise TOMO_LIST_CAP_MB if a model then disappears). */
+ * command memory; raise TOMO_LIST_CAP_MB if a model then disappears). An eighth of the table a frame: with 70 Miis it holds
+ * ~150,000 lists and the whole walk, under the lock the game's threads record with, was 6 % of the render thread. */
 static void list_collect(void) {
     static LONG64 cap = -1;
+    static int pos;                                       /* where the last call stopped */
     if (cap < 0) g_listlog_dbg = getenv("TOMO_LISTLOG") != NULL;
     if (cap < 0) cap = (getenv("TOMO_LIST_CAP_MB") ? _atoi64(getenv("TOMO_LIST_CAP_MB")) : 1024) << 20;
     AcquireSRWLockExclusive(&g_list_lock);
-    int over = g_list_bytes > cap;
-    for (int i = 0; i < g_list_count; i++) {
+    int over = g_list_bytes > cap, n = g_list_count / 8 > 4096 ? g_list_count / 8 : 4096;
+    if (n > g_list_count) n = g_list_count;
+    for (int k = 0; k < n; k++) {
+        if (pos >= g_list_count) pos = 0;
+        int i = pos++;
         List *l = &g_lists[i];
         if (!l->data) continue;
         LONG64 last = l->used >= 0 ? l->used : l->created;
@@ -4225,6 +4231,8 @@ static Tex *tex_scratch(Tex *t) {
     pf_add(PF_FEEDBACK, pf0);
     return sc;
 }
+static LONG64 g_fb_barriers;        /* texture barriers issued by feedback_guard (nvn_perf "feedback barriers") */
+static int g_col_level[8], g_ncol;  /* set_targets: the level each colour target draws into, and how many are bound */
 static uint64_t g_fb_saved[6][32];
 static uint32_t g_fb_mask[6];
 static int g_fb_active;
@@ -4327,15 +4335,17 @@ static void feedback_guard(void) {
             for (uint32_t m = units_sampled(s), u = 0; m; m >>= 1, u++) {
                 Tex *t, *sc;
                 if (!(m & 1) || !(t = unit_tex(s, u)) || t->dead) continue;
-                int col = 0, hit = t == S.depth_tex;
-                for (int i = 0; i < 8 && !hit; i++) hit = col = t == S.color[i];
+                int ci = -1, hit = t == S.depth_tex;
+                for (int i = 0; i < 8 && !hit; i++) if (t == S.color[i]) { hit = 1; ci = i; }
                 if (!hit) continue;
-                /* A 2D colour target its own draw samples: the draw reads a copy made just before it. The barrier orders draws
-                 * only; texels the same draw writes are undefined to read in GL (the Mii face pictures, 128x128 with mips, are
-                 * drawn this way every frame). The copies go with the spare targets (tex_take_spare), ~0.01 ms a frame. Cube
-                 * and array mip chains (each level drawn from the one before) keep the barrier. (Tried 2026-11-01 for the
-                 * centre line in Melissa's room: not its cause.) */
-                if (col && t->b.target == 1 && !feedback_copy_mode() && (sc = tex_scratch(t)) != NULL) {
+                /* A 2D colour target its own draw samples reads a copy made just before the draw only when it is the draw's
+                 * one target at level 0: the refraction pass reads the picture at displaced positions, texels the same draw
+                 * writes (undefined in GL). The rest needs only what earlier draws wrote, which the barrier gives: mip chains
+                 * (level n drawn from the ones below: the face pictures, the blur chain) and the Mii body pass, which draws
+                 * two targets and reads its own pixel of the second (blue: a mask it discards on; blue and alpha written back
+                 * unchanged). Its copies, one of the 1080p target per draw, stalled the GPU ~70 us each: with 70 Miis frames
+                 * of 17.7-21 ms against 16.7 with barriers (A/B 2026-11-02). */
+                if (ci >= 0 && t->b.target == 1 && !feedback_copy_mode() && !g_col_level[ci] && g_ncol == 1 && (sc = tex_scratch(t)) != NULL) {
                     View v; SamplerParams p; Tex *t2;
                     int hs = handle_lookup(S.tpool, S.spool, S.nvn_tex[s][u], &t2, &v, &p);
                     uint32_t dims[4] = {0, 0, 0, 0};
@@ -4351,6 +4361,7 @@ static void feedback_guard(void) {
                 if (!said++) printf("nvn_gl: feedback: a draw samples its own render target (texture target %d %dx%d format 0x%x): a texture barrier before each such draw (TOMO_FEEDBACK_COPY=1 samples a copy instead)\n", t->b.target, t->b.width, t->b.height, t->b.format);
             }
         }
+        if (barrier_done) g_fb_barriers++;
         return;
     }
     for (int s = 0; s < 5; s++) {
@@ -4659,7 +4670,7 @@ static void set_targets(int n, const TargetRef *col, const TargetRef *depth) {
     if (g_bcsh_n) { HS_IN("render targets: compressed targets copied in (bc_flush)", 0); bc_flush(); HS_OUT(); }      /* what was drawn into compressed textures goes into them now */
     memset(&k, 0, sizeof k);
     S.have_fbo = 0; S.color0 = NULL; S.depth_tex = NULL; S.fbo_w = S.fbo_h = 0;
-    memset(S.color, 0, sizeof S.color);
+    memset(S.color, 0, sizeof S.color); g_ncol = 0;
     HS_IN("render targets: textures (made, spare, cleared, aliases pulled, views)", 0);
     for (int i = 0; i < n && i < 8; i++) {
         Tex *t = col[i].tex;
@@ -4668,6 +4679,7 @@ static void set_targets(int n, const TargetRef *col, const TargetRef *depth) {
         alias_pull(t);
         t->gpu_written = 1; t->rt_gen++; rt_alias_note(t);
         k.layer[i] = -1;
+        g_col_level[i] = (col[i].view.set & 0x81) == 0x81 ? col[i].view.lvl0 : 0; g_ncol++;
         if (layered_rt(t, &col[i].view)) {
             k.color[i] = t->o.gl;
             k.layer[i] = (col[i].view.set & 0x82) == 0x82 ? col[i].view.lay0 : 0;
@@ -4805,7 +4817,32 @@ static int vb_direct_on(void) { static int on = -1; if (on < 0) on = !(getenv("T
  * ones and the highest slot used answer most of them at once.) */
 static uint64_t g_cbuf_lo = ~0ull, g_cbuf_hi;
 static int g_cbuf_top;
-static void cbuf_none(void) { g_cbuf_live = 0; g_cbuf_lo = ~0ull; g_cbuf_hi = 0; g_cbuf_top = 0; }
+/* The pages of the live ones, hashed: whether a draw's ranges can touch one at all. With 70 Miis a batch holds ~100 (a
+ * 16-byte visibility flag per object the occlusion pass tests) and every draw compared each of its ranges with each of them:
+ * 1.2 ms a frame. A live buffer over 256 pages, or too many pages, turns it off until the batch ends (g_cbp_all). */
+#define CBP_N 4096
+static struct { uint64_t page; uint32_t gen; } g_cbp[CBP_N];
+static uint32_t g_cbp_gen = 1;
+static int g_cbp_used, g_cbp_all;
+static void cbp_add(uint64_t addr, uint64_t size) {
+    uint64_t first = addr >> 12, last = (addr + (size ? size : 1) - 1) >> 12;
+    if (g_cbp_all || last - first >= 256 || g_cbp_used + (int)(last - first) >= CBP_N / 2) { g_cbp_all = 1; return; }
+    for (uint64_t pg = first; pg <= last; pg++) {
+        unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ULL) >> 52);
+        while (g_cbp[h].gen == g_cbp_gen && g_cbp[h].page != pg) h = (h + 1) & (CBP_N - 1);
+        if (g_cbp[h].gen != g_cbp_gen) { g_cbp[h].page = pg; g_cbp[h].gen = g_cbp_gen; g_cbp_used++; }
+    }
+}
+static int cbp_maybe(Range r) {                       /* 0: no live buffer shares a page with the range */
+    if (!r.addr || !r.size) return 0;
+    uint64_t first = r.addr >> 12, last = (r.addr + r.size - 1) >> 12;
+    if (g_cbp_all || last - first > 64) return 1;
+    for (uint64_t pg = first; pg <= last; pg++)
+        for (unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ULL) >> 52); g_cbp[h].gen == g_cbp_gen; h = (h + 1) & (CBP_N - 1))
+            if (g_cbp[h].page == pg) return 1;
+    return 0;
+}
+static void cbuf_none(void) { g_cbuf_live = 0; g_cbuf_lo = ~0ull; g_cbuf_hi = 0; g_cbuf_top = 0; g_cbp_gen++; g_cbp_used = 0; g_cbp_all = 0; }
 static CBuf *cbuf_holding(uint64_t addr, uint64_t size) {
     if (addr < g_cbuf_lo || addr + size > g_cbuf_hi) return NULL;
     for (int k = 0; k < g_cbuf_top; k++) if (g_cbuf[k].live && addr >= g_cbuf[k].addr && addr + size <= g_cbuf[k].addr + g_cbuf[k].size) return &g_cbuf[k];
@@ -4945,8 +4982,14 @@ static int draw_prepare(void) {
             um[st] = !p ? 0 : p->st[st].glsl_state == 1 ? (p->st[st].glsl_cbufs >> 3) & 0xffff : 0xffff;
             sm[st] = !p ? 0 : p->st[st].glsl_state == 1 ? p->st[st].glsl_ssbos & 0xffff : 0xffff;
         }
+        int maybe = cbp_maybe(g_draw_ibuf);
+        for (uint32_t m = vm, i = 0; m && !maybe; m >>= 1, i++) maybe = (m & 1) && cbp_maybe(S.vbuf[i]);
+        for (int st = 0; st < 5 && !maybe; st++) {
+            for (uint32_t m = um[st], n = 0; m && !maybe; m >>= 1, n++) maybe = (m & 1) && cbp_maybe(S.ubo[st][n]);
+            for (uint32_t m = sm[st], n = 0; m && !maybe; m >>= 1, n++) maybe = (m & 1) && cbp_maybe(S.ssbo[st][n]);
+        }
         #define OVL(r) ((r).addr && (r).addr < a + z && a < (r).addr + (r).size)
-        for (int k = 0; k < CBUF_N && !hit; k++) {
+        for (int k = 0; k < g_cbuf_top && maybe && !hit; k++) {
             if (!g_cbuf[k].live) continue;
             uint64_t a = g_cbuf[k].addr, z = g_cbuf[k].size;
             hit = OVL(g_draw_ibuf);
@@ -5163,8 +5206,10 @@ static int draw_prepare(void) {
         for (int i = 0; i < 16; i++) mask |= (uint32_t)(S.attr_enabled[i] != 0) << i;
         prec_note(pn_vs, pn_fs, pn_empty, mask & S.prog[0]->st[0].glsl_dep);
     }
+    uint32_t streams = 0;                          /* only the streams an enabled attribute reads: the game leaves others bound */
+    for (int i = 0; i < 16; i++) if (S.attr_enabled[i]) streams |= 1u << ((S.vattr[i] >> 8) & 31);
     for (int i = 0; i < 16; i++)
-        if (S.vbuf[i].addr && S.vbuf[i].size) {
+        if ((streams >> i & 1) && S.vbuf[i].addr && S.vbuf[i].size) {
             CBuf *cb = g_cbuf_live && vb_direct_on() ? cbuf_holding(S.vbuf[i].addr, S.vbuf[i].size) : NULL;
             GLuint vbo = g_arena_buf;
             size_t off;
@@ -5490,6 +5535,7 @@ static CBuf *cbuf_get(uint64_t addr, uint64_t size) {
     b->snap = realloc(b->snap, (size_t)size); if (b->snap) memcpy(b->snap, P(addr), (size_t)size);
     b->addr = addr; b->size = size; b->live = 1; b->dirty = 0; b->frag = 0;
     g_cbuf_live++;
+    cbp_add(addr, size);
     if (addr < g_cbuf_lo) g_cbuf_lo = addr;
     if (addr + size > g_cbuf_hi) g_cbuf_hi = addr + size;
     if ((int)(b - g_cbuf) >= g_cbuf_top) g_cbuf_top = (int)(b - g_cbuf) + 1;
@@ -7224,7 +7270,7 @@ static void job_submit(void *arg) {
     g_serial++;
     g_arena_gen++;                               /* guest memory may have changed since the last batch */
     { HS_IN("batch start: write watch scan (waited for), lists, decoded levels", 0);
-    ww_scan_apply(j->ww_seq);                     /* which: the arena keeps what nobody wrote */
+    if (j->ww_seq != WW_SKIP) ww_scan_apply(j->ww_seq);      /* which: the arena keeps what nobody wrote */
     bl_update();
     dec_land();
     HS_OUT(); }
@@ -7444,6 +7490,8 @@ static void pf_frame_mark(LONG64 frame) {
                 if (g_bar[i].n - bsnapn[i]) printf(" %s %.2f (%.1f)", g_bar[i].who, (double)(g_bar[i].ticks - bsnap[i]) * 1000.0 / (double)freq / 300.0, (double)(g_bar[i].n - bsnapn[i]) / 300.0);
                 bsnap[i] = g_bar[i].ticks; bsnapn[i] = g_bar[i].n;
             }
+            static LONG64 fbsnap;
+            printf(" feedback barriers (%.1f)", (double)(g_fb_barriers - fbsnap) / 300.0); fbsnap = g_fb_barriers;
         }
         snap[k] = t; snapn[k] = c;
     }
@@ -7942,7 +7990,11 @@ static void render_loop(void) {
             HANDLE done = j->done;
             if (g_rb->idle) g_rb->idle();
             g_hitch_rt = j->fn == g_rb->submit || j->fn == g_rb->submit_async ? "submitted commands (outside the named scopes)" : j->fn == g_rb->present ? "present (blit)" : j->fn == g_rb->sync_wait ? "SyncWait job" : "other job (texel read/write, finish, barrier, ...)";
+            int jl = g_joblog_frame > 0 && g_joblog_cur >= g_joblog_frame && g_joblog_cur < g_joblog_frame + 3;      /* SSBU_JOBLOG: the render thread's side too */
+            LONG64 jt0 = jl ? pf_now() : 0, jd0 = g_st.draws, jc0 = g_st.compute_bytes;
+            if (jl) joblog(j->fn, jt0);
             j->fn(j->arg);                       /* a member of g_rb (seam step S2), or a job of the front end / of the back end itself */
+            if (jl) printf("joblog:   ran %.3f ms, %lld draws, %lld bytes of compute results%c", (double)(pf_now() - jt0) * 1000.0 / 1e7, (long long)(g_st.draws - jd0), (long long)(g_st.compute_bytes - jc0), 10);
             g_hitch_rt = "idle";
             if (done) SetEvent(done); else { free(j); InterlockedDecrement(&g_async_pending); }      /* gl_post: nobody waits */
         }
@@ -7952,6 +8004,7 @@ static void render_loop(void) {
 static DWORD WINAPI render_thread(LPVOID arg) {
     (void)arg;
     pf_job_submit = g_rb->submit; pf_job_present = g_rb->present;
+    { void os_name_this_thread(const char *); os_name_this_thread("render"); }
     g_joblog_frame = getenv("SSBU_JOBLOG") ? atoi(getenv("SSBU_JOBLOG")) : 0;
     { void display_perf_host_thread(void); display_perf_host_thread(); }        /* display.c: performance cores the game's threads do not hold */
 #ifdef _WIN32
@@ -8961,6 +9014,25 @@ void nvn_front_racechk(const uint64_t *handles, int count, int phase) {      /* 
 
 /* ---- queue and window */
 static void l1_pipe_after_submit(void); static int l1_pipe_wait(void);
+/* A batch that only names the texture and sampler pools reads no guest memory: no write-watch scan for it. The island submits
+ * two such batches a frame next to the big one, and each waited for a full scan (2 ms over 800 MB with 70 Miis): 2-4 ms of
+ * every frame's render thread. TOMO_WW_SKIPEMPTY=0: a scan for every batch, as before. */
+static int batch_state_only(const uint64_t *handles, int count) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("TOMO_WW_SKIPEMPTY") && getenv("TOMO_WW_SKIPEMPTY")[0] == '0');
+    if (!on) return 0;
+    for (int i = 0; i < count; i++) {
+        size_t len = 0;
+        const uint8_t *data = list_lookup(handles[i], &len);
+        if (!data) return 0;
+        for (size_t off = 0; off + sizeof(Cmd) <= len;) {
+            const Cmd *m = (const Cmd *)(data + off);
+            if (m->size < sizeof(Cmd) || (m->op != OP_NOP && m->op != OP_TEXPOOL && m->op != OP_SMPPOOL)) return 0;
+            off += m->size;
+        }
+    }
+    return 1;
+}
 static void queue_submit(Ctx *c) {                      /* (queue, count, handles) */
     SubmitJob j = {(int)A1, P(A2), 0};
     L1T("SUBMIT %d lists: %llx %llx %llx %llx", (int)A1, A2 && A1 > 0 ? (unsigned long long)rd64(A2) : 0ull, A2 && A1 > 1 ? (unsigned long long)rd64(A2 + 8) : 0ull, A2 && A1 > 2 ? (unsigned long long)rd64(A2 + 16) : 0ull, A2 && A1 > 3 ? (unsigned long long)rd64(A2 + 24) : 0ull);
@@ -8991,9 +9063,9 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
     int r1_ra_quiet(void);
     if (j.count > 0 && A2 && r1_ra_quiet()) { static LONG64 n; n++; }      /* R1 round 5, run-ahead: the real pass's submission = the lists the speculative pass already ran on the GPU: not run again */
     else if (j.count > 0 && A2) {
-        if (g_rb == &rb_gl) j.ww_seq = ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now */
+        if (g_rb == &rb_gl) j.ww_seq = batch_state_only(j.handles, j.count) ? WW_SKIP : ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now */
         if (gl_async_on() && j.count <= 4096) {
-            if (g_rb == &rb_gl && snap_on()) j.snap = snap_begin();
+            if (g_rb == &rb_gl && snap_on() && j.ww_seq != WW_SKIP) j.snap = snap_begin();
             size_t size = sizeof j + (size_t)j.count * 8;
             SubmitJob *copy = malloc(size);
             *copy = j;
