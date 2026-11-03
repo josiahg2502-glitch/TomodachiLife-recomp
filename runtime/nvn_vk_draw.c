@@ -1303,7 +1303,11 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n);
 static VkSampler sampler_get(const SamplerParams *p) {
     static const VkSamplerAddressMode wrap[8] = {VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE,
                                                  VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
-    unsigned hk = (unsigned)fnv(0xcbf29ce484222325ULL, p, sizeof *p) & 4095;
+    typedef char smp_params_are_48_bytes[sizeof *p == 48 ? 1 : -1];
+    uint64_t w[6], hw = 0x9E3779B97F4A7C15ull;      /* 8 bytes a step: fnv's byte steps were 5 % of the render thread at every sampler of every draw (in-memory table only) */
+    memcpy(w, p, sizeof w);
+    for (int i = 0; i < 6; i++) hw = (hw ^ w[i]) * 0xBF58476D1CE4E5B9ull;
+    unsigned hk = (unsigned)(hw >> 52);
     if (g_smp_hash[hk] && !memcmp(&g_smp[g_smp_hash[hk] - 1].p, p, sizeof *p)) return g_smp[g_smp_hash[hk] - 1].s;
     for (int i = 0; i < g_nsmp; i++) if (!memcmp(&g_smp[i].p, p, sizeof *p)) { g_smp_hash[hk] = (uint16_t)(i + 1); return g_smp[i].s; }
     VkSamplerCreateInfo ci = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
