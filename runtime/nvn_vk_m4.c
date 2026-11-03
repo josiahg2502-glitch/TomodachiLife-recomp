@@ -1661,6 +1661,10 @@ static void prewarm_start(void) {
         VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
         void *data = NULL;
         snprintf(g_pcache_path, sizeof g_pcache_path, "%s/pipelines_%04x_%04x_%08x.bin", vkc_dir(), (unsigned)V.props.vendorID, (unsigned)V.props.deviceID, (unsigned)V.props.driverVersion);
+        {   char tmp[176];                         /* a save that a run ended in the middle of (pcache_write) is never complete: 7.5 GB left behind once */
+            snprintf(tmp, sizeof tmp, "%s.tmp", g_pcache_path);
+            DeleteFileA(tmp);
+        }
         LONG64 tp0 = tk(), tp1;
         LARGE_INTEGER pfq; QueryPerformanceFrequency(&pfq);
         FILE *fp = fopen(g_pcache_path, "rb");
