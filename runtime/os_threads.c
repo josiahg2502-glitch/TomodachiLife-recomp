@@ -391,6 +391,8 @@ static void sample_report(FILE *out) {
 void dump_guest_threads(FILE *out) {
     sample_report(out);
     fprintf(out, "\nguest threads (last function entered, link register):\n");
+    if (g_smp_main) fprintf(out, "  %-20s running   f_%llx  lr=%llx  %s%s (from %llx)\n", "(main thread)", (unsigned long long)g_smp_main->fn, (unsigned long long)g_smp_main->x[30],
+                            g_smp_main->in_import ? "in " : "", g_smp_main->in_import ? g_smp_main->in_import : "guest code", (unsigned long long)g_smp_main->import_from);
     for (int i = 0; i < g_threads_n && i < 256; i++) {
         Obj *o = g_threads[i].o;
         Ctx *c = g_threads[i].c;

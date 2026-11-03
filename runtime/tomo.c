@@ -1397,6 +1397,7 @@ static int mem_copy(uint64_t p, void *buf, size_t n) {
 #endif
 }
 static ImportFn g_try_alloc;
+static ULONGLONG g_loadlog_t0;
 const char *guest_thread_name_of(DWORD tid);               /* os_threads.c */
 static const char *heap_name(uint64_t heap) {
     uint64_t np = rd64(heap + 0x20);
@@ -1439,6 +1440,38 @@ static void heaplog_try_alloc(Ctx *c, void *user) {
            (unsigned long long)heap, (unsigned long long)rd64(heap + 0x30), (unsigned long long)size, (int)(int32_t)A2, (unsigned long long)from, tn ? tn : "?");
     heap_list_report(heap, heap + 0xd0, "free");
     heap_list_report(heap, heap + 0xf0, "used");
+}
+/* TOMO_HEAPLOG: operator new (size, heap, alignment) [update 0x710038f530] has the ExpHeap path inlined, so its failures
+ * do not reach tryAlloc: logged here (heap 0 = the thread's current heap) */
+static ImportFn g_op_new;
+static void heaplog_op_new(Ctx *c, void *user) {
+    (void)user;
+    uint64_t size = A0, heap = A1, from = c->x[30];
+    int align = (int)(int32_t)A2;
+    g_op_new(c);
+    static int said;
+    if (c->x[0] || said++ >= 40) return;
+    const char *tn = guest_thread_name_of(GetCurrentThreadId());
+    printf("heaplog: operator new: %.40s (heap %llx, size 0x%llx) could not give 0x%llx bytes (alignment %d), called from %llx on %s\n", heap ? heap_name(heap) : "the current heap",
+           (unsigned long long)heap, (unsigned long long)(heap ? rd64(heap + 0x30) : 0), (unsigned long long)size, align, (unsigned long long)from, tn ? tn : "?");
+    if (heap) { heap_list_report(heap, heap + 0xd0, "free"); heap_list_report(heap, heap + 0xf0, "used"); }
+}
+/* TOMO_LOADLOG=1 (diagnosis): the game's resource load [update 0x710021c874] (x0, load arg: path pointer first, factory,
+ * int *result): every call with its path, result and thread, ms since start (the first 4000) */
+static ImportFn g_res_load;
+static void loadlog_res_load(Ctx *c, void *user) {
+    (void)user;
+    uint64_t arg = A1, outp = A3, from = c->x[30];
+    char path[128] = "?";
+    uint64_t pp = arg > 0x10000 ? rd64(arg) : 0;
+    if (pp && mem_copy(pp, path, sizeof path - 1)) path[sizeof path - 1] = 0; else strcpy(path, "?");
+    g_res_load(c);
+    static volatile LONG n;
+    if (InterlockedIncrement(&n) > 4000) return;
+    const char *tn = guest_thread_name_of(GetCurrentThreadId());
+    int32_t res = 0;
+    if (outp > 0x10000) res = (int32_t)rd32(outp);
+    printf("loadlog: %llu ms %s -> %llx (result %d) from %llx on %s\n", (unsigned long long)(GetTickCount64() - g_loadlog_t0), path, (unsigned long long)c->x[0], res, (unsigned long long)from, tn ? tn : "main");
 }
 /* TOMO_TASKLOG=1 (diagnosis): the scene start-up's task step [game 0x71005e1ffc] (task): every change of a task's state
  * (+0x10) or sub-state (+0x68), with its method table */
@@ -1897,8 +1930,10 @@ static void heaplog_install(void) {
     if (!(getenv("TOMO_PICKLOG") && getenv("TOMO_PICKLOG")[0] == '0') && g_main.text_size == 0x256d250)
         printf("picklog: line log hook %s\n", hook_install(0x71004bbb20ull, pick_log, NULL, &g_pick_orig) ? "installed" : "NOT installed");
     if (getenv("TOMO_TASKLOG")) printf("tasklog: hook %s\n", tomo_hook(0x71005e1ffcull, tasklog_step, &g_task_step) ? "installed" : "NOT installed");
+    if (getenv("TOMO_LOADLOG") && g_main.text_size == 0x256d250) { g_loadlog_t0 = GetTickCount64(); printf("loadlog: hook %s\n", hook_install(0x710021c874ull, loadlog_res_load, NULL, &g_res_load) ? "installed" : "NOT installed"); }
     if (!getenv("TOMO_HEAPLOG")) return;
     printf("heaplog: hook %s\n", tomo_hook(0x71001e68c0ull, heaplog_try_alloc, &g_try_alloc) ? "installed" : "NOT installed");
+    if (g_main.text_size == 0x256d250) printf("heaplog: operator new hook %s\n", hook_install(0x710038f530ull, heaplog_op_new, NULL, &g_op_new) ? "installed" : "NOT installed");
 }
 
 /* TEST ONLY, TOMO_MEMSCAN=<step>:<op>,... with SSBU_SEQ: a search for a game value that follows the input (the hand cursor).
