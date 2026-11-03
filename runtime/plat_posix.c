@@ -1307,6 +1307,12 @@ BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX *m) {
     if (sysinfo(&s)) return FALSE;
     m->ullTotalPhys = (ULONGLONG)s.totalram * s.mem_unit;
     m->ullAvailPhys = (ULONGLONG)(s.freeram + s.bufferram) * s.mem_unit;
+    {   FILE *f = fopen("/proc/meminfo", "r");      /* MemAvailable counts the page cache that can be given back, as Windows' figure does */
+        char ln[128];
+        unsigned long long kb;
+        while (f && fgets(ln, sizeof ln, f)) if (sscanf(ln, "MemAvailable: %llu kB", &kb) == 1) { m->ullAvailPhys = (ULONGLONG)kb << 10; break; }
+        if (f) fclose(f);
+    }
     m->ullTotalPageFile = m->ullTotalPhys + (ULONGLONG)s.totalswap * s.mem_unit;
     m->ullAvailPageFile = m->ullAvailPhys + (ULONGLONG)s.freeswap * s.mem_unit;
 #endif

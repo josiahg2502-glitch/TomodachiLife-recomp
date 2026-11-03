@@ -40,6 +40,7 @@ static volatile LONG64 g_wd_beat;                  /* QueryPerformanceCounter of
 static volatile LONG g_wd_where;                   /* the render thread's place in a present (1 barrier, 2 acquire, 4 present) */
 static volatile LONG g_pcsave_want;                /* see pcache_save_at */
 static void pcache_save_at(int where, int marker);
+static int g_pc_had_data;                          /* the pipeline cache file read at start was not empty */
 static volatile LONG64 g_wd_try;                 /* present attempts (one that failed or was skipped counts here, not in g_wd_beat) */
 static int wd_enter(const char *fn, int line) {
     LARGE_INTEGER t; QueryPerformanceCounter(&t);
@@ -911,6 +912,27 @@ static LONG64 g_prep_t0, g_prep_t1, g_prep_vars, g_prep_fight_frames, g_boosts;
 static int g_prep_nfiles, g_prep_read, g_prep_bad;
 static void prep_start(void);
 static void prep_line(const char *what);
+/* Variations made before a draw needs them (the preparation's, the container scan's) keep every stage library in memory.
+ * lavapipe (WSL, 12 GB) went from 0.7 to 11.4 GB in 60 s on the 7224 variations of the largest container, and the game's
+ * own resource loads then failed (2026-11-03). While less than a fifth of the RAM (at least 3 GB) is available, that work
+ * is left out: a draw makes what it needs when it needs it. Asked at most every 0.1 s. */
+static LONG64 g_mem_dropped;
+static int mem_short(void) {
+    static volatile LONG64 last;
+    static volatile LONG is, said;
+    LONG64 now = (LONG64)GetTickCount64();
+    if (now - last >= 100) {
+        MEMORYSTATUSEX ms;
+        ms.dwLength = sizeof ms;
+        last = now;
+        if (GlobalMemoryStatusEx(&ms)) {
+            ULONGLONG keep = ms.ullTotalPhys / 5 > (3ull << 30) ? ms.ullTotalPhys / 5 : (3ull << 30);
+            is = ms.ullAvailPhys < keep;
+            if (is && !InterlockedExchange(&said, 1)) { printf("nvn_vk: memory is short (%llu MB of %llu MB available): shader variations are no longer made before a draw needs them\n", (unsigned long long)(ms.ullAvailPhys >> 20), (unsigned long long)(ms.ullTotalPhys >> 20)); fflush(stdout); }
+        }
+    }
+    return is;
+}
 static void job_push_prep(Job *j) {                /* g_sh_lock held; j->prep set by the caller: 1 into memory, 2 into the cache only */
     j->next = NULL;
     if (j->prep == 1) g_pk_queued++;
@@ -1540,6 +1562,16 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
         if (j && j->kind == 1 && j->pipe->state == 0) { p = j->pipe; p->state = 1; }
         LeaveCriticalSection(&g_sh_lock);
         if (!j) break;
+        if ((bg == 2 || (bg == 1 && j->kind == 0)) && mem_short()) {      /* a container's variation, made ahead: not while memory is short */
+            int pk = j->prep == 1;
+            free(j);
+            EnterCriticalSection(&g_sh_lock);
+            g_mem_dropped++;
+            if (bg == 2) { g_pq_done++; g_pq_running--; if (pk) g_pk_done++; } else g_bq_done++;
+            WakeAllConditionVariable(&g_sh_cv);
+            LeaveCriticalSection(&g_sh_lock);
+            continue;
+        }
         if (bg == 2) {                             /* the preparation runs BELOW everything of the game: below normal in menus, lowest in a fight */
             int want = g_prep_urgent ? THREAD_PRIORITY_NORMAL : g_in_fight ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_BELOW_NORMAL;
             SetThreadPriority(GetCurrentThread(), want); prio = -99;      /* set again at the next job (workers_boost may have changed it meanwhile) */
@@ -1667,10 +1699,11 @@ static void prewarm_start(void) {
         }
         LONG64 tp0 = tk(), tp1;
         LARGE_INTEGER pfq; QueryPerformanceFrequency(&pfq);
-        FILE *fp = fopen(g_pcache_path, "rb");
+        FILE *fp = V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? NULL : fopen(g_pcache_path, "rb");      /* a CPU device (lavapipe): no file, see pcache_save_at */
         if (fp) { _fseeki64(fp, 0, SEEK_END); long long n = _ftelli64(fp); _fseeki64(fp, 0, SEEK_SET); if (n > 0 && (data = malloc((size_t)n)) && fread(data, 1, (size_t)n, fp) == (size_t)n) { ci.initialDataSize = (size_t)n; ci.pInitialData = data; } fclose(fp); }
         tp1 = tk();
         if (vkCreatePipelineCache(V.device, &ci, NULL, &g_pcache) != VK_SUCCESS) { ci.initialDataSize = 0; ci.pInitialData = NULL; VKC(vkCreatePipelineCache(V.device, &ci, NULL, &g_pcache)); }
+        g_pc_had_data = ci.initialDataSize > 0;
         /* session 11: what the whole-file read costs at every start (file read, then the driver taking the data) */
         printf("nvn_vk: pipeline cache %s: %llu KB read (file read %.0f ms, driver took it in %.0f ms: start-up time on the thread that creates the device)\n", g_pcache_path, (unsigned long long)(ci.initialDataSize >> 10), (double)(tp1 - tp0) * 1000.0 / (double)pfq.QuadPart, (double)(tk() - tp1) * 1000.0 / (double)pfq.QuadPart);
         free(data);
@@ -1842,6 +1875,7 @@ static void m4_report(void) {
                (long long)g_fb_hit[0], (long long)g_fb_miss[0], (double)g_fb_miss_ns[0] / 1e6, (long long)g_fb_none[0], (long long)g_fb_hit[1], (long long)g_fb_miss[1], (double)g_fb_miss_ns[1] / 1e6, (long long)g_fb_none[1],
                (long long)g_fb_fhit[0], (double)g_fb_fhit_tk[0] * q2, (long long)g_fb_fmiss[0], (double)g_fb_fmiss_tk[0] * q2, (long long)g_fb_fhit[1], (double)g_fb_fhit_tk[1] * q2, (long long)g_fb_fmiss[1], (double)g_fb_fmiss_tk[1] * q2);
     }
+    if (g_mem_dropped) printf("nvn_vk: %lld shader variations were left out while memory was short (mem_short); their draws made them\n", (long long)g_mem_dropped);
     if (D.has_gpl) printf("nvn_vk_gpl: mode %s; pipelines linked again with optimisation by the workers: %lld of %lld queued, %.0f ms of worker time\n", gpl_sep() ? "2 (a library per stage)" : "1 (a library per stage pair)", (long long)g_gpl_opt_n, (long long)g_gpl_opt_q, (double)g_gpl_opt_tk * 1000.0 / (double)fq.QuadPart);
     printf("nvn_vk_skip: shader_wait = %s; draws left out because a stage or pipeline was not ready: %lld in %lld frames (stage not ready %lld, pipeline not ready %lld)\n", skip_on() ? "skip (near a fight)" : "hold (the default)", (long long)g_skip_n, (long long)g_skip_frames, (long long)g_skip_stage, (long long)g_skip_pipe);
     if (g_pix_ready) printf("nvn_vk_prep: containers announced whole from the index: %lld because a pool was laid over their code, %lld because one of their programs was handed over (%lld of all these while IN A FIGHT), %lld variations queued; pools looked up: %lld found in the index, %lld not; programs handed over whose variation several files hold (no container named): %lld; header searches not made near a fight: %lld\n",
@@ -1946,7 +1980,15 @@ static void pcache_save_at(int where, int marker) {
     VkResult r = VK_INCOMPLETE;
     void *data = NULL;
     int one = 0;
-    if (!g_pcache) return;
+    if (!g_pcache || V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) return;      /* lavapipe: never a hit, gigabytes to read out at exit */
+    /* lavapipe (Mesa, WSL): 0 hits every run from the cache it was given, and the file grew 0.2-0.8 GB a run up to 6.6 GB
+     * (50 s to read at start). shortcut: a driver like that alternates between one run's file and none; a marker if it matters. */
+    if (g_pc_had_data && !g_fb_hit[0] && !g_fb_hit[1] && g_fb_miss[0] + g_fb_miss[1] >= 64) {
+        printf("nvn_vk: pipeline cache NOT saved and deleted: the driver compiled %lld stage libraries and links and found none in the cache it was given\n", (long long)(g_fb_miss[0] + g_fb_miss[1]));
+        fflush(stdout);
+        DeleteFileA(g_pcache_path);
+        return;
+    }
     if (where == 0) {       /* session 14: the exit path rewrote the whole file (0.9 GB: 5-11 s with the window still there) even when nothing was added */
         const char *e = getenv("SSBU_VK_PCSAVE");
         WIN32_FILE_ATTRIBUTE_DATA fa0;
@@ -2486,8 +2528,16 @@ static DWORD WINAPI prep_main(void *arg) {
     for (int i = g_prep_nfiles - 1; i >= (g_prep_keep > 0 ? g_prep_keep : 0); i--) if (!g_prep_file[i].late && g_prep_file[i].layout) { ord[no++] = i; nlay++; }
     for (int i = g_prep_keep > 0 ? g_prep_keep : 0; i < g_prep_nfiles; i++) if (!g_prep_file[i].late && !g_prep_file[i].layout) ord[no++] = i;
     printf("nvn_vk_prep: order: %d file(s) whose pool an earlier run saw laid inside a fight, then %d layout-archive containers (smallest first), then %d others (largest first)\n", nlate, nlay, no - nlate - nlay);
+    int memstop = 0;
     for (int oi = 0; oi < todo && !g_m4_quit; oi++) {
         int i = ord[oi];
+        if (g_prep_loadall && mem_short()) {      /* shader_load = start keeps every shader in memory: not on a machine that has no room for it */
+            for (int r = oi; r < todo; r++) g_pix_announced[ord[r]] = 0;      /* made at their loading screens instead */
+            memstop = 1;
+            g_prep_state = 2;                      /* the game's first frame goes on now (prep_first_hold) */
+            prep_line("STOPPED: memory is short; the containers not read are made at the game's loading screens");
+            break;
+        }
         snprintf(path, sizeof path, "%s/%s", dir, g_prep_file[i].name);
         FILE *fp = fopen(path, "rb");
         if (!fp) continue;
@@ -2541,7 +2591,7 @@ static DWORD WINAPI prep_main(void *arg) {
         printf("nvn_vk_prep: %d containers not understood; frames of a fight that passed while the preparation ran: %lld; %s\n", g_prep_bad, (long long)g_prep_fight_frames,
                g_pcsave_want ? "the pipeline cache and the marker are written inside the next held loading screen or at exit (not by this thread during play)" : "pipeline cache written by this thread at once (SSBU_VK_PCSAVE=prep)");
         fflush(stdout);
-    } else prep_line("STOPPED before its end (the game is closing)");
+    } else if (!memstop) prep_line("STOPPED before its end (the game is closing)");
     return 0;
 }
 /* SSBU_VK_SWEEP_LOG=1 (a measurement, off by default): WHEN do a container's bytes arrive in the game's memory? Every 2 s a
