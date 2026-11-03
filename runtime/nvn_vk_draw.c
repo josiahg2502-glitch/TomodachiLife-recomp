@@ -300,7 +300,26 @@ static struct {
 
 static void probe_pass(void);
 static void bc_rt_flush(void);
-static void pass_end(void) { if (R.in_pass) { vkCmdEndRendering(R.cmd); R.in_pass = 0; CKPT_OP("pass end (w, h)", 0, R.pass_w, R.pass_h, 0); probe_pass(); bc_rt_flush(); } }
+/* SSBU_VK_PASSWHY=1 (test): which line of this file ends the passes, counted for the small passes (both sides at most 4
+ * pixels: the 2x2 pass took half of the island's GPU time in 68 pieces a frame) and for the others; the top lines at exit */
+static int g_pe_on = -1;
+static LONG64 g_pe_n[2][8192], g_pe_tgt[2], g_pe_same;
+static void pass_end_at(int line) {
+    if (!R.in_pass) return;
+    if (g_pe_on < 0) g_pe_on = getenv("SSBU_VK_PASSWHY") && atoi(getenv("SSBU_VK_PASSWHY"));
+    if (g_pe_on && line > 0 && line < 8192) g_pe_n[R.pass_w <= 4 && R.pass_h <= 4 ? 0 : 1][line]++;
+    vkCmdEndRendering(R.cmd); R.in_pass = 0; CKPT_OP("pass end (w, h)", 0, R.pass_w, R.pass_h, 0); probe_pass(); bc_rt_flush();
+}
+#define pass_end() pass_end_at(__LINE__)
+static void pass_why_report(void) {
+    if (g_pe_on <= 0) return;
+    printf("nvn_vk_passwhy: SetRenderTargets that ended a pass: %lld with the same textures (other view bytes), %lld with other textures; %lld kept the pass (the same targets again)\n", (long long)g_pe_tgt[0], (long long)g_pe_tgt[1], (long long)g_pe_same);
+    for (int k = 0; k < 2; k++) {
+        printf("nvn_vk_passwhy: %s passes ended at (line of nvn_vk_draw.c: times):", k ? "other" : "SMALL (<= 4x4)");
+        for (int r = 0; r < 12; r++) { int best = 0; for (int i = 1; i < 8192; i++) if (g_pe_n[k][i] > g_pe_n[k][best]) best = i; if (!g_pe_n[k][best]) break; printf(" %d: %lld", best, (long long)g_pe_n[k][best]); g_pe_n[k][best] = 0; }
+        printf("\n");
+    }
+}
 static LONG64 g_tm[12];                          /* ticks: 0 wait for a submission, 1 copy-back, 2 dispatch, 3 batch replay, 4 present, 5 pipelines, 6 modules, 7 copy-back wait at batch start, 8 draw preparation */
 static LONG64 tk(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 /* Session 5, SSBU_VK_GPUTIME=1: two timestamp queries per command buffer (written at its first and after its last command),
@@ -608,6 +627,19 @@ static VkFlags layout_access(VkImageLayout l) {
     default: return 0;
     }
 }
+/* The stages a layout is used in: a layout change waits only for those uses before it and holds only those after it
+ * (ALL_COMMANDS both ways drained the GPU at each of the island's ~60 target switches a frame, 2026-11-03).
+ * SSBU_VK_BARRIER_ALL=1 (test): ALL_COMMANDS both ways as before. */
+static VkPipelineStageFlags layout_stages(VkImageLayout l, int src) {
+    switch (l) {
+    case VK_IMAGE_LAYOUT_UNDEFINED: return src ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: return VK_PIPELINE_STAGE_TRANSFER_BIT;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: return VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    default: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;      /* GENERAL: any use */
+    }
+}
 static void image_barrier(VkImage img, VkFlags aspect, VkImageLayout from, VkImageLayout to) {
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     DBG_ASSERT(!R.in_pass, "debug: an image layout change inside a render pass");
@@ -615,7 +647,10 @@ static void image_barrier(VkImage img, VkFlags aspect, VkImageLayout from, VkIma
     b.subresourceRange.aspectMask = aspect; b.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS; b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
     b.srcAccessMask = layout_access(from); b.dstAccessMask = layout_access(to); b.oldLayout = from; b.newLayout = to;
     CKPT_OP("layout change (image, from, to)", img, from, to, aspect);
-    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    static int all = -1;
+    if (all < 0) all = getenv("SSBU_VK_BARRIER_ALL") ? atoi(getenv("SSBU_VK_BARRIER_ALL")) : 0;      /* 2: in-run A/B, the old way in every other 300 frames (odd windows) */
+    int use_all = all == 1 || (all == 2 && (nvn_front_frame_next() / 300) % 2);
+    vkCmdPipelineBarrier(R.cmd, use_all ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : layout_stages(from, 1), use_all ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : layout_stages(to, 0), 0, 0, NULL, 0, NULL, 1, &b);
 }
 static void vt_layout(VTex *vt, VkImageLayout to) {
     if (vt->layout == to) return;
@@ -3142,8 +3177,23 @@ static void dprof_draw_done(void) {
  * thread for minutes and the shutdown job behind it was never reached (every WSL run killed by its timeout, 2026-11-03). */
 static volatile LONG g_vk_exiting;
 void nvn_vk_exiting(void) { InterlockedExchange(&g_vk_exiting, 1); }
+/* SSBU_VK_FASTDRAW (1 the default, 0 off, 2 in-run A/B: off in the odd 300-frame windows): what a draw shares with the
+ * draw before it is not looked up again: the pipeline of an equal key, the texture set of an equal list (not bound again
+ * while it still is), the primitive restart state. 70-Mii island, 2026-11-03: 4467 draws a frame, 26.9 ms of preparation. */
+static int g_fastdraw = -1, g_pr_last = -1, g_fd_n;
+static Pipe *g_fd_p;
+static PKey g_fd_k;
+static VkDescriptorSet g_fd_set;
+static VkDescriptorSetLayout g_fd_dl;
+static VkPipelineLayout g_fd_layout;
+static VkCommandBuffer g_fd_cmd;                   /* the command buffer g_fd_set is bound in as set 1 (NULL: not known to be) */
+static uint32_t g_fd_gen;
+static VStage *g_fd_vs, *g_fd_fs;
+static uint8_t g_fd_list[sizeof g_dtex];
 static int draw_prepare(unsigned prim) {
     if (g_vk_exiting) return 0;
+    if (g_fastdraw < 0) g_fastdraw = getenv("SSBU_VK_FASTDRAW") ? atoi(getenv("SSBU_VK_FASTDRAW")) : 1;
+    const int fast = g_fastdraw == 1 || (g_fastdraw == 2 && !((nvn_front_frame_next() / 300) & 1));
     if (!g_dprof) g_dprof = getenv("SSBU_VK_DRAWPROF") && atoi(getenv("SSBU_VK_DRAWPROF")) ? 1 : -1;
     if (g_dprof > 0) g_dprof_last = tk();
     {   /* TEST (SSBU_VK_UILOG): the state of the draws into the window texture in the logged frame */
@@ -3249,14 +3299,18 @@ static int draw_prepare(unsigned prim) {
     }
     if (!D.has_vids) vi_key(&k, voff, ints, sints);      /* MAC2 / V_novids */
     pkey_targets(&k);
-    Pipe *p = pipe_get(&k, vs, fs);
+    Pipe *p;
+    if (fast && g_fd_p && !memcmp(&k, &g_fd_k, sizeof k)) p = g_fd_p;      /* (a Pipe lives until the device goes) */
+    else { p = pipe_get(&k, vs, fs); if (p) { g_fd_k = k; g_fd_p = p; } }
     if (!p) return 0;                              /* shader_wait = skip: the pipeline is being made by a worker, the draw is left out (counted in pipe_get) */
-    if (!R.pipe_bound) { R.dyn3_dirty = 1; g_dyn_ok = 0; g_topo_last = -1; }      /* a new command buffer, or a pipeline of our own with static state was bound */
+    if (!R.pipe_bound) { R.dyn3_dirty = 1; g_dyn_ok = 0; g_topo_last = -1; g_pr_last = -1; g_fd_cmd = NULL; }      /* a new command buffer, or a pipeline of our own with static state was bound */
     if (R.pipe_bound != p) { vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->p); R.pipe_bound = p; }
     if (R.dyn_dirty) { set_dynamic_state(); R.dyn_dirty = 0; }
     if (D.has_eds3 && (R.dyn3_dirty || R.dyn3_samples != k.samples)) { set_dynamic_state3(k.samples); R.dyn3_dirty = 0; }
     if (g_topo_last != (int)topo[prim]) { vkCmdSetPrimitiveTopology(R.cmd, (VkPrimitiveTopology)topo[prim]); g_topo_last = (int)topo[prim]; }
-    vkCmdSetPrimitiveRestartEnable(R.cmd, R.restart && ((D.has_plr && !(g_vk_test & 16)) || prim == 3 || prim == 5 || prim == 6));      /* SSBU_VK_TEST bit 16 (session 14, test): no restart in list topologies */
+    {   const int pr = R.restart && ((D.has_plr && !(g_vk_test & 16)) || prim == 3 || prim == 5 || prim == 6);      /* SSBU_VK_TEST bit 16 (session 14, test): no restart in list topologies */
+        if (!fast || pr != g_pr_last) { vkCmdSetPrimitiveRestartEnable(R.cmd, pr); g_pr_last = pr; }
+    }
     DPROF(3);
     /* 4. vertex input */
     {
@@ -3317,6 +3371,7 @@ static int draw_prepare(unsigned prim) {
          * textures of a draw repeat: one set per distinct list (layout, views, samplers, image layouts) per command buffer */
         VkDescriptorSet sets[2] = {NULL, NULL};
         int nw = 0, ib = 0, it = 0;
+        if (p->layout != g_fd_layout) g_fd_cmd = NULL;      /* set 0 is about to be given with another layout: set 1 may be disturbed */
         if (!p->push0 && p->nb[0]) sets[0] = set_alloc(p->dl[0]);
         memset(w, 0, sizeof w[0] * (size_t)(p->nb[0] + p->nb[1]));
         for (int s = 0; s < (fs ? 2 : 1); s++) {
@@ -3332,7 +3387,11 @@ static int draw_prepare(unsigned prim) {
         }
         if (p->push0) { if (nw) vkCmdPushDescriptorSetKHR(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, (uint32_t)nw, w); }
         else if (sets[0]) { vkUpdateDescriptorSets(V.device, (uint32_t)nw, w, 0, NULL); vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &sets[0], 0, NULL); }
-        if (p->nb[1]) {
+        if (p->nb[1] && fast && g_fd_set && g_fd_gen == g_tset_gen && g_fd_dl == p->dl[1] && g_fd_vs == vs && g_fd_fs == fs && g_fd_n == g_ndtex &&
+            !memcmp(g_fd_list, g_dtex, sizeof g_dtex[0] * (size_t)g_ndtex)) {      /* the texture list of the draw before */
+            if (g_fd_cmd != R.cmd) { vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 1, 1, &g_fd_set, 0, NULL); g_fd_cmd = R.cmd; g_fd_layout = p->layout; }
+            R.sets_reused++;
+        } else if (p->nb[1]) {
             uint64_t key = fnv(0xcbf29ce484222325ULL, &p->dl[1], sizeof p->dl[1]);
             unsigned slot;
             if (p->dl[1] == g_udl[1]) for (int s = 0; s < (fs ? 2 : 1); s++) { VStage *v = s ? fs : vs; for (int i = 0; i < v->nsmp; i++) key = fnv(key, &v->smp[i].binding, sizeof v->smp[i].binding); }      /* session 9: one layout for every pipeline: the binding numbers tell the lists apart */
@@ -3366,6 +3425,8 @@ static int draw_prepare(unsigned prim) {
                 }
             }
             vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 1, 1, &sets[1], 0, NULL);
+            g_fd_set = sets[1]; g_fd_gen = g_tset_gen; g_fd_dl = p->dl[1]; g_fd_vs = vs; g_fd_fs = fs; g_fd_n = g_ndtex; g_fd_cmd = R.cmd; g_fd_layout = p->layout;
+            memcpy(g_fd_list, g_dtex, sizeof g_dtex[0] * (size_t)g_ndtex);
         }
     }
     DPROF(5);
@@ -3805,14 +3866,31 @@ static void exec(const Cmd *m, int depth) {
     case OP_DEPTHRANGES: if (a[0] == 0 && a[1] > 0) { memcpy(R.drange, blob, 8); R.dyn_dirty = 1; } break;
     case OP_TARGETS: {
         const TargetRef *col = (const TargetRef *)blob, *dep = col + 8;
-        int n = (int)a[0] < 8 ? (int)a[0] : 8;
+        int n = (int)a[0] < 8 ? (int)a[0] : 8, nn = 0;
+        TargetRef nc[8], nd;
+        memset(nc, 0, sizeof nc); memset(&nd, 0, sizeof nd);
+        for (int i = 0; i < n; i++) if (col[i].tex && !col[i].tex->dead) { nc[i] = col[i]; nn = i + 1; }
+        if (dep->tex && !dep->tex->dead) nd = *dep;
+        /* the same targets again: the pass goes on. The game sets them before each group of draws: ~100 pass ends a frame on
+         * the 70-Mii island, and the 2x2 pass of its 1135 small draws took half of the GPU time in 68 pieces (2026-11-03) */
+        if (R.in_pass && nn == R.ncol && !memcmp(nc, R.col, sizeof nc) && !memcmp(&nd, &R.depth, sizeof nd)) {
+            if (R.depth.tex && R.depth.tex->vk) ((VTex *)R.depth.tex->vk)->shadow_ok = 0;      /* (as below: a sampled copy is taken again) */
+            g_pe_same++;
+            break;
+        }
+        if (g_pe_on > 0 && R.in_pass) {            /* SSBU_VK_PASSWHY: how the targets differ */
+            int same_tex = nn == R.ncol && nd.tex == R.depth.tex;
+            for (int i = 0; i < 8 && same_tex; i++) same_tex = nc[i].tex == R.col[i].tex;
+            g_pe_tgt[same_tex ? 0 : 1]++;
+            if (same_tex) { static int said; if (said++ < 6) printf("nvn_vk_passwhy: same textures, other view bytes: depth view %02x %02x %04x %d %d %d %d -> %02x %02x %04x %d %d %d %d; colour 0 %02x %04x %d %d %d %d -> %02x %04x %d %d %d %d\n",
+                R.depth.view.set, R.depth.view.target, R.depth.view.format, R.depth.view.lvl0, R.depth.view.nlvl, R.depth.view.lay0, R.depth.view.nlay, nd.view.set, nd.view.target, nd.view.format, nd.view.lvl0, nd.view.nlvl, nd.view.lay0, nd.view.nlay,
+                R.col[0].view.set, R.col[0].view.format, R.col[0].view.lvl0, R.col[0].view.nlvl, R.col[0].view.lay0, R.col[0].view.nlay, nc[0].view.set, nc[0].view.format, nc[0].view.lvl0, nc[0].view.nlvl, nc[0].view.lay0, nc[0].view.nlay); }
+        }
         pass_end();
         for (int i = 0; i < R.ncol; i++) if (R.col[i].tex && R.col[i].tex->vk) ((VTex *)R.col[i].tex->vk)->feedback = 0;
         if (R.depth.tex && R.depth.tex->vk) { ((VTex *)R.depth.tex->vk)->feedback = 0; ((VTex *)R.depth.tex->vk)->shadow_ok = 0; }
-        memset(R.col, 0, sizeof R.col); memset(&R.depth, 0, sizeof R.depth);
-        R.ncol = 0; R.have_targets = 0;
-        for (int i = 0; i < n; i++) if (col[i].tex && !col[i].tex->dead) { R.col[i] = col[i]; R.ncol = i + 1; R.have_targets = 1; }
-        if (dep->tex && !dep->tex->dead) { R.depth = *dep; R.have_targets = 1; }
+        memcpy(R.col, nc, sizeof R.col); R.depth = nd;
+        R.ncol = nn; R.have_targets = nn > 0 || nd.tex != NULL;
         R.dyn_dirty = 1;                           /* default viewport / scissor follow the target size */
         break;
     }
@@ -4974,6 +5052,7 @@ static void vkd_shutdown(void) {
                (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_fight_n, (double)g_late_fight_tk * k);
     }
     frstat_report();
+    pass_why_report();
     if (RS_ON && rs_ui_native()) printf("nvn_vk_scale: SSBU_VK_UI_NATIVE=1: the window's textures are kept at the game's size; passes with such a colour target and a SCALED depth target (drawn without depth): %lld\n", (long long)g_rs_mixed);
     if (RS_ON) printf("nvn_vk_scale: resolution scale %.3f: %lld images made scaled, %lld fragment stages translated in this run for it (%lld of them read the pixel position, %lld fetch texels by integer position), %lld uploads into and %lld read-backs from a scaled image, %lld copies / blits touching one\n",
                       (double)rs_scale(), (long long)g_rs_images, (long long)g_rs_stages, (long long)g_rs_fcs, (long long)g_rs_tf, (long long)g_rs_up, (long long)g_rs_down, (long long)g_rs_blits);
