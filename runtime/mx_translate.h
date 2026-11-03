@@ -77,6 +77,9 @@ typedef struct {
      * 2: 2D vertices only (w = 1 within 1e-4): the game's own cameras are made wider (tomo.c persp_wide), so 3D needs no
      * squeeze; a negative mx_wide lets a full-screen quad keep the whole width (nvn_gl.c: a screen pass or a plain fill). */
     int wide;
+    /* Vulkan, vertex stage: the game's depth mode is -1..1 (nvnDeviceSetDepthMode, OpenGL's convention): z becomes (z + w) / 2,
+     * the 0..1 clip space of Vulkan (the same window depth OpenGL's glClipControl gives; no VK_EXT_depth_clip_control needed). */
+    int depth_m1;
 } MxIn;
 
 typedef struct {
@@ -86,6 +89,7 @@ typedef struct {
     uint32_t cbufs;                  /* constant buffers referenced */
     uint32_t in_attr, out_attr;      /* generic attributes read / written */
     uint32_t tex_units;              /* texture units referenced (bound handles) */
+    uint32_t bx_hint[8];             /* Vulkan TEX.B: 1 + (cbuf << 16) + offset of each LDC that gave a handle (0: none; MX_BX) */
     uint32_t ssbos, ssbo_written;    /* game storage buffers referenced (LDG / STG) and whether the shader writes them */
     uint32_t images, images_read, images_written;      /* image units used (SULD / SUST) */
     uint16_t image_gl_format[8];     /* internal format each used image must be bound with (typed accesses name their own) */
@@ -107,6 +111,9 @@ const char *mx_opcode_name(uint64_t insn);
  * again, and the driver's compiles queued on its heap lock (15 in 3 minutes): back to 18; the room comes from nvn_gl.c's
  * fill limit instead (g_bl_cap). */
 #define MX_BL_BITS 18
+/* Vulkan, TEX.B / TMML.B: the handle in the register is compared with up to MX_BX candidates the back end finds in the
+ * draw's constant buffers (c2 words 224 + k, 0xffffffff = none); candidate k is bound as unit 128 + k (MxOut.cbufs bit 0). */
+#define MX_BX 128
 int mx_bl_misslog(void);
 
 #endif
