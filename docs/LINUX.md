@@ -24,8 +24,8 @@ scripts/linux/install.sh ~/path/to/your/dump
 1. **System packages** (asks for your password once): clang, SDL3, FFmpeg, glslang, the Vulkan loader, Python
    (pacman, apt or dnf). Where the distribution has no SDL3 yet (Ubuntu before 25.04, Debian 12), SDL3 3.4.18 is built
    from source into `deps/sdl3-linux`.
-2. **The build** (about 40 minutes): the game's code is translated and compiled, and every shader of the game is
-   prepared for Vulkan, so the first start has nothing left to compile.
+2. **The build** (40 minutes to over an hour, depending on the CPU and the disk): the game's code is translated and
+   compiled, and every shader of the game is prepared for Vulkan, so the first start has much less left to compile.
 3. **"Tomodachi Life" in your application menu.**
 
 ## Play

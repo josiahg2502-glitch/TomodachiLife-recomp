@@ -3,6 +3,8 @@
 A static recompilation of *Tomodachi Life: Living the Dream* (Nintendo Switch) into a native Windows program. The game's
 own code is translated to C and compiled for your PC: no emulator runs underneath.
 
+Also for **Linux and Steam Deck** ([docs/LINUX.md](docs/LINUX.md)) and **Android handhelds** ([docs/ANDROID.md](docs/ANDROID.md)).
+
 **Version 1.0.0.** You can play it from start to finish as far as we know; see [Known issues](#known-issues) for what is
 still open.
 
