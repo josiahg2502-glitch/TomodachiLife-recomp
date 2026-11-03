@@ -355,8 +355,8 @@ def main():
                 'under your choice of the MIT licence or the public domain (Unlicense), as written at the end of each header\n'
                 '(third_party/stb in the source repository).\n')
     with open(os.path.join(pkg, 'README.txt'), 'w', newline='\r\n') as f:
-        f.write('THIS IS NOT THE GAME. To install Tomodachi Life, download Tomodachi-Life-PC.zip from the Releases of the\n'
-                'TomodachiLife-recomp project on GitHub, unpack it and run Install Tomodachi Life.bat.\n\n'      # no URL: the owner\'s name trips the audit
+        f.write('THIS IS NOT THE GAME. To install Tomodachi Life, download Tomodachi-Life-PC-Setup.exe from the Releases of\n'
+                'the TomodachiLife-recomp project on GitHub and run it.\n\n'      # no URL: the owner\'s name trips the audit
                 'Prebuilt runtime of the Tomodachi Life native port (our own code only; nothing of the game is in it).\n'
                 'scripts/install.py downloads and checks it; scripts/setup.py --runtime <this folder or zip> uses it, and builds\n'
                 'the game DLL from your own dump with LLVM alone. manifest.json lists the files and their SHA-256.\n')

@@ -2,7 +2,8 @@
 """Where the big files go: the build folder (the unpacked game ~17 GB, the build ~8 GB, the logs, the saves, the
 temporary .nsz decompression). Default <repo>\\build. The installer window lets you choose another folder (another drive
 with more space); the choice is kept in build_location.txt at the repository root (one line: the folder), so that
-scripts/install.py, setup.py, run.py, precheck.py, Play SSBU.bat (through run.py) and the shortcuts all use the same
+scripts/install.py, setup.py, run.py, precheck.py, the launcher, the two exes at the top of the folder (launcher/start.c)
+and the shortcuts all use the same
 place, and Resume goes on in it.
 
     python scripts/build_location.py            print the build folder in use

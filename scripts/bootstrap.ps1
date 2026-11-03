@@ -123,7 +123,7 @@ function Start-Fallback {
              'Include_test=0', 'Include_doc=0', 'Shortcuts=0', 'AssociateFiles=0', 'PrependPath=0'
         $py = Find-Python
         if ($p.ExitCode -ne 0 -or -not $py) {
-            Say "Python could not be installed (code $($p.ExitCode)). Install it from https://www.python.org/downloads/ and run Install Tomodachi Life.bat again." 'OK' 'Error' | Out-Null
+            Say "Python could not be installed (code $($p.ExitCode)). Install it from https://www.python.org/downloads/ and run scripts\bootstrap.ps1 again." 'OK' 'Error' | Out-Null
             exit 1
         }
     }

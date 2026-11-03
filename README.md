@@ -42,8 +42,11 @@ Both 1.0.0 and 1.0.4 run. Other updates are not supported yet.
    You can stop it, or close the launcher, and go on later: finished steps are not repeated.
 5. Press **PLAY**. Next time, start it with the **Tomodachi Life** shortcut on your desktop.
 
+In the folder: **`Tomodachi Life.exe`** starts the game straight away, **`Tomodachi Life Launcher.exe`** opens the launcher
+(play, settings, save data, install).
+
 The same files as a zip, for those who prefer it: **`Tomodachi-Life-PC.zip`** (unpack it into a folder of its own and run
-`build\work\TomodachiLauncher.exe`, or `Install Tomodachi Life.bat`, which opens it). A zip named
+`Tomodachi Life Launcher.exe`). A zip named
 `tomodachi-runtime-...` is not the game: it is a part the installer downloads by itself.
 
 The installer downloads only what it needs, each file checked against a fixed SHA-256: Python 3.13 (python.org), LLVM/clang

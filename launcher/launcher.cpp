@@ -19,6 +19,8 @@
  * --import <folder>: SAVE DATA > IMPORT A SAVE with that folder (no dialog), the result printed; for tests.
  * --import-mii <file.ltd> <slot>: IMPORT A MII over the resident in that slot (0..69), no dialog; for tests.
  * --bootstrap: the installer's private Python (boot::bootstrap), no window; the INSTALL screen's first step runs it.
+ * --play: straight into the game, no window while it runs, gone when it is quit (Tomodachi Life.exe at the top of the
+ *          folder, launcher\start.c); the window when the game cannot start or ends with an error.
  * Built by scripts\build_launcher.sh (clang, SDL3 of ..\ssbu-recomp\deps, third_party\stb). */
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -569,6 +571,11 @@ public:
     bool game_running() const { return game_.hProcess != nullptr; }
     // --auto-install <dump folder> (tests): the INSTALL screen's whole way with that dump and no questions; 0 = installed
     void auto_install(const std::string& dump) { auto_dump_ = dump; start_setup(); }
+    void play_direct() {      // --play (Tomodachi Life.exe): the game at once, the window only if it cannot start or ends badly
+        direct_ = true;
+        play();
+        if (!game_running()) { direct_ = false; SDL_ShowWindow(window_); SDL_RaiseWindow(window_); }
+    }
     int auto_result() const { return auto_result_; }
     void open_screen(const std::string& s) {
         if (s == "settings") go(Screen::kSettings);
@@ -655,6 +662,8 @@ public:
             game_ = {};
             exit_code_ = code;
             session_min_ = int((SDL_GetTicks() - started_) / 60000);
+            if (direct_ && code == 0) { quit_ = true; return; }      // --play: the game was quit normally, nothing to show
+            direct_ = false;
             SDL_ShowWindow(window_); SDL_RaiseWindow(window_);
             refresh();
         }
@@ -1544,6 +1553,7 @@ private:
     std::vector<std::pair<int, std::string>> mii_slots_;
     PROCESS_INFORMATION game_{};
     DWORD exit_code_ = 0;
+    bool direct_ = false;      // --play: quit with the game
     Uint64 started_ = 0;
     std::mutex dialog_mutex_;
     std::string dialog_result_;
@@ -1605,6 +1615,8 @@ int main(int argc, char** argv) {
     if (import_dir) shot = "";
     const char* auto_dump = nullptr;      // --auto-install <dump folder>: the install without questions (tests); the exit code says how it went
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--auto-install")) auto_dump = argv[i + 1];
+    bool play_now = false;      // --play (Tomodachi Life.exe): straight into the game
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--play")) play_now = true;
     paths_init();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return 1;
     int ww = 1600, wh = 900;
@@ -1613,7 +1625,7 @@ int main(int argc, char** argv) {
         ww = usable.w * 7 / 10; wh = ww * 9 / 16;
         if (wh > usable.h * 8 / 10) { wh = usable.h * 8 / 10; ww = wh * 16 / 9; }
     }
-    SDL_Window* window = SDL_CreateWindow("Tomodachi Life", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot || auto_dump ? SDL_WINDOW_HIDDEN : 0));
+    SDL_Window* window = SDL_CreateWindow("Tomodachi Life", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot || auto_dump || play_now ? SDL_WINDOW_HIDDEN : 0));
     SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
     if (!renderer) { SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Tomodachi Life", SDL_GetError(), nullptr); return 1; }
     SDL_SetRenderVSync(renderer, 1);
@@ -1623,6 +1635,7 @@ int main(int argc, char** argv) {
     {
         Launcher launcher(window, renderer);
         if (auto_dump) launcher.auto_install(auto_dump);
+        else if (play_now && !shot && !import_dir) launcher.play_direct();
         if (import_mii) { printf("%s\n", launcher.import_mii_now(import_mii, import_slot).c_str()); fflush(stdout); }
         else if (import_dir) { printf("%s\n", launcher.import_now(import_dir).c_str()); fflush(stdout); }
         SDL_Texture* target = shot ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, 1600, 900) : nullptr;

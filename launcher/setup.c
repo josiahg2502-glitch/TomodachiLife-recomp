@@ -1,5 +1,6 @@
 /* Tomodachi-Life-PC-Setup.exe: the one download. Its resources hold the release's files (PAYLOAD: a zip of the repository
- * at the release's tag with build\work\TomodachiLauncher.exe and SDL3.dll added); it unpacks them into the folder the
+ * at the release's tag with build\work\TomodachiLauncher.exe, SDL3.dll and, at the top, Tomodachi Life.exe and Tomodachi Life
+ * Launcher.exe added: launcher\start.c); it unpacks them into the folder the
  * player confirms (C:\Games\TomodachiLife by default), puts a "Tomodachi Life" shortcut on the desktop and starts the
  * launcher there, whose INSTALL screen does the rest (the installer's Python, the player's game files, the build).
  * Nothing else is needed: Windows 10 1803 or later unpacks the zip with its own tar.exe.
@@ -170,6 +171,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
     const int ok = unpack(target, err, sizeof err / sizeof err[0]);
     SetCursor(old);
     if (!ok) { if (!quiet) say(err, MB_ICONERROR); else fwprintf(stderr, L"%s\n", err); return 2; }
+    {   /* 1.0.0's Install / Play .bat files, replaced by Tomodachi Life.exe and Tomodachi Life Launcher.exe (launcher\start.c):
+         * gone from a folder this setup updates (the old Install .bat ran the installer through PowerShell) */
+        static const wchar_t *const old[] = {L"Install Tomodachi Life.bat", L"Play Tomodachi Life.bat"};
+        for (int i = 0; i < 2; i++) { wchar_t p[MAX_PATH + 48]; swprintf(p, MAX_PATH + 48, L"%s\\%s", target, old[i]); DeleteFileW(p); }
+    }
     swprintf(work, MAX_PATH + 16, L"%s\\build\\work", target);
     swprintf(exe, MAX_PATH + 48, L"%s\\TomodachiLauncher.exe", work);
     if (quiet) return 0;

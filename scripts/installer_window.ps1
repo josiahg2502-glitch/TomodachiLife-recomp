@@ -1083,7 +1083,7 @@ function Finish-Job([int]$code) {
         }
         $script:succeeded = $true; $script:failedBefore = $false
         $msg = $(if ($script:doneMsg) { $script:doneMsg } elseif ($script:jobDry) { 'Dry run finished: nothing was changed.' }
-                 elseif ($script:jobKind -eq 'update') { 'Update finished.' } else { 'Done. Press Play (or double-click "Play Tomodachi Life.bat").' })
+                 elseif ($script:jobKind -eq 'update') { 'Update finished.' } else { 'Done. Press Play (or start "Tomodachi Life.exe").' })
         Set-Status $msg $cOk
         $script:lblErr.Visible = $false
     } else {
@@ -1110,7 +1110,7 @@ function Finish-Job([int]$code) {
 $script:preResults = @()
 function Start-Scans {
     if (-not $script:py) {
-        Set-Status 'Python was not found (deps\python\python.exe or build\python_path.txt). Run "Install Tomodachi Life.bat" again.' $cFail
+        Set-Status 'Python was not found (deps\python\python.exe or build\python_path.txt). Run scripts\bootstrap.ps1 again.' $cFail
         foreach ($k in $script:F.Keys) { $script:F[$k].Status.Text = 'No Python: nothing could be searched.' }
         Set-Buttons; return
     }
@@ -1349,8 +1349,8 @@ $script:btnLogs.Add_Click({
     try { [void][IO.Directory]::CreateDirectory($d); Start-Process -FilePath 'explorer.exe' -ArgumentList (Q $d) } catch {}
 })
 $script:btnPlay.Add_Click({
-    $bat = Join-Path $repo 'Play Tomodachi Life.bat'
-    if (Test-Path -LiteralPath $bat) { Start-Process -FilePath $bat -WorkingDirectory $repo } else { [void][System.Windows.Forms.MessageBox]::Show('Play Tomodachi Life.bat was not found.', 'Tomodachi Life native - installer', 'OK', 'Warning') }
+    $run = Join-Path $repo 'scripts\run.py'      # the launcher of the install location (what Play Tomodachi Life.bat did)
+    if ($script:py) { Start-Process -FilePath $script:py -ArgumentList (Q $run) -WorkingDirectory $repo -WindowStyle Minimized } else { [void][System.Windows.Forms.MessageBox]::Show('Python was not found: run scripts\bootstrap.ps1 again.', 'Tomodachi Life native - installer', 'OK', 'Warning') }
 })
 $script:btnClose.Add_Click({ $form.Close() })
 $script:allowClose = $false

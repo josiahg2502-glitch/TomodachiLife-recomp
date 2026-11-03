@@ -253,12 +253,12 @@ def runtime_mismatch(m):
                 'published yet. Use the copy of that version (GitHub: Releases), or wait for the next runtime package' % made)
     elif rel in ('older', 'other'):
         what = ('your copy of the project is %s the prebuilt runtime (made from %s). Download the latest release of the project '
-                '(GitHub: Releases), unpack it into a new folder and start "Install Tomodachi Life.bat" there'
+                '(GitHub: Releases): run Tomodachi-Life-PC-Setup.exe and install into a new folder'
                 % ('OLDER than' if rel == 'older' else 'a different version from', made))
     else:
         what = ('your copy of the project is older or newer than the prebuilt runtime (made from %s). Download the latest '
-                'release of the project (GitHub: Releases), unpack it into a NEW folder (not over the old one) and '
-                'start "Install Tomodachi Life.bat" there' % made)
+                'release of the project (GitHub: Releases): run Tomodachi-Life-PC-Setup.exe and install into a NEW folder '
+                '(not over the old one)' % made)
     if m.get('game_data_version') != game_data_version():
         return 'runtime package refused: %s (game-data interface %s, this copy has %d)' % (what, m.get('game_data_version'), game_data_version())
     want = m.get('tree_files')
@@ -272,7 +272,7 @@ def runtime_mismatch(m):
         if missing and not changed:
             return ('runtime package refused: %d file(s) of the project are missing from your copy (%s): the copy is '
                     'incomplete (an unpacking that stopped, an antivirus, a file deleted by hand). Unpack the release of the '
-                    'project again into a new folder and start "Install Tomodachi Life.bat" there' % (len(missing), names))
+                    'project again into a new folder (Tomodachi-Life-PC-Setup.exe) and press INSTALL in its launcher' % (len(missing), names))
         return 'runtime package refused: %s (%d file(s) differ: %s)' % (what, len(missing) + len(changed), names)
     if m.get('tree_digest') == tree_digest():
         return None

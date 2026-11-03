@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start the built game: the launcher (TomodachiLauncher.exe) of the install location, or the game itself.
 
-    python scripts/run.py                     the launcher ("Play Tomodachi Life.bat" does this)
+    python scripts/run.py                     the launcher ("Tomodachi Life Launcher.exe" does this)
     python scripts/run.py --direct            the game without the launcher, until you quit (the log in <build>\\logs)
     python scripts/run.py --direct --userdata <folder> --seconds 60     a test run with a save folder you can lose
 
@@ -33,14 +33,14 @@ def main():
     build = os.path.abspath(a.build or build_location.get())
     work = os.path.join(build, 'work')
     if not (os.path.isfile(os.path.join(work, EXE)) and os.path.isfile(os.path.join(build, 'state.json'))):
-        print('The game is not built yet (looked in %s): double-click "Install Tomodachi Life.bat" first.' % build)
+        print('The game is not built yet (looked in %s): start "Tomodachi Life Launcher.exe" and press INSTALL first.' % build)
         return 1
     gone = [f for f in (GAME_DLL, 'SDL3.dll') if not os.path.isfile(os.path.join(work, f))]
     if gone:
         print('The game files are incomplete: %s missing in %s.\n'
               'Usually an antivirus removed it (Windows Security > Virus & threat protection > Protection history: restore it\n'
-              'and allow it), or the installation stopped before the end. Double-click "Install Tomodachi Life.bat" and press\n'
-              'Resume: it makes the missing files again in a few minutes.' % (', '.join(gone), work))
+              'and allow it), or the installation stopped before the end. Start "Tomodachi Life Launcher.exe" and press\n'
+              'INSTALL: it makes the missing files again in a few minutes.' % (', '.join(gone), work))
         return 1
     if not a.direct and os.path.isfile(os.path.join(work, LAUNCHER)):
         subprocess.Popen([os.path.join(work, LAUNCHER)], cwd=work, close_fds=True)

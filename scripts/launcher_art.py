@@ -2,7 +2,7 @@
 holding timg/__Combined.bntx), decoded by tools/extract/bntx_png.c into build/work/title-logo.png. Game art: it stays in
 build/ and is never committed.
 The logo is also the exes' icon: build/work/tomodachi.ico, written into TomodachiLauncher.exe and tomodachi_native.exe
-(Explorer, shortcuts, taskbar) on this PC only, and copied to opensmash.ico, the file runtime/display.c loads for the
+and the two exes at the top of the folder (Explorer, shortcuts, taskbar) on this PC only, and copied to opensmash.ico, the file runtime/display.c loads for the
 game window's icon. The runtime package's exes carry no icon, so no game art.
 
     python scripts/launcher_art.py [game folder [build folder]]      (default build/dump: exefs/ and romfs/)
@@ -33,6 +33,7 @@ FONT_ARCHIVE = os.path.join('romfs', 'Font', 'Font.Nin_NX_NVN.bfarc.zs')
 UI_FONTS = {'scft/ninP_SeuratCapie-EB_003.bfotf': 'seurat_eb.otf', 'scft/ninP_SeuratCapie-B_003.bfotf': 'seurat_b.otf',
             'scft/NinDev-TCExt.bfttf': 'keys.ttf'}
 ICON_EXES = ('TomodachiLauncher.exe', 'tomodachi_native.exe')
+ROOT_EXES = ('Tomodachi Life.exe', 'Tomodachi Life Launcher.exe')      # at the top of the folder (launcher/start.c, from the setup)
 
 
 def sarc_file(blob, want):
@@ -91,8 +92,9 @@ def stamp_icon(work):
     k32.UpdateResourceW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, wintypes.WORD, ctypes.c_char_p, wintypes.DWORD]
     k32.EndUpdateResourceW.argtypes = [wintypes.HANDLE, wintypes.BOOL]
     failed = []
-    for name in ICON_EXES:
-        exe = os.path.join(work, name)
+    roots = [p for p in (os.path.join(REPO, n) for n in ROOT_EXES) if os.path.exists(p)]      # (a source checkout has none)
+    for exe in [os.path.join(work, n) for n in ICON_EXES] + roots:
+        name = os.path.basename(exe)
         h = k32.BeginUpdateResourceW(exe, False) if os.path.exists(exe) else None
         ok = bool(h)
         if h:

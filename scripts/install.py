@@ -1025,7 +1025,7 @@ def parse(argv):
     ap.add_argument('--firmware', help='your firmware folder (.nca files) or the extracted system fonts')
     ap.add_argument('--build-dir', help='install location: the folder for the unpacked game, the build, the logs, the saves and the '
                                         '.nsz decompression (about 15 GB; default <repo>\\build). Remembered in build_location.txt, '
-                                        'so Resume, setup.py, run.py, Play Tomodachi Life.bat and the shortcuts use it too')
+                                        'so Resume, setup.py, run.py, the launcher and the shortcuts use it too')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs')
     ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-6 only)')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder) to use instead of the one of the GitHub Release')
@@ -1105,8 +1105,8 @@ def main(argv=None):
         say(msg)
         P.emit(ev='done', ok=not cx.blockers, msg=msg)
         return 0
-    say('Done: double-click "Play Tomodachi Life.bat" (or the Tomodachi Life shortcut)')
-    P.emit(ev='done', ok=True, msg='Ready: double-click "Play Tomodachi Life.bat"')
+    say('Done: start "Tomodachi Life.exe" in this folder (or the Tomodachi Life shortcut)')
+    P.emit(ev='done', ok=True, msg='Ready: start "Tomodachi Life.exe"')
     return 0
 
 

@@ -3,8 +3,8 @@
 
     python scripts/shortcuts.py [--dry-run]
 
-Creates "Tomodachi Life.lnk" (target: Play Tomodachi Life.bat, working folder: the repository) on the desktop and in the
-Start menu (Programs), and "Tomodachi Life - Installer.lnk" (target: Install Tomodachi Life.bat) in the Start menu. Idempotent: a shortcut that
+Creates "Tomodachi Life.lnk" (target: the launcher, build/work/TomodachiLauncher.exe of the install location) on the desktop
+and in the Start menu (Programs), and "Tomodachi Life - Installer.lnk" (the launcher too: its INSTALL) in the Start menu. Idempotent: a shortcut that
 already points at the right place is left alone; one that points elsewhere (the folder was moved) is rewritten.
 
 The python.org embeddable package has no pywin32, so the shortcuts are made through `powershell -NoProfile` with the
@@ -48,20 +48,17 @@ foreach ($it in (ConvertFrom-Json $env:SSBU_LNK_JSON)) {
 
 def plan(repo=REPO):
     """-> list of dict(dir, name, target, cwd, desc, icon); dir is a real folder or '@desktop' / '@programs'."""
-    # Play Tomodachi Life.bat finds the install location by itself (scripts/run.py reads build_location.txt); only the icon
-    # is the launcher's
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_location
-    exe = os.path.join(build_location.get(repo), 'work', 'TomodachiLauncher.exe')
-    # the launcher itself (no console window): it installs what is missing too; the logo's .ico, since the launcher's own
-    # icon cannot be written while it runs the install
+    # the launcher itself (no console window), of the install location, else the one the release unpacked; it installs what
+    # is missing too, so both shortcuts open it (1.0.0's Installer shortcut named Install Tomodachi Life.bat: rewritten)
+    want = os.path.join(build_location.get(repo), 'work', 'TomodachiLauncher.exe')
+    exe = next((p for p in (want, os.path.join(repo, 'build', 'work', 'TomodachiLauncher.exe')) if os.path.isfile(p)), want)
+    # the logo's .ico, since the launcher's own icon cannot be written while it runs the install
     ico = os.path.join(os.path.dirname(exe), 'tomodachi.ico')
     icon = ico if os.path.isfile(ico) else exe + ',0' if os.path.isfile(exe) else ''
-    play = {'name': PLAY_NAME, 'target': exe if os.path.isfile(exe) else os.path.join(repo, 'Play Tomodachi Life.bat'),
-            'cwd': os.path.dirname(exe) if os.path.isfile(exe) else repo,
-            'desc': 'Tomodachi Life: Living the Dream, native PC build', 'icon': icon}
-    inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install Tomodachi Life.bat'), 'cwd': repo,
-            'desc': 'Install, repair or update Tomodachi Life native', 'icon': ''}
+    play = {'name': PLAY_NAME, 'target': exe, 'cwd': os.path.dirname(exe), 'desc': 'Tomodachi Life: Living the Dream, native PC build', 'icon': icon}
+    inst = {'name': INSTALL_NAME, 'target': exe, 'cwd': os.path.dirname(exe), 'desc': 'Install, repair or update Tomodachi Life native (INSTALL)', 'icon': icon}
     over = [d for d in (os.environ.get('SSBU_SHORTCUT_DIRS') or '').split(os.pathsep) if d]
     if over:
         return [dict(it, dir=d) for d in over for it in (play, inst)]

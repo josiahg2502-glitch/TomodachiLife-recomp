@@ -148,7 +148,7 @@ def rebuild_advice(paths):
         out.append('  `stage` copies the changed sources into build\\work (always, cheap); `--from %s` then repeats %s and the later steps,'
                    % (first, first))
         out.append('  and each of those recompiles / relifts only what its inputs changed (modification time). Steps before %s stay done.' % first)
-        out.append('  (or double-click Install Tomodachi Life.bat again: it does the same.)')
+        out.append('  (or the launcher\'s INSTALL again: it does the same.)')
     if other:
         out.append('  %d changed file(s) are in no known build folder; if in doubt use --from stage.' % other)
     return out

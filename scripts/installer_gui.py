@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The installer window (the fallback of Install Tomodachi Life.bat): asks for your own game files, then runs scripts/install.py and shows
+"""The installer window (the fallback of scripts/bootstrap.ps1, run by hand): asks for your own game files, then runs scripts/install.py and shows
 its steps, a progress bar and the log. Only the Python standard library (tkinter). Nothing is sent anywhere."""
 import os
 import queue
@@ -192,7 +192,7 @@ class App:
         if code == 0:
             self.bar['value'] = 100
             self.mark(4, 'ok')
-            self.status.config(text='Done. Press Play (or double-click "Play Tomodachi Life.bat").')
+            self.status.config(text='Done. Press Play (or start "Tomodachi Life.exe").')
             self.play.config(state='normal')
         else:
             cur = next((i for i, l in enumerate(self.step_lbl) if l.cget('fg') == '#0a58ca'), 0)
@@ -200,7 +200,7 @@ class App:
             self.status.config(text='Stopped (code %d): see the log above. Press Install again to go on from there.' % code)
 
     def run_game(self):
-        subprocess.Popen(['cmd', '/c', os.path.join(REPO, 'Play Tomodachi Life.bat')], cwd=REPO)
+        subprocess.Popen([sys.executable, os.path.join(REPO, 'scripts', 'run.py')], cwd=REPO)      # the launcher of the install location
 
     def close(self):
         if self.proc and self.proc.poll() is None:
