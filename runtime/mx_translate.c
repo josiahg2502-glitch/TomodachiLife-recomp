@@ -118,6 +118,9 @@ static const char *CB(Mx *e, uint64_t i) {                /* c[bits 34..38][bits
         if (f == 0) { e->gubos |= 1u << n; e->cbufs |= 1u << (3 + n); return S(e, "0x%08xu", (17 + n) << 27); }
         return f == 2 ? "0x07fffffcu" : "0u";
     }
+    /* Vulkan: the rest of the driver's constant buffer reads as 0, as on OpenGL, which never binds it (cbufs bit 0 means TEX.B on
+     * Vulkan, and cb0 is not declared there: glslang rejected a vertex stage of the 70-Mii island) */
+    if (b == 0 && e->in->target == 1) return "0u";
     e->cbufs |= 1u << b;
     if (b < 18 && w > e->cb_max[b]) e->cb_max[b] = (uint16_t)w;
     return S(e, "cb%u(%uu)", b, w);
@@ -324,6 +327,21 @@ static const char *shadow_coords(Mx *e, unsigned t, const char *coords, int dim,
     if (t == 0) return S(e, "vec3(%s, 0.0, %s)", coords, dref);
     return S(e, "vec%d(%s, %s)", dim + 1, coords, dref);
 }
+/* MxIn.no_shadow_lod: a 2D array (t 3) or cube (t 6) shadow lookup with an explicit lod (lod), a bias or an offset, as
+ * textureGrad(Offset): the lod as gradients that many texels long (exact at lod 0, the shadow maps' only level; a cube's lod
+ * above 0 approximated by its face size), a bias as the implicit gradients scaled by 2^bias (fragment stages). */
+static const char *shadow_grad(Mx *e, unsigned t, const char *smp, const char *p, const char *lod, const char *bias, const char *off) {
+    const char *gx, *gy;
+    if (lod) {
+        gy = t == 6 ? "vec3(0.0)" : "vec2(0.0)";
+        gx = !strcmp(lod, "0.0") ? gy : t == 6 ? S(e, "vec3(exp2(%s) * 2.0 / float(textureSize(%s, 0).x))", lod, smp)
+                                               : S(e, "(vec2(exp2(%s)) / vec2(textureSize(%s, 0).xy))", lod, smp);
+    } else {
+        const char *k = bias ? S(e, " * exp2(%s)", bias) : "";
+        gx = S(e, "(dFdx(%s.xy)%s)", p, k); gy = S(e, "(dFdy(%s.xy)%s)", p, k);
+    }
+    return off ? S(e, "textureGradOffset(%s, %s, %s, %s, %s)", smp, p, gx, gy, off) : S(e, "textureGrad(%s, %s, %s, %s)", smp, p, gx, gy);
+}
 static const char *tex_offset(Mx *e, unsigned t, const char *reg, int bits) {      /* signed 4-bit (TEX/TLD/TXD) or 6-bit (TLD4) fields */
     int step = bits == 4 ? 4 : 8;
     if (t == 6 || t == 7) { fail(e, "texture offset", "offset on a cube texture"); return "0"; }
@@ -436,6 +454,8 @@ static void op_tex(Mx *e, uint64_t i, int bindless) {
         const char *p = shadow_coords(e, t, coords, dim, dref);
         if (t == 7 && (explicit_lod || off || bias)) { fail(e, "TEX", "shadow cube array with lod/offset/bias"); return; }
         if (t == 7) call = S(e, "texture(%s, %s, %s)", smp, p, dref);
+        else if (e->in->no_shadow_lod && ((t == 3 && (explicit_lod || off || bias)) || (t == 6 && explicit_lod)))
+            call = shadow_grad(e, t, smp, p, explicit_lod ? lodv : NULL, bias ? lod : NULL, off);
         else if (explicit_lod) call = off ? S(e, "textureLodOffset(%s, %s, %s, %s)", smp, p, lodv, off) : S(e, "textureLod(%s, %s, %s)", smp, p, lodv);
         else call = off ? S(e, "textureOffset(%s, %s, %s%s%s)", smp, p, off, bias ? ", " : "", bias ? lod : "") : S(e, "texture(%s, %s%s%s)", smp, p, bias ? ", " : "", bias ? lod : "");
         emit(e, "float sv = %s; vec4 tv = vec4(sv, sv, sv, 1.0);", call);
@@ -472,7 +492,8 @@ static void op_texs(Mx *e, uint64_t i) {
     case 7: call = vs ? S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "2DArray", 0), FR(e, a + 1), FR(e, b), ARR(e, a))
                       : S(e, "texture(%s, vec3(%s, %s, %s))", SMP(e, unit, "2DArray", 0), FR(e, a + 1), FR(e, b), ARR(e, a)); break;
     case 8: call = S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "2DArray", 0), FR(e, a + 1), FR(e, b), ARR(e, a)); break;
-    case 9: call = S(e, "textureLod(%s, vec4(%s, %s, %s, %s), 0.0)", SMP(e, unit, "2DArray", 1), FR(e, a + 1), FR(e, b), ARR(e, a), FR(e, b + 1)); break;
+    case 9: call = S(e, e->in->no_shadow_lod ? "textureGrad(%s, vec4(%s, %s, %s, %s), vec2(0.0), vec2(0.0))" : "textureLod(%s, vec4(%s, %s, %s, %s), 0.0)",
+                     SMP(e, unit, "2DArray", 1), FR(e, a + 1), FR(e, b), ARR(e, a), FR(e, b + 1)); break;
     case 10: call = vs ? S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "3D", 0), FR(e, a), FR(e, a + 1), FR(e, b))
                        : S(e, "texture(%s, vec3(%s, %s, %s))", SMP(e, unit, "3D", 0), FR(e, a), FR(e, a + 1), FR(e, b)); break;
     case 11: call = S(e, "textureLod(%s, vec3(%s, %s, %s), 0.0)", SMP(e, unit, "3D", 0), FR(e, a), FR(e, a + 1), FR(e, b)); break;
@@ -1175,9 +1196,9 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned cb = MXB(i, 36, 5), sz = MXB(i, 48, 3), mode = MXB(i, 44, 2), rd = MXB(i, 0, 8);
         int off = (int)(int16_t)MXB(i, 20, 16);
         if (mode != 0) { fail(e, "LDC.IS", "LDC mode %u", mode); break; }
-        e->cbufs |= 1u << cb;
-        if (cb < 18) e->cb_dyn |= 1u << cb;
-        emit(e, "uint ad = %s + 0x%08xu, w = cb%u(ad >> 2);", A8, (uint32_t)off, cb);
+        int zero = cb == 0 && e->in->target == 1;     /* Vulkan: the driver's constant buffer reads as 0 (CB) */
+        if (!zero) { e->cbufs |= 1u << cb; if (cb < 18) e->cb_dyn |= 1u << cb; }
+        emit(e, zero ? "uint ad = %s + 0x%08xu, w = 0u;" : "uint ad = %s + 0x%08xu, w = cb%u(ad >> 2);", A8, (uint32_t)off, cb);
         if (rd != 255 && (sz == 4 || sz == 5)) { e->ldc_src[rd] = 1u + (cb << 16) + ((uint32_t)off & 0xffffu); if (sz == 5 && rd < 254) e->ldc_src[rd + 1] = 1u + (cb << 16) + (((uint32_t)off + 4u) & 0xffffu); }
         switch (sz) {
         case 0: emit(e, " %s = bitfieldExtract(w, int((ad & 3u) * 8u), 8);", DST); break;
@@ -1185,7 +1206,7 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         case 2: emit(e, " %s = bitfieldExtract(w, int((ad & 2u) * 8u), 16);", DST); break;
         case 3: emit(e, " %s = uint(bitfieldExtract(int(w), int((ad & 2u) * 8u), 16));", DST); break;
         case 4: emit(e, " %s = w;", DST); break;
-        case 5: emit(e, " %s = w; %s = cb%u((ad >> 2) + 1u);", DST, D(e, rd == 255 ? 255 : rd + 1), cb); break;
+        case 5: emit(e, zero ? " %s = w; %s = 0u;" : " %s = w; %s = cb%u((ad >> 2) + 1u);", DST, D(e, rd == 255 ? 255 : rd + 1), cb); break;
         default: fail(e, "LDC", "LDC size %u", sz); break;
         }
         break;
@@ -1726,10 +1747,10 @@ int mx_translate(const MxIn *in, MxOut *out) {
         if (in->stage == MX_VERTEX) e->out_attr |= in->force_out;      /* declared and set to (0, 0, 0, 1) below */
         const int vk = in->target == 1;
         const char *set0 = vk ? "set = 0, " : "", *set1 = vk ? "set = 1, " : "";
-        if (vk) emit(&h, "#version 460\n#extension GL_ARB_gpu_shader_int64 : enable\n#extension GL_EXT_texture_shadow_lod : enable\n"
+        if (vk) emit(&h, "#version 460\n#extension GL_ARB_gpu_shader_int64 : enable\n%s"
                      "#extension GL_KHR_shader_subgroup_vote : enable\n#extension GL_KHR_shader_subgroup_ballot : enable\n"
                      "#extension GL_KHR_shader_subgroup_shuffle : enable\n#extension GL_KHR_shader_subgroup_shuffle_relative : enable\n"
-                     "#extension GL_EXT_nonuniform_qualifier : enable\n");
+                     "#extension GL_EXT_nonuniform_qualifier : enable\n", in->no_shadow_lod ? "" : "#extension GL_EXT_texture_shadow_lod : enable\n");
         else
         emit(&h, "#version 460 compatibility\n#extension GL_ARB_bindless_texture : require\n#extension GL_NV_gpu_shader5 : enable\n#extension GL_ARB_gpu_shader_int64 : enable\n"
                  "#extension GL_ARB_shader_ballot : enable\n#extension GL_ARB_shader_group_vote : enable\n#extension GL_EXT_texture_shadow_lod : enable\n");

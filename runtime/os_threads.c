@@ -18,6 +18,19 @@ int display_l1_trace(void); double display_l1_ms(void); const char *guest_thread
 #endif
 #define L1O(what, key) do { if (display_l1_trace()) { const char *n_ = guest_thread_name_of(GetCurrentThreadId()); printf("l1-trace: %+8.2f %-26s lr %09llx %s %llx%c", display_l1_ms(), n_ ? n_ : "?", (unsigned long long)c->x[30], what, (unsigned long long)(key), 10); } } while (0)
 
+/* Owner (thread id) and recursion count of a held CRITICAL_SECTION (mutex_fresh, the held-lock reports). glibc's recursive
+ * mutex keeps both: the owner's kernel thread id, which is GetCurrentThreadId there. */
+#ifdef _WIN32
+#define CS_OWNER(cs) ((DWORD)(uintptr_t)(cs)->OwningThread)
+#define CS_DEPTH(cs) ((cs)->RecursionCount)
+#elif defined(__GLIBC__)
+#define CS_OWNER(cs) ((DWORD)(cs)->__data.__owner)
+#define CS_DEPTH(cs) ((long)(cs)->__data.__count)
+#else   /* shortcut: bionic and macOS keep them private, so mutex_fresh and the reports see no owner; read them there if a hang needs it */
+#define CS_OWNER(cs) 0UL
+#define CS_DEPTH(cs) 0L
+#endif
+
 #define A0 (c->x[0])
 #define A1 (c->x[1])
 #define A2 (c->x[2])
@@ -195,6 +208,7 @@ static int console_cores(void) {
         if (getenv("SSBU_OS_CONSOLE_CORES") && strcmp(getenv("SSBU_OS_CONSOLE_CORES"), "0")) {      /* "0": off */
             DWORD_PTR proc = 0, sys = 0;
             GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+#ifdef _WIN32                                      /* (Linux: the plain rule below; a hybrid CPU's classes are not read there) */
             {   /* Hybrid CPUs: three performance cores, one hardware thread each, from the top. "Every second processor from the
                  * top" took two efficiency cores of an i5-13400F (processors 12-15 are its efficiency cores): the game ran at
                  * 15-18 fps on the island, its thread on an efficiency core at every present (2026-10-24). */
@@ -224,6 +238,7 @@ static int console_cores(void) {
                 }
                 if (n < 3) n = 0;
             }
+#endif
             for (int b = (int)(sizeof(DWORD_PTR) * 8) - 1; b >= 0 && n < 3; b--)      /* from the top, every second processor: not two hardware threads of one core */
                 if (proc >> b & 1) { g_cc_core[n++] = (DWORD_PTR)1 << b; b--; }
             on = n == 3;
@@ -232,8 +247,10 @@ static int console_cores(void) {
              * browser, another game) took them for whole time slices: the island at frame_rate = 60 came out at 52-54 fps with
              * frames of 30-40 ms among them, 60.0 with this (2026-10-25). Only these three are affected: nothing else of ours is
              * pinned there. TOMO_CC_PRIOCLASS=0: normal, as before. */
+#ifdef _WIN32                                      /* (Linux: a higher priority needs privileges) */
             if (on && !(getenv("TOMO_CC_PRIOCLASS") && !strcmp(getenv("TOMO_CC_PRIOCLASS"), "0")))
                 SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+#endif
             printf("nn::os: console core model %s (SSBU_OS_CONSOLE_CORES): host processor masks %llx %llx %llx for cores 0 1 2\n", on ? "ON" : "NOT possible (fewer than 3 usable processors)",
                    (unsigned long long)g_cc_core[0], (unsigned long long)g_cc_core[1], (unsigned long long)g_cc_core[2]);
         }
@@ -400,10 +417,10 @@ void os_wait_report(FILE *out) {
                 (unsigned long long)c->fn, (unsigned long long)c->x[30], c->in_import ? c->in_import : "(guest code)", (unsigned long long)c->x[0]);
         Obj *w = !o->finished && c->in_import && c->x[0] > 0x10000 ? obj_peek(c->x[0]) : NULL;
         if (w) fprintf(out, " -> signaled %d autoclear %d count %d", w->signaled, w->autoclear, w->count);
-        if (w && w->cs.OwningThread) {                  /* a mutex: who holds it (CRITICAL_SECTION's owner is the thread id) */
-            DWORD tid = (DWORD)(uintptr_t)w->cs.OwningThread;
+        if (w && CS_OWNER(&w->cs)) {                    /* a mutex: who holds it (CRITICAL_SECTION's owner is the thread id) */
+            DWORD tid = CS_OWNER(&w->cs);
             const char *on = guest_thread_name_of(tid);
-            fprintf(out, " held by thread %lu (%s) recursion %ld, locked from %llx", (unsigned long)tid, on ? on : tid == GetCurrentThreadId() ? "this thread" : "main or host thread", w->cs.RecursionCount, (unsigned long long)w->lock_from);
+            fprintf(out, " held by thread %lu (%s) recursion %ld, locked from %llx", (unsigned long)tid, on ? on : tid == GetCurrentThreadId() ? "this thread" : "main or host thread", (long)CS_DEPTH(&w->cs),(unsigned long long)w->lock_from);
         }
         fputc('\n', out);
     }
@@ -516,11 +533,16 @@ static void os_StartThread(Ctx *c) {
     InterlockedIncrement(&g_thread_count);
     o->thread = CreateThread(NULL, (SIZE_T)256 << 20, thread_main, o, STACK_SIZE_PARAM_IS_A_RESERVATION | CREATE_SUSPENDED, NULL);
     if (o->thread && o->name) {                       /* the game's name on the host thread too (debuggers, profilers, the sampler) */
+#ifndef _WIN32
+        WCHAR w[64]; int n = MultiByteToWideChar(CP_UTF8, 0, (const char *)(uintptr_t)o->name, -1, w, 63);
+        if (n > 0) { w[63] = 0; SetThreadDescription(o->thread, w); }
+#else
         typedef HRESULT (WINAPI *set_desc_t)(HANDLE, PCWSTR);
         static set_desc_t set_desc; static int looked;
         if (!looked) { looked = 1; set_desc = (set_desc_t)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription"); }
         wchar_t w[64]; int n = MultiByteToWideChar(CP_UTF8, 0, (const char *)(uintptr_t)o->name, -1, w, 63);
         if (set_desc && n > 0) { w[63] = 0; set_desc(o->thread, w); }
+#endif
     }
     if (o->thread) { SetThreadPriority(o->thread, host_priority(o->priority)); apply_sched(o->thread, o->core_mask, o->priority); ResumeThread(o->thread); }
 }
@@ -645,11 +667,11 @@ static void os_SetTlsValue(Ctx *c) { t_tls[A0 & 63] = A1; }
  * memory, here the object keyed by that address kept the lock, and the next pool made at the same address was born
  * locked by a thread that had long moved on (the world load hung in 0x7100329cc4). */
 static void mutex_fresh(Obj *o, const char *why) {
-    if (!o->cs.OwningThread || o->cs.RecursionCount <= 0) return;
-    if ((DWORD)(uintptr_t)o->cs.OwningThread == GetCurrentThreadId()) { while (o->cs.RecursionCount > 0) LeaveCriticalSection(&o->cs); return; }
+    if (!CS_OWNER(&o->cs) || CS_DEPTH(&o->cs) <= 0) return;
+    if (CS_OWNER(&o->cs) == GetCurrentThreadId()) { while (CS_DEPTH(&o->cs) > 0) LeaveCriticalSection(&o->cs); return; }
     static int nlog;
     if (nlog++ < 8) printf("nn::os: %s of mutex %llx still held by thread %lu (locked from %llx): the lock is dropped\n", why, (unsigned long long)o->key,
-                           (unsigned long)(uintptr_t)o->cs.OwningThread, (unsigned long long)o->lock_from);
+                           (unsigned long)CS_OWNER(&o->cs), (unsigned long long)o->lock_from);
     DeleteCriticalSection(&o->cs);
     InitializeCriticalSection(&o->cs);
 }
@@ -704,12 +726,12 @@ void os_held_report(FILE *out) {
     int n = 0;
     for (int h = 0; h < BUCKETS; h++)
         for (Obj *o = g_table[h]; o; o = o->next) {
-            if (!o->cs.OwningThread || o->cs.RecursionCount <= 0) continue;
-            DWORD tid = (DWORD)(uintptr_t)o->cs.OwningThread;
+            if (!CS_OWNER(&o->cs) || CS_DEPTH(&o->cs) <= 0) continue;
+            DWORD tid = CS_OWNER(&o->cs);
             const char *on = guest_thread_name_of(tid);
             if (!n++) fprintf(out, "  guest mutexes held now (object, owner, recursion, locked from):\n");
             fprintf(out, "    %llx held by thread %lu (%s) x%ld, locked from %llx\n", (unsigned long long)o->key, (unsigned long)tid, on ? on : "main or host thread",
-                    o->cs.RecursionCount, (unsigned long long)o->lock_from);
+                    (long)CS_DEPTH(&o->cs), (unsigned long long)o->lock_from);
         }
 }
 /* hitch.c (SSBU_HITCH): host thread id that owns the guest mutex `key` now, 0 = nobody. Diagnostics only. */
@@ -718,7 +740,7 @@ DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)(uintptr_t)obj(key)->cs
 #elif defined(__APPLE__)
 DWORD os_mutex_owner(uint64_t key) { (void)key; return 0; }       /* macOS: a pthread mutex does not show its owner */
 #else
-DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)obj(key)->cs.__data.__owner : 0; }     /* glibc: the owner's tid */
+DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)CS_OWNER(&obj(key)->cs) : 0; }     /* glibc: the owner's tid (bionic: 0) */
 #endif
 static void pmtx_lock(Ctx *c) { EnterCriticalSection(&obj(A0)->cs); RET(0); }
 static void pmtx_unlock(Ctx *c) { LeaveCriticalSection(&obj(A0)->cs); RET(0); }

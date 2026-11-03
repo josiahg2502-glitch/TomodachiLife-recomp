@@ -2,6 +2,8 @@
 """One entry point: from a fresh clone and your own dump to a runnable native build of the game (Windows).
 
     python scripts/setup.py --dump <folder> [--jobs N] [tool locations ...]
+    python scripts/setup.py --target linux --dump <folder> [--jobs N]      a native Linux build (Vulkan), in <repo>/build-linux
+                                                                            (scripts/linux/install_deps.sh first; then ./play.sh)
 
 <folder> holds what you dumped from YOUR console (README.md says how; scripts/install.py makes it from your game files):
     <folder>/exefs/    the title's ExeFS files: main  sdk  main.npdm, the update applied if you have it
@@ -51,6 +53,7 @@ GAME_BUILDS = {0x25ce6a0: '1.0.0', 0x256d250: '1.0.4'}
 SDK_TEXT_SIZE = 0x661ff0
 EXE = 'tomodachi_native.exe'
 GAME_DLL = 'tomodachi_game.dll'
+LINUX_EXE, LINUX_GAME = 'tomodachi_native', 'tomodachi_game.so'      # --target linux: ELF, beside them ssbu_glslang.so
 LAUNCHER = 'TomodachiLauncher.exe'
 BNTX_PNG = 'bntx_png.exe'                 # tools/extract/bntx_png.c: the launcher's logo out of the game's texture archive
 ROMFS_PROBE = ('Layout', 'Mii', 'Pack')   # folders every RomFS of the game has (a dump cut short lacks some)
@@ -111,8 +114,11 @@ def default_jobs():
 class Ctx:
     def __init__(self, a):
         self.a = a
-        # --build, else the install location chosen in the installer window (build_location.txt), else <repo>/build
-        self.build = os.path.abspath(a.build or build_location.get())
+        self.linux = getattr(a, 'target', 'windows') == 'linux'
+        # --build, else the install location chosen in the installer window (build_location.txt), else <repo>/build;
+        # --target linux: <repo>/build-linux
+        self.build = os.path.abspath(a.build or (os.path.join(REPO, 'build-linux') if self.linux else build_location.get()))
+        self.exe, self.game = (LINUX_EXE, LINUX_GAME) if self.linux else (EXE, GAME_DLL)
         self.work = os.path.join(self.build, 'work')
         self.logs = os.path.join(self.build, 'logs')
         self.state_file = os.path.join(self.build, 'state.json')
@@ -371,6 +377,8 @@ def find_first(cands, probe):
 def step_deps(cx):
     a = cx.a
     say('  python %s' % sys.version.split()[0])
+    if cx.linux:
+        return deps_linux(cx)
     if a.runtime:
         m = load_runtime(cx, a.runtime)
         say('  runtime package: %s (commit %s, built %s): the exe is not built here' % (cx.runtime_dir, str(m.get('source_commit'))[:10], m.get('built')))
@@ -477,6 +485,106 @@ def step_deps(cx):
     # the launcher is C++17: its standard library (MSVC's) wants a newer clang than the game's clang 9
     newer = find_first([os.environ.get('LAUNCHER_LLVM'), r'C:\Program Files\LLVM'], lambda d: os.path.exists(os.path.join(d, 'bin', 'clang.exe')))
     cx.tools['launcher_clang'] = os.path.join(newer, 'bin', 'clang.exe') if newer else clang
+    check_dump(cx)
+    cx.state['tools'] = cx.tools
+
+
+LINUX_PKGS = (('sdl3', 'SDL3'), ('libavformat', 'FFmpeg'), ('libavcodec', 'FFmpeg'),
+              ('libswscale', 'FFmpeg'), ('libswresample', 'FFmpeg'), ('libavutil', 'FFmpeg'))
+GLSLANG_LIBS = (['-lglslang', '-lglslang-default-resource-limits'],          # shared glslang (Arch, Fedora)
+                ['-lglslang', '-lglslang-default-resource-limits', '-lSPIRV', '-lMachineIndependent', '-lGenericCodeGen',
+                 '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools', '-lstdc++', '-lpthread'],      # static glslang (Debian, Ubuntu)
+                ['-lglslang', '-lglslang-default-resource-limits', '-lSPIRV', '-lMachineIndependent', '-lGenericCodeGen',
+                 '-lOSDependent', '-lHLSL', '-lOGLCompiler', '-lSPIRV-Tools-opt', '-lSPIRV-Tools', '-lstdc++', '-lpthread'])      # older static glslang (Ubuntu 22.04)
+LINUX_HINT = '\n(scripts/linux/install_deps.sh installs everything the Linux build needs; see docs/LINUX.md)'
+
+
+def sdl3_local():
+    """The SDL3 install_deps.sh builds into deps/sdl3-linux when the system has none (Ubuntu before 25.04), or ''. Used by its
+    folders (SDL3_PREFIX for build.py), not through pkg-config, which breaks a path with a space into two words."""
+    local = os.path.join(REPO, 'deps', 'sdl3-linux')
+    return local if os.path.isfile(os.path.join(local, 'include', 'SDL3', 'SDL.h')) else ''
+
+
+def deps_linux(cx):
+    """--target linux: the system's clang and the development packages of SDL3, FFmpeg, glslang, Vulkan and OpenGL;
+    the Opus and Vulkan libraries the game loads at run time. scripts/linux/install_deps.sh installs them."""
+    a = cx.a
+    local = sdl3_local()
+    missing = []
+    for mod, pkg in (('zstandard', 'zstandard'), ('lz4', 'lz4'), ('PIL', 'Pillow')):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        raise Fail('missing Python packages: %s (run setup.py with deps/venv/bin/python)%s' % (', '.join(missing), LINUX_HINT))
+    say('  python packages: zstandard lz4 Pillow: ok')
+    clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else os.environ.get('RECOMP_CLANG') or shutil.which('clang')
+    if not clang or not os.path.exists(clang):
+        raise Fail('clang not found (install clang, or --llvm <folder with bin/clang>)' + LINUX_HINT)
+    ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
+    say('  clang: %s   [%s]' % (ver, clang))
+    cx.tools['clang'] = clang
+    if not shutil.which('pkg-config'):
+        raise Fail('pkg-config not found' + LINUX_HINT)
+    pkgs = [(pc, name) for pc, name in LINUX_PKGS if not (local and pc == 'sdl3')]
+    if local:
+        say('  %-13s %s' % ('sdl3', local))
+    for pc, name in pkgs:
+        r = subprocess.run(['pkg-config', '--modversion', pc], capture_output=True, text=True)
+        if r.returncode:
+            raise Fail('development files of %s (%s) not found by pkg-config%s' % (name, pc, LINUX_HINT))
+        say('  %-13s %s' % (pc, r.stdout.strip()))
+    for h, name in (('/usr/include/glslang/Include/glslang_c_interface.h', 'glslang'), ('/usr/include/GL/gl.h', 'OpenGL (libGL)')):
+        if not os.path.exists(h):
+            raise Fail('%s headers not found (%s)%s' % (name, h, LINUX_HINT))
+    # one program linked against every library of the build, and run: a missing library shows here, not after an hour
+    probe = os.path.join(cx.build, 'probe')
+    os.makedirs(probe, exist_ok=True)
+    with open(os.path.join(probe, 'p.c'), 'w') as f:
+        f.write('#include <stdio.h>\n#include <SDL3/SDL.h>\n'
+                '#include <libavcodec/avcodec.h>\n#include <glslang/Include/glslang_c_interface.h>\n#include <GL/gl.h>\n'
+                'int main(void) {\n'
+                '    printf("%d %p %p %p\\n", SDL_GetVersion(), (void *)glslang_initialize_process, (void *)glGetString, (void *)avcodec_find_decoder);\n'
+                '    puts("ok");\n    return 0;\n}\n')
+    flags = subprocess.run(['pkg-config', '--cflags', '--libs'] + [p for p, _ in pkgs], capture_output=True, text=True).stdout.split()
+    if local:
+        flags = ['-I', os.path.join(local, 'include'), '-L', os.path.join(local, 'lib'), '-lSDL3', '-Wl,-rpath,' + os.path.join(local, 'lib')] + flags
+    err = ''
+    for libs in GLSLANG_LIBS:
+        r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p')] + flags + libs + ['-lGL', '-lm'], capture_output=True, text=True)
+        if not r.returncode:
+            cx.tools['glslang_libs'] = libs
+            break
+        err = r.stderr
+    else:
+        raise Fail('a test program using SDL3, FFmpeg, glslang and OpenGL does not build:\n%s%s' % (err[-1200:], LINUX_HINT))
+    out = subprocess.run([os.path.join(probe, 'p')], capture_output=True, text=True).stdout.strip().splitlines()
+    if not out or out[-1] != 'ok':
+        raise Fail('the test program built against the libraries does not run (output %r)' % out)
+    say('  test program with SDL3, FFmpeg, glslang, OpenGL: builds and runs')
+    import ctypes.util
+    for lib, name in (('vulkan', 'the Vulkan loader (libvulkan.so.1)'), ('opus', 'the Opus library (libopus.so.0)')):
+        if not ctypes.util.find_library(lib):
+            raise Fail('%s not found: the game loads it at run time%s' % (name, LINUX_HINT))
+    say('  run-time libraries: libvulkan, libopus: ok')
+    deps = os.path.join(REPO, 'deps')
+    for key, opt, envv, sub, probe_rel in (
+            ('vulkan', a.vulkan_headers, 'VULKAN_HEADERS', 'Vulkan-Headers', os.path.join('include', 'vulkan', 'vulkan.h')),
+            ('suyu', a.suyu, 'SUYU_ROOT', 'suyu', os.path.join('src', 'core', 'hle', 'service', 'mii', 'types', 'raw_data.cpp'))):
+        found = find_first([opt, os.environ.get(envv), os.path.join(deps, sub), '/usr' if key == 'vulkan' else None], lambda d, p=probe_rel: os.path.exists(os.path.join(d, p)))
+        if not found:
+            raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, LINUX_HINT))
+        cx.tools[key] = found
+        say('  %-13s %s' % (sub, found))
+    found = find_first([a.imgui, os.environ.get('IMGUI_ROOT'), os.path.join(deps, 'imgui')],
+                       lambda d: os.path.exists(os.path.join(d, 'imgui.h')) and os.path.exists(os.path.join(d, 'imgui.cpp')))
+    if found:
+        cx.tools['imgui'] = found
+        say('  %-13s %s' % ('imgui', found))
+    else:
+        say('  WARNING: Dear ImGui not found: the settings menu will be left out of the build (--imgui <folder with imgui.h>)')
     check_dump(cx)
     cx.state['tools'] = cx.tools
 
@@ -676,6 +784,9 @@ def step_sdk(cx):
 
 def build_env(cx):
     # RECOMP_INLINE off: the inlined helpers were never measured at -O2 on this game (compile time and RAM)
+    if cx.linux:
+        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=LINUX_GAME, RECOMP_INLINE='0', RECOMP_TARGET='linux',
+                      RECOMP_LIFT_JOBS=str(cx.lift_jobs), SDL3_PREFIX=sdl3_local())
     # FFMPEG_ROOT: build.py compiles the movie fallback (mf_ffmpeg.c) with the headers install.py put in deps\ffmpeg
     return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=GAME_DLL, RECOMP_INLINE='0',
                   FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
@@ -692,8 +803,8 @@ def copy_ffmpeg(cx):
 
 def step_compile(cx):
     cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)], env=build_env(cx))
-    dll = os.path.join(cx.work, GAME_DLL)
-    say('  %s %.0f MB; objects %.0f MB' % (GAME_DLL, os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
+    dll = os.path.join(cx.work, cx.game)
+    say('  %s %.0f MB; objects %.0f MB' % (cx.game, os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
 
 
 def copy_opus(cx):
@@ -707,8 +818,26 @@ def copy_opus(cx):
     return name
 
 
+def link_linux(cx):
+    """The glslang shim (the Vulkan renderer's GLSL -> SPIR-V), the exe linked against the game library, the system's SDL3
+    or the one install_deps.sh built (deps/sdl3-linux) beside them (the exe looks in its own folder first: rpath $ORIGIN)."""
+    cx.run('link', [cx.tools['clang'], '-O2', '-shared', '-fPIC', 'vk_glslang_shim.c', '-o', 'ssbu_glslang.so'] + cx.tools.get('glslang_libs', GLSLANG_LIBS[0]))
+    cx.run('link', [sys.executable, 'build.py', 'link'], env=dict(build_env(cx), RECOMP_EXE=LINUX_EXE))
+    lib = os.path.join(REPO, 'deps', 'sdl3-linux', 'lib')
+    for n in (os.listdir(lib) if os.path.isdir(lib) else []):
+        if n.startswith('libSDL3.so.'):
+            shutil.copy2(os.path.join(lib, n), os.path.join(cx.work, n), follow_symlinks=True)
+    for f in (LINUX_EXE, 'ssbu_glslang.so', LINUX_GAME):
+        if not os.path.exists(os.path.join(cx.work, f)):
+            raise Fail('%s was not produced' % f)
+    say('  %s %.1f MB, ssbu_glslang.so, %s %.0f MB beside it' % (LINUX_EXE, os.path.getsize(os.path.join(cx.work, LINUX_EXE)) / 1048576.0,
+                                                                 LINUX_GAME, os.path.getsize(os.path.join(cx.work, LINUX_GAME)) / 1048576.0))
+
+
 def step_link(cx):
     cx.state.setdefault('done', {}).pop('prepare', None)       # a new exe: its shaders are prepared again (prepare_shaders)
+    if cx.linux:
+        return link_linux(cx)
     if cx.runtime_dir:                        # the prebuilt runtime: copied and checked; only the game DLL is linked here
         cx.run('link', [sys.executable, 'build.py', 'gamedll'], env=build_env(cx))
         with open(os.path.join(cx.runtime_dir, 'manifest.json')) as f:
@@ -811,6 +940,11 @@ def step_prepare(cx):
     game = os.path.dirname(d['romfs'])
     cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'shader_store.py'), game, cx.build, os.path.join(cx.bin, 'main.elf')], cwd=REPO)
     say('  shader store: %s' % os.path.join(cx.build, 'cache', 'shader_store'))
+    if cx.linux:                              # Vulkan: every stage of the store translated to SPIR-V now (no window, no GPU needed)
+        t0 = time.time()
+        out = cx.run('prepare', ['./' + LINUX_EXE, '--prepare-shaders', '../cache/shader_store'], log='prepare_shaders')
+        say('  shaders: %s (%s)' % (next((l.strip() for l in reversed(out.splitlines()) if l.strip()), 'prepared'), fmt(time.time() - t0)))
+        return
     try:
         cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'launcher_art.py'), game, cx.build], cwd=REPO)
         say('  launcher logo and icon: %s' % os.path.join(cx.work, 'title-logo.png'))
@@ -875,6 +1009,9 @@ ALWAYS = {'deps', 'stage'}               # cheap, and they fill the in-memory co
 
 def how_to_run(cx):
     say('')
+    if cx.linux:
+        say('Start the game: ./play.sh   (scripts/linux/install_desktop.sh adds it to your application menu)')
+        return
     say('Start the game: %s in %s (or the "Tomodachi Life" shortcut the installer makes).' % (LAUNCHER, cx.work))
     say('The shaders are compiled: the game starts in seconds (after a graphics driver update it prepares them once more).')
     say('Without the launcher:  python scripts/run.py')
@@ -882,6 +1019,7 @@ def how_to_run(cx):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--target', choices=('windows', 'linux'), default='windows', help='linux: a native Linux build in <repo>/build-linux')
     ap.add_argument('--dump', help='folder with exefs\\ and romfs\\ (and optionally sysdata\\) dumped from your console')
     ap.add_argument('--exefs'), ap.add_argument('--romfs'), ap.add_argument('--sysdata')
     ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build)')
@@ -933,7 +1071,7 @@ def main():
     # a finished build whose game files have gone since (an antivirus quarantines the 250 MB unsigned game DLL, or a
     # copy was interrupted): compile (the objects are kept, so only the DLL is linked again) and link run again
     if 'link' in done and not a.dry_run:
-        gone = [f for f in (EXE, GAME_DLL, 'SDL3.dll') if not os.path.exists(os.path.join(cx.work, f))]
+        gone = [f for f in ((LINUX_EXE, LINUX_GAME) if cx.linux else (EXE, GAME_DLL, 'SDL3.dll')) if not os.path.exists(os.path.join(cx.work, f))]
         if gone:
             say('%s missing from %s although the build was finished (an antivirus may have removed it: Windows Security > '
                 'Protection history): it is made again' % (', '.join(gone), cx.work))

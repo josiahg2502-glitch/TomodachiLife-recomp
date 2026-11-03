@@ -61,6 +61,9 @@ typedef struct {
      * gl_VertexIndex / gl_InstanceIndex - gl_BaseInstance; gl_PointCoord.y flipped (the viewport is flipped by the back end);
      * gl_PointSize is always the push constant's (the OpenGL path never enables program point size). */
     int target;
+    /* target 1: the glslang in use has no GL_EXT_texture_shadow_lod (before glslang 12: the Android NDK's, Ubuntu 22.04's).
+     * The shadow lookups it adds (2D array: lod, offset, bias; cube: lod) are written with textureGrad(Offset), core GLSL. */
+    int no_shadow_lod;
     unsigned tex_base;
     /* vertex stage: generic outputs to declare (and leave at (0, 0, 0, 1)) although the code never writes them: the inputs
      * of the fragment stage it is paired with. Vulkan requires every fragment input to have a vertex output

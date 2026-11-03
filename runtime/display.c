@@ -358,6 +358,24 @@ void display_fit(int sw, int sh, int dw, int dh, int out[4]) {      /* the large
         if (memcmp(last, out, sizeof last) && said++ < 20) { memcpy(last, out, sizeof last); printf("display: picture %dx%d at %d,%d in %dx%d\n", out[2], out[3], out[0], out[1], dw, dh); fflush(stdout); }
     }
 }
+static char g_title_note[72];                       /* after the frame counter in the title (net_relay.c: the Local Play room code) */
+void display_room_note(const char *s) { snprintf(g_title_note, sizeof g_title_note, "%s", s ? s : ""); }
+/* display_mouse: a point of the cw x ch client area -> the game's 1280x720 screen, 0 when it is off the picture */
+static int mouse_fit(long px, long py, long cw, long ch, float *x, float *y) {
+    int fit[4];
+    fit[0] = g_pic[0]; fit[1] = g_pic[1]; fit[2] = g_pic[2]; fit[3] = g_pic[3];      /* the picture as presented: 16:9, or wider (widescreen),
+                                                                                     * maybe with bars; the game's 2D stays 16:9 in its middle */
+    if (fit[2] <= 0 || fit[3] <= 0 || fit[0] + fit[2] > cw + 2 || fit[1] + fit[3] > ch + 2) {      /* (none presented yet in this size) */
+        fit[0] = 0; fit[1] = 0; fit[2] = (int)cw; fit[3] = (int)ch;
+        if ((long long)cw * ASPECT_H > (long long)ch * ASPECT_W) { fit[2] = (int)(ch * ASPECT_W / ASPECT_H); fit[0] = (int)(cw - fit[2]) / 2; }
+        else if ((long long)cw * ASPECT_H < (long long)ch * ASPECT_W) { fit[3] = (int)(cw * ASPECT_H / ASPECT_W); fit[1] = (int)(ch - fit[3]) / 2; }
+    }
+    if (fit[2] <= 0 || fit[3] <= 0 || px < fit[0] || py < fit[1] || px >= fit[0] + fit[2] || py >= fit[1] + fit[3]) return 0;
+    float uw = (float)fit[3] * 16.0f / 9.0f, ux = (float)fit[0] + ((float)fit[2] - uw) * 0.5f;      /* the 16:9 middle: 0..1280 (the wide sides beyond) */
+    *x = ((float)px - ux) * 1280.0f / uw;
+    *y = (float)(py - fit[1]) * 720.0f / (float)fit[3];
+    return 1;
+}
 #ifdef _WIN32
 static void sizing_keep_aspect(HWND h, WPARAM edge, RECT *r) {
     RECT frame = {0, 0, 0, 0};
@@ -459,25 +477,13 @@ static DWORD WINAPI close_watchdog(LPVOID arg) {
  * 1280x720 screen (the 16:9 picture, centred in a wider window) and the buttons (bit 0 left, bit 1 right), while this window
  * is the foreground one and the cursor is over the picture. The arrow is hidden over the window while the hand follows it. */
 static volatile LONG g_mouse_hand_tick, g_mouse_wheel;
-static char g_title_note[72];                       /* after the frame counter in the title (net_relay.c: the Local Play room code) */
-void display_room_note(const char *s) { snprintf(g_title_note, sizeof g_title_note, "%s", s ? s : ""); }
 void display_mouse_hand(void) { InterlockedExchange(&g_mouse_hand_tick, (LONG)GetTickCount()); }
 int display_mouse_wheel(void) { return (int)InterlockedExchange(&g_mouse_wheel, 0); }      /* notches since the last call, + = away from the user */
 int display_mouse(float *x, float *y, int *buttons) {
-    POINT p; RECT rc; int fit[4];
+    POINT p; RECT rc;
     HWND h = g_hwnd;
     if (!h || GetForegroundWindow() != h || !GetCursorPos(&p) || !ScreenToClient(h, &p) || !GetClientRect(h, &rc)) return 0;
-    fit[0] = g_pic[0]; fit[1] = g_pic[1]; fit[2] = g_pic[2]; fit[3] = g_pic[3];      /* the picture as presented: 16:9, or wider (widescreen),
-                                                                                     * maybe with bars; the game's 2D stays 16:9 in its middle */
-    if (fit[2] <= 0 || fit[3] <= 0 || fit[0] + fit[2] > rc.right + 2 || fit[1] + fit[3] > rc.bottom + 2) {      /* (none presented yet in this size) */
-        fit[0] = 0; fit[1] = 0; fit[2] = rc.right; fit[3] = rc.bottom;
-        if ((long long)rc.right * ASPECT_H > (long long)rc.bottom * ASPECT_W) { fit[2] = rc.bottom * ASPECT_W / ASPECT_H; fit[0] = (rc.right - fit[2]) / 2; }
-        else if ((long long)rc.right * ASPECT_H < (long long)rc.bottom * ASPECT_W) { fit[3] = rc.right * ASPECT_H / ASPECT_W; fit[1] = (rc.bottom - fit[3]) / 2; }
-    }
-    if (fit[2] <= 0 || fit[3] <= 0 || p.x < fit[0] || p.y < fit[1] || p.x >= fit[0] + fit[2] || p.y >= fit[1] + fit[3]) return 0;
-    float uw = (float)fit[3] * 16.0f / 9.0f, ux = (float)fit[0] + ((float)fit[2] - uw) * 0.5f;      /* the 16:9 middle: 0..1280 (the wide sides beyond) */
-    *x = ((float)p.x - ux) * 1280.0f / uw;
-    *y = (float)(p.y - fit[1]) * 720.0f / (float)fit[3];
+    if (!mouse_fit(p.x, p.y, rc.right, rc.bottom, x, y)) return 0;
     *buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) | ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
     return 1;
 }
@@ -619,8 +625,31 @@ static void la_stop(void) {}
 static void la_note(const char *note) { (void)note; }
 int oe_exit_request(void);                            /* nnmisc.c */
 static char g_title[96];
+/* The mouse for the game's hand pointer (nnhid.c mouse_poll, tomo.c), as the Win32 window's: the cursor over the picture of
+ * the focused window, the wheel's notches from the event watch, the arrow hidden while the hand follows it. */
+static volatile LONG g_mouse_hand_tick, g_mouse_wheel;
+void display_mouse_hand(void) { InterlockedExchange(&g_mouse_hand_tick, (LONG)GetTickCount()); }
+int display_mouse_wheel(void) { return (int)InterlockedExchange(&g_mouse_wheel, 0); }      /* notches since the last call, + = away from the user */
+int display_mouse(float *x, float *y, int *buttons) {
+    SDL_Window *w = (SDL_Window *)g_hwnd;
+    float mx, my;
+    int cw, ch;
+    if (!w || !(SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) return 0;
+    SDL_MouseButtonFlags b = SDL_GetMouseState(&mx, &my);
+    SDL_GetWindowSize(w, &cw, &ch);
+    float k = SDL_GetWindowPixelDensity(w);           /* the picture is placed in pixels, the mouse is in window points */
+    if (!mouse_fit((long)(mx * k), (long)(my * k), (long)(cw * k), (long)(ch * k), x, y)) return 0;
+    *buttons = (b & SDL_BUTTON_LMASK ? 1 : 0) | (b & SDL_BUTTON_RMASK ? 2 : 0) | (b & SDL_BUTTON_MMASK ? 4 : 0);
+    return 1;
+}
 static bool SDLCALL close_watch(void *user, SDL_Event *e) {
     (void)user;
+    if (e->type == SDL_EVENT_MOUSE_WHEEL) {
+        static float rest;
+        rest += e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        int n = (int)rest;
+        if (n) { InterlockedExchangeAdd(&g_mouse_wheel, n); rest -= (float)n; }
+    }
     if (e->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED || e->type == SDL_EVENT_QUIT) {
         static volatile LONG once;
         if (InterlockedExchange(&once, 1)) return true;
@@ -636,6 +665,11 @@ static int g_win_w, g_win_h;                          /* the windowed size, for 
 void display_set_window_mode(int mode) { InterlockedExchange(&g_mode_req, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
 void display_set_client_size(int w, int h) { InterlockedExchange(&g_size_w, w); InterlockedExchange(&g_size_h, h); InterlockedExchange(&g_size_req, 1); }
 int display_window_mode(void) { return g_mode_now; }
+/* nvn_gl.c wide_k: the aspect of the screen the window is on (0: not known yet) */
+float display_screen_aspect(void) {
+    SDL_Rect r;
+    return g_hwnd && SDL_GetDisplayBounds(SDL_GetDisplayForWindow((SDL_Window *)g_hwnd), &r) && r.h > 0 ? (float)r.w / (float)r.h : 0.0f;
+}
 static void window_mode_service(SDL_Window *w) {
     LONG m = InterlockedExchange(&g_mode_req, -1);
     if (m >= 0) {
@@ -666,6 +700,9 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     const GfxOptions *go = gfx_options();
     int cw = go->width, ch = go->height;
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+#ifdef __ANDROID__
+    flags |= SDL_WINDOW_FULLSCREEN;                /* a handheld: the whole screen, without the system bars (SDLActivity's immersive mode) */
+#endif
     if (go->window_mode) {
         const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
         if (dm) { cw = dm->w; ch = dm->h; }
@@ -687,6 +724,10 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         plat_window_service();
         window_mode_service(w);
         menu_sdl_service();
+        {   static int hidden;                        /* the arrow over the window while the hand follows the mouse */
+            int hide = GetTickCount() - (DWORD)g_mouse_hand_tick < 300;
+            if (hide != hidden) { hidden = hide; if (hide) SDL_HideCursor(); else SDL_ShowCursor(); }
+        }
     }
     return 0;
 }

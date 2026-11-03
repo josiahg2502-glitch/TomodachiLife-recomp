@@ -1158,6 +1158,17 @@ static void uc_print_registers(FILE *f, const ucontext_t *u) {
     fprintf(f, "\n  fp  %016llx lr  %016llx sp  %016llx pc  %016llx\n", (unsigned long long)u->uc_mcontext->__ss.__fp,
             (unsigned long long)u->uc_mcontext->__ss.__lr, (unsigned long long)UC_SP(u), (unsigned long long)UC_PC(u));
 }
+#elif defined(__aarch64__)
+/* Linux / Android on arm64: x0-x30, sp, pc in mcontext_t (the write bit of a fault's ESR sits in an extension record that
+ * is not looked for: every fault reads as a read) */
+#define UC_PC(u) ((uintptr_t)(u)->uc_mcontext.pc)
+#define UC_SP(u) ((uintptr_t)(u)->uc_mcontext.sp)
+#define UC_WRITE(u) 0
+static void uc_print_registers(FILE *f, const ucontext_t *u) {
+    fprintf(f, "host registers:");
+    for (int i = 0; i < 31; i++) fprintf(f, "%s x%-2d %016llx", i % 4 ? "" : "\n ", i, (unsigned long long)u->uc_mcontext.regs[i]);
+    fprintf(f, "\n  sp  %016llx pc  %016llx\n", (unsigned long long)UC_SP(u), (unsigned long long)UC_PC(u));
+}
 #else
 #define UC_PC(u) ((uintptr_t)(u)->uc_mcontext.gregs[G_RIP])
 #define UC_SP(u) ((uintptr_t)(u)->uc_mcontext.gregs[G_RSP])

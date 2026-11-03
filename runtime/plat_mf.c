@@ -27,6 +27,12 @@
 #define FFMF_HEAD
 #define FFMF_INIT(p) ((void)0)
 #endif
+/* FFmpeg before 5.1 (libavutil 57.28; Ubuntu 22.04 has 4.4): the channel count and layouts of the old API */
+#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
+#define FF_NB_CH(x) ((x)->channels)
+#else
+#define FF_NB_CH(x) ((x)->ch_layout.nb_channels)
+#endif
 
 #define FCC_GUID(a, b, c, d) {(uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
 #define NUM_GUID(n) {(uint32_t)(n), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
@@ -301,7 +307,7 @@ HRESULT IMFSourceReader_GetNativeMediaType(IMFSourceReader *r, DWORD stream, DWO
     } else if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
         IMFMediaType_SetGUID(t, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
         IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)p->sample_rate);
-        IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_NUM_CHANNELS, (UINT32)p->ch_layout.nb_channels);
+        IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_NUM_CHANNELS, (UINT32)FF_NB_CH(p));
     } else {
         static const GUID other = {0x73747874, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
         IMFMediaType_SetGUID(t, &MF_MT_MAJOR_TYPE, &other);
@@ -361,7 +367,7 @@ HRESULT IMFSourceReader_GetCurrentMediaType(IMFSourceReader *r, DWORD stream, IM
         IMFMediaType_SetGUID(t, &MF_MT_SUBTYPE, &MFAudioFormat_PCM);
         IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
         IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)(s->out_rate ? s->out_rate : p->sample_rate));
-        IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_NUM_CHANNELS, (UINT32)(s->out_ch ? s->out_ch : p->ch_layout.nb_channels));
+        IMFMediaType_SetUINT32(t, &MF_MT_AUDIO_NUM_CHANNELS, (UINT32)(s->out_ch ? s->out_ch : FF_NB_CH(p)));
     }
     *out = t;
     return S_OK;
@@ -394,16 +400,22 @@ static IMFSample *convert_video(RStream *s, const AVFrame *f) {
     return out;
 }
 static IMFSample *convert_audio(RStream *s, const AVFrame *f) {
-    int rate = s->out_rate ? s->out_rate : f->sample_rate, ch = s->out_ch ? s->out_ch : f->ch_layout.nb_channels;
-    if (!s->swr || s->swr_in_rate != f->sample_rate || s->swr_in_fmt != f->format || s->swr_in_ch != f->ch_layout.nb_channels) {
+    int rate = s->out_rate ? s->out_rate : f->sample_rate, ch = s->out_ch ? s->out_ch : FF_NB_CH(f);
+    if (!s->swr || s->swr_in_rate != f->sample_rate || s->swr_in_fmt != f->format || s->swr_in_ch != FF_NB_CH(f)) {
+        if (s->swr) swr_free(&s->swr);
+#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
+        s->swr = swr_alloc_set_opts(NULL, av_get_default_channel_layout(ch), AV_SAMPLE_FMT_S16, rate,
+                                    f->channel_layout ? (int64_t)f->channel_layout : av_get_default_channel_layout(f->channels), (enum AVSampleFormat)f->format, f->sample_rate, 0, NULL);
+        if (!s->swr || swr_init(s->swr) < 0) {
+#else
         AVChannelLayout out_layout;
         av_channel_layout_default(&out_layout, ch);
-        if (s->swr) swr_free(&s->swr);
         if (swr_alloc_set_opts2(&s->swr, &out_layout, AV_SAMPLE_FMT_S16, rate, &f->ch_layout, (enum AVSampleFormat)f->format, f->sample_rate, 0, NULL) < 0 || swr_init(s->swr) < 0) {
+#endif
             if (s->swr) swr_free(&s->swr);
             return NULL;
         }
-        s->swr_in_rate = f->sample_rate; s->swr_in_fmt = f->format; s->swr_in_ch = f->ch_layout.nb_channels;
+        s->swr_in_rate = f->sample_rate; s->swr_in_fmt = f->format; s->swr_in_ch = FF_NB_CH(f);
     }
     int cap = (int)av_rescale_rnd(swr_get_delay(s->swr, f->sample_rate) + f->nb_samples, rate, f->sample_rate, AV_ROUND_UP) + 16;
     IMFSample *out = sample_new((size_t)cap * ch * 2);

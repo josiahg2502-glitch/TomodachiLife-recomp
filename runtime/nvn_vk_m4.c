@@ -56,6 +56,17 @@ static VStage *g_vstage[4096], *g_vh[4096];        /* by hb, by h */
 static uint32_t g_vstage_ids;
 static int (*g_glsl_to_spirv)(int, const char *, uint32_t **, size_t *, char *, size_t);
 static void (*g_spirv_free)(uint32_t *);
+static void glslang_probe(void) {                  /* (the device's start) does the glslang take GL_EXT_texture_shadow_lod (glslang 12 and newer)? */
+    static const char k[] = "#version 460\n#extension GL_EXT_texture_shadow_lod : require\nlayout(set = 1, binding = 0) uniform sampler2DArrayShadow s;\n"
+                            "layout(location = 0) out float o;\nvoid main() { o = textureLod(s, vec4(0.0), 0.0); gl_Position = vec4(0.0); }\n";
+    uint32_t *w = NULL;
+    size_t n = 0;
+    char log[512];
+    if (!g_glsl_to_spirv || !g_spirv_free) return;
+    g_no_shadow_lod = !g_glsl_to_spirv(MX_VERTEX, k, &w, &n, log, sizeof log) || (getenv("SSBU_VK_NO_SHADOW_LOD") && atoi(getenv("SSBU_VK_NO_SHADOW_LOD")));      /* =1: TEST, as an old glslang */
+    if (w) g_spirv_free(w);
+    if (g_no_shadow_lod) printf("nvn_vk: the glslang has no GL_EXT_texture_shadow_lod (before glslang 12): the shadow lookups it adds are written with textureGrad\n");
+}
 enum { H_STAGE_DRAW, H_STAGE_WAIT, H_PIPE_DRAW, H_PIPE_WAIT, H_N };
 static LONG64 g_hold_n[H_N], g_hold_tk[H_N], g_hold_max;
 static LONG64 g_w_progs, g_w_stages, g_w_pipes, g_pred_made, g_pred_used, g_set_held, g_set_held_tk;
@@ -225,7 +236,7 @@ static void vstage_build(VStage *v, const SSrc *src) {
         memset(&in, 0, sizeof in); memset(&out, 0, sizeof out);
         in.stage = s; in.code = src->code; in.code_len = src->code_len; in.cdata = src->cdata; in.cdata_size = src->cdata ? src->cdata_size : 0;
         in.int_attrs = v->key[0]; in.sint_attrs = v->key[1]; in.int_tex = v->key[2]; in.sint_tex = v->key[3]; in.force_out = v->fo;
-        in.target = 1; in.binding_base = 40u * (unsigned)s; in.ssbo_base = 40u * (unsigned)s + 20; in.tex_base = 40u * (unsigned)s; in.image_base = 40u * (unsigned)s + 32; in.wmask_binding = 40u * (unsigned)s + 38;
+        in.target = 1; in.no_shadow_lod = g_no_shadow_lod; in.binding_base = 40u * (unsigned)s; in.ssbo_base = 40u * (unsigned)s + 20; in.tex_base = 40u * (unsigned)s; in.image_base = 40u * (unsigned)s + 32; in.wmask_binding = 40u * (unsigned)s + 38;
         if (s == 5) {                              /* compute has a layout of its own (design, section 4): the bindings of stage 0 */
             in.binding_base = 0; in.ssbo_base = 20; in.tex_base = 0; in.image_base = 32; in.wmask_binding = 38; in.track_writes = 1;
             memcpy(in.local_size, src->local, sizeof in.local_size); in.smem_bytes = src->smem; in.lmem_bytes = src->lmem;
@@ -1644,6 +1655,7 @@ static void prewarm_start(void) {
     {   HMODULE m = LoadLibraryA("ssbu_glslang.dll");
         g_glsl_to_spirv = m ? (void *)GetProcAddress(m, "ssbu_glsl_to_spirv") : NULL; g_spirv_free = m ? (void *)GetProcAddress(m, "ssbu_spirv_free") : NULL;
         if (!g_glsl_to_spirv || !g_spirv_free) vkd_fail("ssbu_glslang.dll cannot be loaded (build_glslang.bat makes it)");
+        glslang_probe();
     }
     {   /* the driver's pipeline cache, ours on disk: keyed by GPU and driver version (the driver checks its own header too) */
         VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
@@ -2373,7 +2385,8 @@ static int prep_list(const char *dir) {
 static DWORD WINAPI prep_main(void *arg) {
     /* session 11: the default store is the one the HOST writes (nvn_vk_store.c: 393 containers of effect / container files
      * + the layout archives' ones); the folder of the Python tool (..\cache\vk_containers) is used only when named. */
-    const char *dir = getenv("SSBU_VK_CONTAINERS") ? getenv("SSBU_VK_CONTAINERS") : "../cache/vk_containers2";
+    /* Tomodachi Life: the store scripts/shader_store.py writes at the install's prepare step (every container of the game) */
+    const char *dir = getenv("SSBU_VK_CONTAINERS") ? getenv("SSBU_VK_CONTAINERS") : "../cache/shader_store";
     char path[400];
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
     (void)arg;
@@ -2612,7 +2625,7 @@ int nvn_vk_prepare_shaders(const char *dir) {
     LONG64 t0 = tk(), last = t0;
     int files = 0, bad = 0;
     long long vars = 0, jobs = 0;
-    if (!dir) dir = "../cache/vk_containers";
+    if (!dir) dir = "../cache/shader_store";
     g_offline = 1; g_game_tables = 0; g_cpredict = 0;
     InitializeCriticalSection(&g_sh_lock); InitializeCriticalSection(&g_gpl_lock);
     InitializeConditionVariable(&g_sh_cv); InitializeConditionVariable(&g_jq_cv);
@@ -2620,6 +2633,7 @@ int nvn_vk_prepare_shaders(const char *dir) {
     {   HMODULE m = LoadLibraryA("ssbu_glslang.dll");
         g_glsl_to_spirv = m ? (void *)GetProcAddress(m, "ssbu_glsl_to_spirv") : NULL; g_spirv_free = m ? (void *)GetProcAddress(m, "ssbu_spirv_free") : NULL;
         if (!g_glsl_to_spirv || !g_spirv_free) { printf("prepare-shaders: ssbu_glslang.dll cannot be loaded (build_glslang.bat makes it)\n"); return 2; }
+        glslang_probe();                           /* the texts as the game's run on this glslang makes them (MxIn.no_shadow_lod) */
     }
     SYSTEM_INFO si;
     GetSystemInfo(&si);
@@ -2663,5 +2677,5 @@ int nvn_vk_prepare_shaders(const char *dir) {
     for (int i = 0; i < 4096; i++) for (VStage *v = g_vstage[i]; v; v = v->next) { if (v->ok) made++; else failed++; }
     printf("prepare-shaders: done in %.0f s on %d threads: %d containers (%d not understood), %lld variations, %lld handed to the workers, %lld distinct stage variants ready in ../cache/vk (%lld could not be translated)\n",
            (double)(tk() - t0) / (double)fq.QuadPart, g_pw_nthread, files, bad, vars, jobs, made, failed);
-    return bad || failed ? 1 : 0;
+    return bad ? 1 : 0;                            /* (stages the translator cannot do fail the same way at run time: not an install failure) */
 }

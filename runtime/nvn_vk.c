@@ -245,7 +245,21 @@ static int swapchain_create(void) {
         if (g_mu_shot_src) ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; }
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
+#ifdef __ANDROID__
+    /* the picture is drawn upright: a panel mounted turned (many handhelds' are portrait panels) is turned by the compositor,
+     * the swapchain has the window's own (landscape) size */
+    if ((caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) && caps.currentTransform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels((SDL_Window *)V.hwnd, &w, &h);
+        if (w > 0 && h > 0) { ci.imageExtent.width = (uint32_t)w; ci.imageExtent.height = (uint32_t)h; }
+        ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    }
+#endif
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    {   static const VkCompositeAlphaFlagBitsKHR ca[4] = {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+                                                          VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR};
+        for (int i = 0; i < 4; i++) if (caps.supportedCompositeAlpha & ca[i]) { ci.compositeAlpha = ca[i]; break; }      /* Android surfaces often offer INHERIT only */
+    }
     ci.presentMode = V.mode;
     ci.clipped = VK_TRUE;
     r = vkCreateSwapchainKHR(V.device, &ci, NULL, &V.swapchain);
@@ -253,7 +267,7 @@ static int swapchain_create(void) {
     V.image_count = 16;
     r = vkGetSwapchainImagesKHR(V.device, V.swapchain, &V.image_count, V.images);
     if (r != VK_SUCCESS && r != VK_INCOMPLETE) vk_fatal("vkGetSwapchainImagesKHR", r);
-    V.extent = ext;
+    V.extent = ci.imageExtent;                           /* (Android: the window's size when the compositor turns the picture) */
     return 1;
 }
 
@@ -330,6 +344,12 @@ int nvn_vk_init(void *hwnd) {
             if (!has_name(iext, niext, se[i])) { printf("nvn_vk: the Vulkan loader has no %s\n", se[i]); fflush(stdout); ExitProcess(5); }
             exts[next++] = se[i];
         }
+        /* headless test runs (SDL_VIDEO_DRIVER=offscreen, e.g. with Mesa's lavapipe): SDL names VK_EXT_headless_surface only
+         * when it loaded Vulkan itself, which this runtime does on its own */
+        const char *vd = SDL_GetCurrentVideoDriver();
+        int listed = 0;
+        for (uint32_t i = 0; i < next; i++) listed |= !strcmp(exts[i], "VK_EXT_headless_surface");
+        if (vd && !strcmp(vd, "offscreen") && !listed && has_name(iext, niext, "VK_EXT_headless_surface")) exts[next++] = "VK_EXT_headless_surface";
     }
     /* macOS: MoltenVK is a portability driver; the loader lists it only for an instance that asks for portability
      * devices (VK_KHR_portability_enumeration + the enumerate-portability flag). Harmless where the loader lacks it. */

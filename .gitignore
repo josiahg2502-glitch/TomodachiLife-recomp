@@ -1,4 +1,6 @@
 build/
+build-linux/
+build-android/
 # made from the game binary: never committed
 tools/lifter/difftest_gen.c
 tools/lifter/difftest_*.json

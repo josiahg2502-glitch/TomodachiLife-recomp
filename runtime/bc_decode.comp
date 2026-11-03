@@ -1,0 +1,152 @@
+#version 450
+// BC1-BC5 and BC7 decoding on the GPU (nvn_vk_draw.c, GPUs without BC textures: the drivers of most Android handhelds;
+// SSBU_VK_NO_BC=1 makes any GPU use it): the port of tex_decode.c's bc1_block / bc4_block / bc7_block. One dispatch decodes
+// the levels queued since the last one (a texture's levels, or a compressed render target's level); the texels (RGBA8,
+// BC4/BC5 SNORM as signed bytes) go into a buffer that nvn_vk_draw.c then copies into each level. One invocation per block.
+// Precompiled into bc_decode_spv.h by scripts/gl_shaders.sh.
+layout(local_size_x = 64) in;
+layout(binding = 0, std430) readonly buffer Blocks { uint blk[]; };
+// 2 per level: (first block word, blocks per row, width, height), (first texel, first work group, blocks, codec)
+// codec: 1 BC1, 2 BC1 with alpha, 3 BC2, 4 BC3, 5 BC4, 6 BC4 SNORM, 7 BC5, 8 BC5 SNORM, 9 BC7
+layout(binding = 1, std430) readonly buffer Levels { uvec4 lv[]; };
+layout(binding = 2, std430) writeonly buffer Texels { uint texel[]; };
+layout(push_constant) uniform Pc { uint n; } pc;
+
+uint g_b[4], g_pos;
+uint bits(uint n) {                       // the next n bits of the BC7 block (n <= 8)
+    if (n == 0u) return 0u;
+    uint w = g_pos >> 5u, s = g_pos & 31u, v = g_b[w] >> s;
+    if (s + n > 32u && w < 3u) v |= g_b[w + 1u] << (32u - s);
+    g_pos += n;
+    return v & ((1u << n) - 1u);
+}
+uint pack(uvec4 c) { return (c.r & 255u) | (c.g & 255u) << 8u | (c.b & 255u) << 16u | (c.a & 255u) << 24u; }
+
+// ---- BC1 .. BC5
+uvec3 rgb565(uint c) { return uvec3((c >> 11u) << 3u | (c >> 13u), ((c >> 5u) & 63u) << 2u | ((c >> 9u) & 3u), (c & 31u) << 3u | ((c >> 2u) & 7u)); }
+uvec4 bc1(uint w0, uint w1, uint i, bool four, bool alpha0) {
+    uint c0 = w0 & 0xffffu, c1 = w0 >> 16u, k = (w1 >> (2u * i)) & 3u;
+    uvec3 p0 = rgb565(c0), p1 = rgb565(c1);
+    if (k == 0u) return uvec4(p0, 255u);
+    if (k == 1u) return uvec4(p1, 255u);
+    if (four || c0 > c1) return uvec4(k == 2u ? (2u * p0 + p1 + 1u) / 3u : (p0 + 2u * p1 + 1u) / 3u, 255u);
+    return k == 2u ? uvec4((p0 + p1) / 2u, 255u) : uvec4(0u, 0u, 0u, alpha0 ? 0u : 255u);
+}
+int bc4(uint w0, uint w1, uint i, bool snorm) {   // unorm 0..255; snorm -127..127 (tex_decode.c's x35 values, rounded)
+    uint lo = (w0 >> 16u) | (w1 << 16u), hi = w1 >> 16u, pos = 3u * i;
+    uint k = pos < 30u ? (lo >> pos) & 7u : pos == 30u ? ((lo >> 30u) | (hi << 2u)) & 7u : (hi >> (pos - 32u)) & 7u;
+    int a0 = snorm ? max(int(w0 << 24u) >> 24, -127) : int(w0 & 255u), a1 = snorm ? max(int(w0 << 16u) >> 24, -127) : int((w0 >> 8u) & 255u), v, j = int(k) - 1;
+    if (k == 0u) v = snorm ? a0 * 35 : a0;
+    else if (k == 1u) v = snorm ? a1 * 35 : a1;
+    else if (a0 > a1) v = snorm ? ((7 - j) * a0 + j * a1) * 5 : ((7 - j) * a0 + j * a1 + 3) / 7;
+    else if (k < 6u) v = snorm ? ((5 - j) * a0 + j * a1) * 7 : ((5 - j) * a0 + j * a1 + 2) / 5;
+    else v = k == 6u ? (snorm ? -4445 : 0) : (snorm ? 4445 : 255);
+    return !snorm ? v : v >= 0 ? (v + 17) / 35 : -((17 - v) / 35);
+}
+
+// ---- BC7
+const uint NS[8] = uint[](3u, 2u, 3u, 2u, 1u, 1u, 1u, 2u);    // subsets
+const uint PB[8] = uint[](4u, 6u, 6u, 6u, 0u, 0u, 0u, 6u);    // partition bits
+const uint RB[8] = uint[](0u, 0u, 0u, 0u, 2u, 2u, 0u, 0u);    // rotation bits
+const uint IS[8] = uint[](0u, 0u, 0u, 0u, 1u, 0u, 0u, 0u);    // index selection bit
+const uint CB[8] = uint[](4u, 6u, 5u, 7u, 5u, 7u, 7u, 5u);    // colour bits
+const uint AB[8] = uint[](0u, 0u, 0u, 0u, 6u, 8u, 7u, 5u);    // alpha bits
+const uint EP[8] = uint[](1u, 0u, 0u, 1u, 0u, 0u, 1u, 1u);    // a p-bit per endpoint
+const uint SP[8] = uint[](0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u);    // a p-bit per subset
+const uint IB[8] = uint[](3u, 3u, 2u, 2u, 2u, 2u, 4u, 2u);    // index bits
+const uint IB2[8] = uint[](0u, 0u, 0u, 0u, 3u, 2u, 0u, 0u);   // second index bits
+const uint W2[4] = uint[](0u, 21u, 43u, 64u);
+const uint W3[8] = uint[](0u, 9u, 18u, 27u, 37u, 46u, 55u, 64u);
+const uint W4[16] = uint[](0u, 4u, 9u, 13u, 17u, 21u, 26u, 30u, 34u, 38u, 43u, 47u, 51u, 55u, 60u, 64u);
+// tex_decode.c's k_part2 (a bit per texel), k_part3 (2 bits per texel), anchors (k_anchor2 | k_anchor3a << 4 | k_anchor3b << 8;
+// partition 56's first anchor is 6, as the GPU decodes it: tex_decode.h tex_bc7_p56_anchor)
+const uint P2[64] = uint[](
+    0xccccu, 0x8888u, 0xeeeeu, 0xecc8u, 0xc880u, 0xfeecu, 0xfec8u, 0xec80u,
+    0xc800u, 0xffecu, 0xfe80u, 0xe800u, 0xffe8u, 0xff00u, 0xfff0u, 0xf000u,
+    0xf710u, 0x8eu, 0x7100u, 0x8ceu, 0x8cu, 0x7310u, 0x3100u, 0x8cceu,
+    0x88cu, 0x3110u, 0x6666u, 0x366cu, 0x17e8u, 0xff0u, 0x718eu, 0x399cu,
+    0xaaaau, 0xf0f0u, 0x5a5au, 0x33ccu, 0x3c3cu, 0x55aau, 0x9696u, 0xa55au,
+    0x73ceu, 0x13c8u, 0x324cu, 0x3bdcu, 0x6996u, 0xc33cu, 0x9966u, 0x660u,
+    0x272u, 0x4e4u, 0x4e40u, 0x2720u, 0xc936u, 0x936cu, 0x39c6u, 0x639cu,
+    0x9336u, 0x9cc6u, 0x817eu, 0xe718u, 0xccf0u, 0xfccu, 0x7744u, 0xee22u);
+const uint P3[64] = uint[](
+    0xaa685050u, 0x6a5a5040u, 0x5a5a4200u, 0x5450a0a8u, 0xa5a50000u, 0xa0a05050u, 0x5555a0a0u, 0x5a5a5050u,
+    0xaa550000u, 0xaa555500u, 0xaaaa5500u, 0x90909090u, 0x94949494u, 0xa4a4a4a4u, 0xa9a59450u, 0x2a0a4250u,
+    0xa5945040u, 0xa425054u, 0xa5a5a500u, 0x55a0a0a0u, 0xa8a85454u, 0x6a6a4040u, 0xa4a45000u, 0x1a1a0500u,
+    0x50a4a4u, 0xaaa59090u, 0x14696914u, 0x69691400u, 0xa08585a0u, 0xaa821414u, 0x50a4a450u, 0x6a5a0200u,
+    0xa9a58000u, 0x5090a0a8u, 0xa8a09050u, 0x24242424u, 0xaa5500u, 0x24924924u, 0x24499224u, 0x50a50a50u,
+    0x500aa550u, 0xaaaa4444u, 0x66660000u, 0xa5a0a5a0u, 0x50a050a0u, 0x69286928u, 0x44aaaa44u, 0x66666600u,
+    0xaa444444u, 0x54a854a8u, 0x95809580u, 0x96969600u, 0xa85454a8u, 0x80959580u, 0xaa141414u, 0x96960000u,
+    0xaaaa1414u, 0xa05050a0u, 0xa0a5a5a0u, 0x96000000u, 0x40804080u, 0xa9a8a9a8u, 0xaaaaaa44u, 0x2a4a5254u);
+const uint ANC[64] = uint[](
+    0xf3fu, 0x83fu, 0x8ffu, 0x3ffu, 0xf8fu, 0xf3fu, 0x3ffu, 0x8ffu,
+    0xf8fu, 0xf8fu, 0xf6fu, 0xf6fu, 0xf6fu, 0xf5fu, 0xf3fu, 0x83fu,
+    0xf3fu, 0x832u, 0xf88u, 0x3f2u, 0xf32u, 0x838u, 0xf68u, 0x8afu,
+    0x352u, 0xf88u, 0x682u, 0xa62u, 0xf88u, 0xf58u, 0xaf2u, 0x8f2u,
+    0xf8fu, 0x3ffu, 0xf36u, 0xa58u, 0xa62u, 0x8a8u, 0x98fu, 0xaffu,
+    0x6f2u, 0xf38u, 0x8f2u, 0xf52u, 0x3f2u, 0x6ffu, 0x6ffu, 0x8f6u,
+    0xf36u, 0x3f2u, 0xf56u, 0xf58u, 0xf5fu, 0xf8fu, 0xf52u, 0xfa2u,
+    0xf6fu, 0xfafu, 0xf8fu, 0xfdfu, 0x3ffu, 0xfc2u, 0xf32u, 0x83fu);
+uvec3 expand8(uvec3 v, uint b) { v <<= 8u - b; return v | (v >> b); }
+uint expand8(uint v, uint b) { v <<= 8u - b; return v | (v >> b); }
+void bc7(out uvec4 px[16]) {
+    uint mode = 0u;
+    while (mode < 8u && bits(1u) == 0u) mode++;
+    if (mode == 8u) { for (uint i = 0u; i < 16u; i++) px[i] = uvec4(0u); return; }      // reserved
+    uint ns = NS[mode], ne = ns * 2u, part = bits(PB[mode]), rot = bits(RB[mode]), isb = bits(IS[mode]), ab = AB[mode];
+    uvec4 ep[6];
+    for (uint c = 0u; c < 3u; c++) for (uint i = 0u; i < ne; i++) ep[i][c] = bits(CB[mode]);
+    for (uint i = 0u; i < ne; i++) ep[i].a = ab != 0u ? bits(ab) : 255u;
+    if (EP[mode] != 0u) {
+        for (uint i = 0u; i < ne; i++) { uint p = bits(1u); ep[i].rgb = ep[i].rgb << 1u | p; if (ab != 0u) ep[i].a = ep[i].a << 1u | p; }
+    } else if (SP[mode] != 0u) {
+        for (uint s = 0u; s < ns; s++) {
+            uint p = bits(1u);
+            for (uint j = s * 2u; j < s * 2u + 2u; j++) { ep[j].rgb = ep[j].rgb << 1u | p; if (ab != 0u) ep[j].a = ep[j].a << 1u | p; }
+        }
+    }
+    uint pb = EP[mode] | SP[mode];
+    for (uint i = 0u; i < ne; i++) { ep[i].rgb = expand8(ep[i].rgb, CB[mode] + pb); if (ab != 0u) ep[i].a = expand8(ep[i].a, ab + pb); }
+    uint anc = ANC[part], idx[16], idx2[16];
+    for (uint i = 0u; i < 16u; i++) {
+        bool anchor = i == 0u || (ns == 2u && i == (anc & 15u)) || (ns == 3u && (i == ((anc >> 4u) & 15u) || i == (anc >> 8u)));
+        idx[i] = bits(IB[mode] - (anchor ? 1u : 0u));
+    }
+    if (IB2[mode] != 0u) for (uint i = 0u; i < 16u; i++) idx2[i] = bits(IB2[mode] - (i == 0u ? 1u : 0u));
+    for (uint i = 0u; i < 16u; i++) {
+        uint sub = ns == 2u ? (P2[part] >> i) & 1u : ns == 3u ? (P3[part] >> (2u * i)) & 3u : 0u, ib = IB[mode];
+        uint wc = ib == 2u ? W2[idx[i]] : ib == 3u ? W3[idx[i]] : W4[idx[i]], wa = wc;
+        if (IB2[mode] != 0u) wa = IB2[mode] == 2u ? W2[idx2[i]] : W3[idx2[i]];
+        if (isb != 0u) { uint t = wc; wc = wa; wa = t; }
+        uvec4 e0 = ep[sub * 2u], e1 = ep[sub * 2u + 1u];
+        uvec4 c = uvec4((e0.rgb * (64u - wc) + e1.rgb * wc + 32u) >> 6u, (e0.a * (64u - wa) + e1.a * wa + 32u) >> 6u);
+        px[i] = rot == 1u ? c.agbr : rot == 2u ? c.rabg : rot == 3u ? c.rgab : c;
+    }
+}
+
+void main() {
+    uint wg = gl_WorkGroupID.x, e = 0u;
+    for (uint i = 1u; i < pc.n; i++) if (lv[2u * i + 1u].y <= wg) e = i;      // the level of this work group
+    uvec4 a = lv[2u * e], b = lv[2u * e + 1u];
+    uint k = (wg - b.y) * 64u + gl_LocalInvocationID.x, codec = b.w;
+    if (k >= b.z) return;
+    uint bx = k % a.y, by = k / a.y, wpb = codec == 1u || codec == 2u || codec == 5u || codec == 6u ? 2u : 4u, base = a.x + k * wpb;
+    for (uint i = 0u; i < wpb; i++) g_b[i] = blk[base + i];
+    uvec4 px[16];
+    if (codec == 9u) { g_pos = 0u; bc7(px); }
+    else for (uint i = 0u; i < 16u; i++) {
+        if (codec <= 2u) px[i] = bc1(g_b[0], g_b[1], i, false, codec == 2u);
+        else if (codec <= 4u) {
+            px[i] = bc1(g_b[2], g_b[3], i, true, false);
+            px[i].a = codec == 3u ? ((g_b[i >> 3u] >> ((i & 7u) * 4u)) & 15u) * 17u : uint(bc4(g_b[0], g_b[1], i, false));
+        } else {
+            bool sn = codec == 6u || codec == 8u;
+            int r = bc4(g_b[0], g_b[1], i, sn), g = codec >= 7u ? bc4(g_b[2], g_b[3], i, sn) : 0;
+            px[i] = uvec4(uint(r), uint(g), 0u, sn ? 127u : 255u);
+        }
+    }
+    for (uint i = 0u; i < 16u; i++) {
+        uint x = bx * 4u + (i & 3u), y = by * 4u + (i >> 2u);
+        if (x < a.z && y < a.w) texel[b.x + y * a.z + x] = pack(px[i]);
+    }
+}

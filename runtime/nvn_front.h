@@ -141,6 +141,8 @@ void nvn_vk_program_set(void *prog);        /* Vulkan, GUEST thread, from nvnPro
 int nvn_front_fmt(int nvn_format, Fmt *f);                                  /* fmt_get */
 uint8_t *nvn_front_list(uint64_t handle, size_t *len);                      /* list_lookup */
 void nvn_front_batch_begin(void);                                           /* a new submitted batch: texture memory is looked at again once */
+void nvn_front_batch_snap(SubmitJob *j, int begin);                          /* the batch's write-watch scan and submission copies (1 before the replay, 0 after) */
+const uint8_t *nvn_front_snap_copy(uint64_t addr, uint64_t size);           /* the submission's copy of a range to upload instead of guest memory, or NULL */
 void nvn_front_barrier_texmem(void);                                        /* nvnCommandBufferBarrier bit 0x10 */
 int nvn_front_tex_layers(const Tex *t);
 int nvn_front_tex_levels(const Tex *t);                                     /* levels the host image has (builder levels clamped to the size) */

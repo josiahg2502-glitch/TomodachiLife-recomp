@@ -41,6 +41,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#ifndef _WIN32
+#include <sys/stat.h>                              /* xmemo_load: the binary's own file */
+#endif
 #include <GL/gl.h>
 #include "runtime.h"
 #include "hostrt.h"
@@ -51,7 +54,9 @@
 #include "nvn_sdk.h"
 #include "nvn_c4.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "opengl32.lib")
+#endif
 
 /* ask laptop drivers for the discrete GPU */
 __declspec(dllexport) DWORD NvOptimusEnablement = 1;
@@ -704,11 +709,17 @@ static float wide_k(void) {
         if (e) a = !_stricmp(e, "auto") ? -1.0f : strchr(e, ':') && atof(strchr(e, ':') + 1) > 0 ? (float)(atof(e) / atof(strchr(e, ':') + 1)) : (float)atof(e);
         if (a < 0) {
             const GfxOptions *o = gfx_options();
+#ifdef _WIN32
             MONITORINFO mi;
             memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
             if (o->window_mode && GetMonitorInfoA(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTOPRIMARY), &mi) && mi.rcMonitor.bottom > mi.rcMonitor.top)
                 a = (float)(mi.rcMonitor.right - mi.rcMonitor.left) / (float)(mi.rcMonitor.bottom - mi.rcMonitor.top);
             else a = (float)o->width / (float)o->height;
+#else
+            float display_screen_aspect(void);          /* display.c: the screen of the SDL window */
+            float sa = o->window_mode ? display_screen_aspect() : 0.0f;
+            a = sa > 0 ? sa : (float)o->width / (float)o->height;
+#endif
         }
         float k = a > 0 ? a / (16.0f / 9.0f) : 1.0f;
         g_wide_k = k > 1.01f ? (k > 1.35f ? 1.35f : k) : 1.0f;      /* 21:9 (2.4:1) at most: no 32:9 (user 2026-11-01) */
@@ -2609,13 +2620,24 @@ void xmemo_load(void) {                            /* render thread, shd_init */
     char path[320], line[256];
     if (g_xm_on < 0) g_xm_on = !(getenv("TOMO_XMEMO") && getenv("TOMO_XMEMO")[0] == '0') && !getenv("TOMO_SHOVR");
     if (!g_xm_on || g_shd_mode <= 0 || !(g_xm = calloc(XM_SLOTS, sizeof *g_xm))) { g_xm_on = 0; return; }
+#ifdef _WIN32
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)GetModuleHandleA(NULL);
     const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const uint8_t *)dos + dos->e_lfanew);
+    unsigned long stamp = (unsigned long)nt->FileHeader.TimeDateStamp, isize = (unsigned long)nt->OptionalHeader.SizeOfImage;
+#else                                              /* the binary holding this code: its time and size (a rebuild changes them) */
+    unsigned long stamp = 0, isize = 0;
+    {   HMODULE m; char bin[MAX_PATH]; struct stat st;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCSTR)(void *)xmemo_load, &m) && GetModuleFileNameA(m, bin, sizeof bin)) {
+            for (char *q = bin; *q; q++) if (*q == '\\') *q = '/';
+            if (!stat(bin, &st)) { stamp = (unsigned long)st.st_mtime; isize = (unsigned long)st.st_size; }
+        }
+    }
+#endif
     char exe[MAX_PATH] = "", head[96];
     GetModuleFileNameA(NULL, exe, sizeof exe);
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe;
     snprintf(path, sizeof path, "%s/xlate_%s.txt", g_shd_dir, base);
-    snprintf(head, sizeof head, "xlate %08lx %08lx %016llx", (unsigned long)nt->FileHeader.TimeDateStamp, (unsigned long)nt->OptionalHeader.SizeOfImage, (unsigned long long)g_shd_drv);
+    snprintf(head, sizeof head, "xlate %08lx %08lx %016llx", stamp, isize, (unsigned long long)g_shd_drv);
     FILE *f = fopen(path, "r");
     int same = f && fgets(line, sizeof line, f) && !strncmp(line, head, strlen(head));
     while (same && fgets(line, sizeof line, f)) {
@@ -7205,7 +7227,11 @@ static void snap_range(SnapSet *s, uint64_t addr, uint64_t size, uint64_t max) {
         if (!nd) { s->bad = 1; return; }
         s->data = nd; s->dcap = nc;
     }
+#ifdef _WIN32
     __try { memcpy(s->data + s->len, P(addr), (size_t)size); } __except (1) { return; }      /* (a binding no draw uses may name memory that is gone) */
+#else
+    { SIZE_T got = 0; if (!ReadProcessMemory(GetCurrentProcess(), P(addr), s->data + s->len, (SIZE_T)size, &got) || got != size) return; }
+#endif
     e->addr = addr; e->size = size; e->off = s->len; e->state = 0; s->len += (size_t)size; s->n++;
 }
 /* The ranges a batch binds: uniform and vertex buffers. Not the arrays of deferred binds (the game may fill those after the
@@ -7257,6 +7283,22 @@ static void snap_fill(SnapSet *s, const uint64_t *handles, int count) {      /* 
     InterlockedIncrement64(&g_snap_sets); InterlockedExchangeAdd64(&g_snap_ranges, s->n); InterlockedExchangeAdd64(&g_snap_bytes, (LONG64)s->len);
     InterlockedExchangeAdd64(&g_snap_ticks, pf_now() - t0);
     InterlockedExchange(&s->ready, 1);
+}
+static void snap_give(SnapSet *s);
+static void ww_scan_apply(uint64_t seq);
+/* The Vulkan back end's batch (nvn_vk_draw.c vk_submit): the same write-watch scan and submission copies as job_submit, so
+ * its uploads (ring_put) read what a range held at the submission where the game has rewritten it since (the random flicker
+ * of 2026-10-31 had the same cause there). begin = 1 before the replay, 0 after it. */
+void nvn_front_batch_snap(SubmitJob *j, int begin) {
+    if (begin) {
+        if (j->ww_seq != WW_SKIP) ww_scan_apply(j->ww_seq);
+        if (j->snap) { SnapSet *sn = j->snap; for (int k = 0; !InterlockedCompareExchange(&sn->ready, 0, 0); k++) { if (k < 2000) YieldProcessor(); else SwitchToThread(); } }
+        g_snap_cur = j->snap;
+    } else { g_snap_cur = NULL; snap_give(j->snap); j->snap = NULL; }
+}
+const uint8_t *nvn_front_snap_copy(uint64_t addr, uint64_t size) {      /* the submission's copy to read instead of guest memory, or NULL */
+    SnapEnt *se = g_snap_cur ? snap_pick(addr, size) : NULL;
+    return se ? g_snap_cur->data + se->off : NULL;
 }
 static void snap_give(SnapSet *s) {                        /* render thread, after the replay */
     if (!s) return;
@@ -9109,9 +9151,9 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
     int r1_ra_quiet(void);
     if (j.count > 0 && A2 && r1_ra_quiet()) { static LONG64 n; n++; }      /* R1 round 5, run-ahead: the real pass's submission = the lists the speculative pass already ran on the GPU: not run again */
     else if (j.count > 0 && A2) {
-        if (g_rb == &rb_gl) j.ww_seq = batch_state_only(j.handles, j.count) ? WW_SKIP : ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now */
+        j.ww_seq = batch_state_only(j.handles, j.count) ? WW_SKIP : ww_scan_request();      /* the game's writes for this batch are done: the scan thread looks now (both back ends: nvn_front_batch_snap) */
         if (gl_async_on() && j.count <= 4096) {
-            if (g_rb == &rb_gl && snap_on() && j.ww_seq != WW_SKIP) j.snap = snap_begin();
+            if (snap_on() && j.ww_seq != WW_SKIP) j.snap = snap_begin();
             size_t size = sizeof j + (size_t)j.count * 8;
             SubmitJob *copy = malloc(size);
             *copy = j;

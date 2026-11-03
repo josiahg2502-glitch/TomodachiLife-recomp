@@ -64,10 +64,10 @@
 #include <math.h>
 #include <windows.h>
 #ifndef _WIN32
-/* Linux build: the outlines come from FreeType instead of GDI (same unhinted outlines in font units, same flattening). */
-#include <ft2build.h>
-#include FT_FREETYPE_H
-#include FT_OUTLINE_H
+/* Linux / Android / macOS: the outlines come from plat/ft_mini.h instead of GDI (the same unhinted outlines in font units,
+ * the same flattening), the TrueType decoding FreeType did here before, behind the same calls: no FreeType to install,
+ * and Android has none. */
+#include "plat/ft_mini.h"
 #define LF_FACESIZE 32
 #endif
 #ifndef FONTLL_TEST
@@ -1354,6 +1354,12 @@ static void fe_Decode(Ctx *c) {
     for (uint32_t i = 0; i < size; i++) p[i] ^= key[i & 3];
     RET((uint64_t)(uintptr_t)(p + 8));
 }
+/* The base game's (1.0.0) overload, Decode(data, size, decompress callback, key): it passes neither (0x71006425a8), so the same
+ * decode as the update's two-argument one; without it the base game's own fonts stayed encoded and the first glyph crashed. */
+static void fe_Decode4(Ctx *c) {
+    if (A2 || A3) { static int n; if (n++ < 3) printf("nn::fontll: Decode with a decompress callback (0x%llx) or a key (0x%llx): decoded as without them\n", (unsigned long long)A2, (unsigned long long)A3); }
+    fe_Decode(c);
+}
 
 #define F(n) "_ZN2nn6fontll18ScalableFontEngine" n
 static const ImportDef fontll_imports[] = {
@@ -1369,6 +1375,7 @@ static const ImportDef fontll_imports[] = {
     {F("21AcquireOtfKerningLastEPKNS0_15OtfKerningTableEjj"), fe_AcquireOtfKerningLast},
     {F("22AcquireOtfKerningFirstEPKNS0_15OtfKerningTableEjj"), fe_AcquireOtfKerningFirst},
     {"_ZN2nn6fontll24ScalableFontEngineHelper6DecodeEPKvj", fe_Decode},
+    {"_ZN2nn6fontll24ScalableFontEngineHelper6DecodeEPKvjPFmPvmS3_mS3_mS3_mEPKh", fe_Decode4},
 };
 
 /* osk.c, the inline keyboard: a font the game loaded whose name starts with `prefix` (its own typeface, Rodin NTLG), made

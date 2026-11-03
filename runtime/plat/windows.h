@@ -160,7 +160,7 @@ void Sleep(DWORD ms);
 #define InterlockedAnd(p, v) __atomic_fetch_and((p), (v), PLAT_SC)
 #define InterlockedAnd64 InterlockedAnd
 #define InterlockedXor(p, v) __atomic_fetch_xor((p), (v), PLAT_SC)
-#ifdef __APPLE__              /* Apple's clang has no __typeof_unqual__: a volatile local serves the exchange as well */
+#if defined(__APPLE__) || (defined(__clang__) && __clang_major__ < 19)  /* no __typeof_unqual__ (Apple's clang, clang < 19): a volatile local serves the exchange as well */
 #define PLAT_TYPEOF_UNQUAL __typeof__
 #else
 #define PLAT_TYPEOF_UNQUAL __typeof_unqual__
@@ -229,6 +229,8 @@ BOOL GetExitCodeThread(HANDLE h, DWORD *code);
 #define THREAD_PRIORITY_ABOVE_NORMAL 1
 #define THREAD_PRIORITY_HIGHEST 2
 #define THREAD_PRIORITY_TIME_CRITICAL 15
+#define THREAD_MODE_BACKGROUND_BEGIN THREAD_PRIORITY_IDLE
+#define THREAD_MODE_BACKGROUND_END THREAD_PRIORITY_NORMAL
 BOOL SetThreadPriority(HANDLE h, int prio);
 int GetThreadPriority(HANDLE h);
 #define SetThreadPriorityBoost(h, off) TRUE       /* no priority boost to turn off on Linux */
@@ -252,7 +254,13 @@ BOOL ReleaseMutex(HANDLE h);
 HANDLE CreateWaitableTimerExW(SECURITY_ATTRIBUTES *sa, LPCWSTR name, DWORD flags, DWORD access);
 #define CreateWaitableTimerA(sa, manual, name) CreateWaitableTimerExW(sa, NULL, 0, TIMER_ALL_ACCESS)
 #define CreateWaitableTimer CreateWaitableTimerA
+#define CreateWaitableTimerW CreateWaitableTimerA
 BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *due, LONG period, void *fn, LPVOID arg, BOOL resume);
+/* Timer-queue timers (os_threads.c's TimerEvent): a thread per timer; deleting with INVALID_HANDLE_VALUE waits for a running callback */
+typedef void (*WAITORTIMERCALLBACK)(PVOID arg, BOOLEAN fired);
+#define WT_EXECUTEDEFAULT 0
+BOOL CreateTimerQueueTimer(HANDLE *out, HANDLE queue, WAITORTIMERCALLBACK fn, PVOID arg, DWORD due_ms, DWORD period_ms, ULONG flags);
+BOOL DeleteTimerQueueTimer(HANDLE queue, HANDLE timer, HANDLE done);
 DWORD WaitForSingleObject(HANDLE h, DWORD ms);
 DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms);
 #define WaitForSingleObjectEx(h, ms, a) WaitForSingleObject(h, ms)
@@ -352,6 +360,7 @@ LPVOID MapViewOfFile(HANDLE m, DWORD access, DWORD hi, DWORD lo, SIZE_T n);
 BOOL UnmapViewOfFile(LPCVOID p);
 
 /* ---- C runtime names ---- */
+#define _atoi64 atoll
 #define _stricmp strcasecmp
 #define _strnicmp strncasecmp
 #define stricmp strcasecmp
@@ -520,7 +529,13 @@ int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n,
 #define VK_INSERT 0x2D
 #define VK_DELETE 0x2E
 #define VK_NUMPAD0 0x60
+#define VK_NUMPAD2 0x62
+#define VK_NUMPAD4 0x64
+#define VK_NUMPAD6 0x66
+#define VK_NUMPAD8 0x68
 #define VK_NUMPAD9 0x69
+#define VK_ADD 0x6B
+#define VK_SUBTRACT 0x6D
 #define VK_F1 0x70
 #define VK_F2 0x71
 #define VK_F12 0x7B

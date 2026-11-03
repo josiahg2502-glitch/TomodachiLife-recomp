@@ -20,7 +20,9 @@
 #include "runtime.h"
 #include "hostrt.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "advapi32.lib")
+#endif
 
 #define A0 (c->x[0])
 #define A1 (c->x[1])

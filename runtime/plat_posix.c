@@ -15,7 +15,9 @@
 #include <link.h>
 #endif
 #include <limits.h>
-#if !(defined(__APPLE__) && defined(__aarch64__))
+#if (defined(__APPLE__) && defined(__aarch64__)) || defined(__ANDROID__)
+#define PLAT_OWN_FIBERS 1                      /* no working ucontext (macOS arm64, Android's bionic): plat_fiber_switch */
+#else
 #include <ucontext.h>
 #endif
 #include <sys/uio.h>
@@ -30,6 +32,23 @@
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
 #include <linux/fs.h>
+/* Headers older than Linux 6.7 (Ubuntu 22.04, Debian 12, the Android NDK): the write watch's kernel interface spelled out.
+ * Whether the running kernel has it is asked at run time (ww_init). */
+#ifndef UFFD_FEATURE_WP_ASYNC
+#define UFFD_FEATURE_WP_UNPOPULATED (1 << 13)
+#define UFFD_FEATURE_WP_ASYNC (1 << 15)
+#endif
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+#ifndef PAGEMAP_SCAN
+#define PAGE_IS_WRITTEN (1 << 1)
+#define PM_SCAN_WP_MATCHING (1 << 0)
+#define PM_SCAN_CHECK_WPASYNC (1 << 1)
+struct page_region { uint64_t start, end, categories; };
+struct pm_scan_arg { uint64_t size, flags, start, end, walk_end, vec, vec_len, max_pages, category_inverted, category_mask, category_anyof_mask, return_mask; };
+#define PAGEMAP_SCAN _IOWR('f', 16, struct pm_scan_arg)
+#endif
 #endif
 #include <sys/ioctl.h>
 #include <SDL3/SDL.h>
@@ -340,7 +359,12 @@ DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
 #ifndef __APPLE__                                 /* macOS has no thread affinity: the mask is accepted, not applied */
     cpu_set_t set; CPU_ZERO(&set);
     for (int i = 0; i < 64; i++) if (mask >> i & 1) CPU_SET(i, &set);
+#ifdef __ANDROID__                                /* bionic: the thread's kernel id (0 before it has started: not applied) */
+    pid_t tid = h == PSEUDO_THREAD ? os_tid() : (pid_t)((PlatObj *)h)->tid;
+    if (tid && sched_setaffinity(tid, sizeof set, &set)) return 0;
+#else
     if (pthread_setaffinity_np(th, sizeof set, &set)) return 0;
+#endif
 #endif
     return ~(DWORD_PTR)0 >> (64 - (get_nprocs() < 64 ? get_nprocs() : 64));
 }
@@ -432,6 +456,42 @@ BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *due, LONG period, void *fn,
     else { FILETIME ft; GetSystemTimeAsFileTime(&ft); int64_t now = (int64_t)(((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime); o->due_ns = mono_ns() + (d - now) * 100; }
     o->signaled = 0;
     pthread_mutex_unlock(&o->m);
+    return TRUE;
+}
+/* Timer-queue timers: a thread per timer calls fn at the due time, then every period (0: once). Deleting stops it and
+ * waits for a running callback, as DeleteTimerQueueTimer(.., INVALID_HANDLE_VALUE) does. */
+typedef struct { HANDLE th; CRITICAL_SECTION cs; CONDITION_VARIABLE cv; WAITORTIMERCALLBACK fn; PVOID arg; uint64_t due_ns, period_ns; int stop; } TqTimer;
+static DWORD WINAPI tq_main(LPVOID p) {
+    TqTimer *t = p;
+    EnterCriticalSection(&t->cs);
+    while (!t->stop) {
+        uint64_t now = mono_ns();
+        if (now < t->due_ns) { SleepConditionVariableCS(&t->cv, &t->cs, (DWORD)((t->due_ns - now + 999999) / 1000000)); continue; }
+        LeaveCriticalSection(&t->cs);
+        t->fn(t->arg, TRUE);
+        EnterCriticalSection(&t->cs);
+        if (!t->period_ns) break;
+        t->due_ns = t->due_ns + t->period_ns > now ? t->due_ns + t->period_ns : now + t->period_ns;      /* no burst of missed periods */
+    }
+    LeaveCriticalSection(&t->cs);
+    return 0;
+}
+BOOL CreateTimerQueueTimer(HANDLE *out, HANDLE queue, WAITORTIMERCALLBACK fn, PVOID arg, DWORD due_ms, DWORD period_ms, ULONG flags) {
+    (void)queue; (void)flags;
+    TqTimer *t = calloc(1, sizeof *t);
+    if (!t) return FALSE;
+    InitializeCriticalSection(&t->cs);
+    t->fn = fn; t->arg = arg; t->due_ns = mono_ns() + (uint64_t)due_ms * 1000000; t->period_ns = (uint64_t)period_ms * 1000000;
+    if (!(t->th = CreateThread(NULL, 0, tq_main, t, 0, NULL))) { DeleteCriticalSection(&t->cs); free(t); return FALSE; }
+    *out = t;
+    return TRUE;
+}
+BOOL DeleteTimerQueueTimer(HANDLE queue, HANDLE timer, HANDLE done) {
+    (void)queue; (void)done;
+    TqTimer *t = timer;
+    EnterCriticalSection(&t->cs); t->stop = 1; WakeConditionVariable(&t->cv); LeaveCriticalSection(&t->cs);
+    WaitForSingleObject(t->th, INFINITE);
+    CloseHandle(t->th); DeleteCriticalSection(&t->cs); free(t);
     return TRUE;
 }
 
@@ -533,13 +593,18 @@ BOOL FlsSetValue(DWORD i, PVOID v) { return pthread_setspecific((pthread_key_t)i
  * On ucontext. As on Windows a fiber can be resumed on another thread than the one it last ran on (the running fiber is
  * per thread: t_fiber); swapcontext also saves and restores the signal mask, one system call per switch. The stack is
  * reserved whole at creation (MAP_NORESERVE: pages are used as touched), not grown from a commit size. */
-#if defined(__APPLE__) && defined(__aarch64__)
-/* macOS on Apple Silicon has no working ucontext: a switch of the callee-saved registers instead (x19-x28, fp, lr, sp,
- * d8-d15; everything else is the caller's to keep across a call). A new fiber's first switch "returns" into fiber_entry
- * on its own stack. The signal mask is not switched (ucontext did that with one system call per switch). */
+#if defined(PLAT_OWN_FIBERS) && defined(__aarch64__)
+/* macOS on Apple Silicon has no working ucontext, Android none: a switch of the callee-saved registers instead (x19-x28,
+ * fp, lr, sp, d8-d15; everything else is the caller's to keep across a call). A new fiber's first switch "returns" into
+ * fiber_entry on its own stack. The signal mask is not switched (ucontext did that with one system call per switch). */
 typedef struct { uint64_t r[13]; uint64_t d[8]; } FiberRegs;        /* r: x19..x28, fp, lr, sp */
 void plat_fiber_switch(FiberRegs *from, FiberRegs *to);
-__asm__(".text\n.globl _plat_fiber_switch\n.p2align 2\n_plat_fiber_switch:\n"
+#ifdef __APPLE__
+#define PLAT_FIBER_SYM "_plat_fiber_switch"
+#else
+#define PLAT_FIBER_SYM "plat_fiber_switch"
+#endif
+__asm__(".text\n.globl " PLAT_FIBER_SYM "\n.p2align 2\n" PLAT_FIBER_SYM ":\n"
         "  mov x9, sp\n"
         "  stp x19, x20, [x0, #0]\n  stp x21, x22, [x0, #16]\n  stp x23, x24, [x0, #32]\n  stp x25, x26, [x0, #48]\n"
         "  stp x27, x28, [x0, #64]\n  stp x29, x30, [x0, #80]\n  str x9, [x0, #96]\n"
@@ -548,6 +613,17 @@ __asm__(".text\n.globl _plat_fiber_switch\n.p2align 2\n_plat_fiber_switch:\n"
         "  ldp x27, x28, [x1, #64]\n  ldp x29, x30, [x1, #80]\n  ldr x9, [x1, #96]\n  mov sp, x9\n"
         "  ldp d8, d9, [x1, #104]\n  ldp d10, d11, [x1, #120]\n  ldp d12, d13, [x1, #136]\n  ldp d14, d15, [x1, #152]\n"
         "  ret\n");
+typedef struct { FiberRegs uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
+#elif defined(PLAT_OWN_FIBERS)
+/* Android on x86-64 (the emulator): the same for the System V registers: rbx, rbp, r12-r15, rsp, the return address, and
+ * the SSE / x87 control words. */
+typedef struct { uint64_t r[8]; uint32_t mxcsr, fpcw; } FiberRegs;  /* r: rbx rbp r12 r13 r14 r15 rsp rip */
+void plat_fiber_switch(FiberRegs *from, FiberRegs *to);
+__asm__(".text\n.globl plat_fiber_switch\n.p2align 4\nplat_fiber_switch:\n"
+        "  movq %rbx, 0(%rdi)\n  movq %rbp, 8(%rdi)\n  movq %r12, 16(%rdi)\n  movq %r13, 24(%rdi)\n  movq %r14, 32(%rdi)\n  movq %r15, 40(%rdi)\n"
+        "  leaq 8(%rsp), %rax\n  movq %rax, 48(%rdi)\n  movq (%rsp), %rax\n  movq %rax, 56(%rdi)\n  stmxcsr 64(%rdi)\n  fnstcw 68(%rdi)\n"
+        "  movq 0(%rsi), %rbx\n  movq 8(%rsi), %rbp\n  movq 16(%rsi), %r12\n  movq 24(%rsi), %r13\n  movq 32(%rsi), %r14\n  movq 40(%rsi), %r15\n"
+        "  ldmxcsr 64(%rsi)\n  fldcw 68(%rsi)\n  movq 48(%rsi), %rsp\n  jmpq *56(%rsi)\n");
 typedef struct { FiberRegs uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
 #else
 typedef struct { ucontext_t uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
@@ -569,10 +645,15 @@ LPVOID CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_R
     f->stack_size = reserve ? reserve : (SIZE_T)1 << 20;
     f->stack = mmap(NULL, f->stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
     if (f->stack == MAP_FAILED) { free(f); return NULL; }
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(PLAT_OWN_FIBERS) && defined(__aarch64__)
     memset(&f->uc, 0, sizeof f->uc);
     f->uc.r[11] = (uint64_t)(uintptr_t)fiber_entry;                                     /* lr */
     f->uc.r[12] = ((uint64_t)(uintptr_t)f->stack + f->stack_size) & ~(uint64_t)15;      /* sp */
+#elif defined(PLAT_OWN_FIBERS)
+    memset(&f->uc, 0, sizeof f->uc);
+    f->uc.r[7] = (uint64_t)(uintptr_t)fiber_entry;                                      /* rip */
+    f->uc.r[6] = (((uint64_t)(uintptr_t)f->stack + f->stack_size) & ~(uint64_t)15) - 8; /* rsp, as just after a call */
+    f->uc.mxcsr = 0x1f80; f->uc.fpcw = 0x037f;
 #else
     getcontext(&f->uc);
     f->uc.uc_stack.ss_sp = f->stack; f->uc.uc_stack.ss_size = f->stack_size; f->uc.uc_link = NULL;
@@ -584,7 +665,7 @@ void SwitchToFiber(LPVOID fiber) {
     Fiber *from = t_fiber, *to = fiber;
     if (from == to) return;
     t_fiber = to;
-#if defined(__APPLE__) && defined(__aarch64__)
+#ifdef PLAT_OWN_FIBERS
     plat_fiber_switch(&from->uc, &to->uc);
 #else
     swapcontext(&from->uc, &to->uc);
@@ -1553,6 +1634,8 @@ HMODULE LoadLibraryA(LPCSTR name) {
 #ifdef __APPLE__                                  /* Homebrew's libraries; the Vulkan loader finds MoltenVK through its driver file */
         {"vulkan-1.dll", "libvulkan.1.dylib"}, {"libopus-0.dll", "libopus.0.dylib"}, {"opus.dll", "libopus.0.dylib"},
         {"SDL3.dll", "libSDL3.0.dylib"}, {"opengl32.dll", "/System/Library/Frameworks/OpenGL.framework/OpenGL"},
+#elif defined(__ANDROID__)                        /* the system's Vulkan loader; SDL3 is the app's own */
+        {"vulkan-1.dll", "libvulkan.so"}, {"SDL3.dll", "libSDL3.so"},
 #else
         {"vulkan-1.dll", "libvulkan.so.1"}, {"libopus-0.dll", "libopus.so.0"}, {"opus.dll", "libopus.so.0"},
         {"SDL3.dll", "libSDL3.so.0"}, {"opengl32.dll", "libGL.so.1"},
@@ -1565,6 +1648,13 @@ HMODULE LoadLibraryA(LPCSTR name) {
     for (size_t i = 0; i < sizeof map / sizeof *map; i++)
         if (!strcasecmp(base, map[i].win)) { void *h = sys_dlopen(map[i].linux_); if (!h) t_lasterr = ERROR_FILE_NOT_FOUND; return h; }
     size_t n = strlen(b);
+#ifdef __ANDROID__                                /* our own modules: x.dll -> libx.so, in the app's library folder (only lib*.so are installed) */
+    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) { b[n - 4] = 0; snprintf(c, sizeof c, "%s%s.so", strncmp(base, "lib", 3) ? "lib" : "", base); }
+    else snprintf(c, sizeof c, "%s", base);
+    void *ha = dlopen(c, RTLD_NOW | RTLD_LOCAL);
+    if (!ha) { t_lasterr = ERROR_FILE_NOT_FOUND; if (getenv("SSBU_PLAT_DLERROR")) fprintf(stderr, "plat: dlopen %s: %s\n", c, dlerror()); }
+    return ha;
+#endif
     if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, PLAT_SO_EXT);     /* our own modules: x.dll -> x.so (.dylib) */
     /* Windows looks next to the exe first; dlopen only does that for a path */
     if (b[0] != '/') snprintf(c, sizeof c, "%s/%s", exe_dir(), b); else snprintf(c, sizeof c, "%s", b);
@@ -1602,11 +1692,37 @@ BOOL GetModuleHandleExA(DWORD flags, LPCSTR name, HMODULE *out) {
     *out = dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
     return *out != NULL;
 }
+#ifdef __APPLE__
+#define PLAT_IMAGE_OF dyld_image_of
+#elif defined(__ANDROID__)
+#define PLAT_IMAGE_OF dl_image_of
+/* The image a handle of LoadLibraryA belongs to (bionic has no dlinfo): every loaded object asked again with RTLD_NOLOAD,
+ * which gives the same handle. */
+typedef struct { void *m; const char *path; uintptr_t base; } DlFind;
+static int dl_find_cb(struct dl_phdr_info *i, size_t sz, void *p) {
+    DlFind *f = p;
+    (void)sz;
+    if (!i->dlpi_name || !i->dlpi_name[0]) return 0;
+    void *h = dlopen(i->dlpi_name, RTLD_NOW | RTLD_NOLOAD);
+    if (!h) return 0;
+    dlclose(h);
+    if (h != f->m) return 0;
+    f->path = i->dlpi_name; f->base = (uintptr_t)i->dlpi_addr;
+    return 1;
+}
+static int dl_image_of(void *m, const char **path, uintptr_t *base) {
+    DlFind f = {m, NULL, 0};
+    dl_iterate_phdr(dl_find_cb, &f);
+    if (!f.path) return 0;
+    *path = f.path; *base = f.base;
+    return 1;
+}
+#endif
 DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD n) {
     char b[PATH_MAX] = "";
     if (!m || m == dlopen(NULL, RTLD_NOW)) { ssize_t k = self_exe_path(b, sizeof b - 1); if (k < 0) k = 0; b[k] = 0; }
-#ifdef __APPLE__
-    else { const char *path; uintptr_t base; if (dyld_image_of(m, &path, &base)) snprintf(b, sizeof b, "%s", path); }
+#if defined(__APPLE__) || defined(__ANDROID__)
+    else { const char *path; uintptr_t base; if (PLAT_IMAGE_OF(m, &path, &base)) snprintf(b, sizeof b, "%s", path); }
 #else
     else { struct link_map *lm = NULL; if (!dlinfo(m, RTLD_DI_LINKMAP, &lm) && lm) snprintf(b, sizeof b, "%s", lm->l_name); }
 #endif
@@ -1617,9 +1733,9 @@ DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD n) {
 uintptr_t plat_module_base(HMODULE m) {
     Dl_info di;
     if (!m || m == dlopen(NULL, RTLD_NOW)) { if (dladdr((void *)&plat_module_base, &di)) return (uintptr_t)di.dli_fbase; return 0; }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
     const char *path; uintptr_t base;
-    return dyld_image_of(m, &path, &base) ? base : 0;
+    return PLAT_IMAGE_OF(m, &path, &base) ? base : 0;
 #else
     struct link_map *lm = NULL;
     if (!dlinfo(m, RTLD_DI_LINKMAP, &lm) && lm) return (uintptr_t)lm->l_addr;
@@ -1693,6 +1809,8 @@ static SDL_Scancode vk_scancode(int vk) {
     case VK_RCONTROL: return SDL_SCANCODE_RCTRL;
     case VK_OEM_PLUS: return SDL_SCANCODE_EQUALS;
     case VK_OEM_MINUS: return SDL_SCANCODE_MINUS;
+    case VK_ADD: return SDL_SCANCODE_KP_PLUS;
+    case VK_SUBTRACT: return SDL_SCANCODE_KP_MINUS;
     case 0xBA: return SDL_SCANCODE_SEMICOLON;
     case 0xBC: return SDL_SCANCODE_COMMA;
     case 0xBE: return SDL_SCANCODE_PERIOD;
@@ -1877,36 +1995,35 @@ BOOL GetUserPreferredUILanguages(DWORD flags, ULONG *count, LPWSTR list, ULONG *
 }
 int GetUserDefaultLocaleName(LPWSTR out, int n) { char tag[64]; locale_tag(tag, sizeof tag); return MultiByteToWideChar(CP_UTF8, 0, tag, -1, out, n); }
 
-/* ================================================================ CryptoAPI subset (plat/wincrypt.h) on OpenSSL */
+/* ================================================================ CryptoAPI subset (plat/wincrypt.h): MD5, SHA-1, SHA-256 (plat/plat_hash.h) */
 #include "plat/wincrypt.h"
-#include <openssl/evp.h>
+#include "plat/plat_hash.h"
 BOOL CryptAcquireContextA(HCRYPTPROV *prov, LPCSTR container, LPCSTR provider, DWORD type, DWORD flags) { (void)container; (void)provider; (void)type; (void)flags; *prov = 1; return TRUE; }
 BOOL CryptReleaseContext(HCRYPTPROV prov, DWORD flags) { (void)prov; (void)flags; return TRUE; }
 BOOL CryptGenRandom(HCRYPTPROV prov, DWORD n, BYTE *buf) { (void)prov; return SystemFunction036(buf, n); }
 BOOL CryptCreateHash(HCRYPTPROV prov, ALG_ID alg, HCRYPTKEY key, DWORD flags, HCRYPTHASH *out) {
     (void)prov; (void)key; (void)flags;
-    const EVP_MD *md = alg == CALG_MD5 ? EVP_md5() : alg == CALG_SHA1 ? EVP_sha1() : alg == CALG_SHA_256 ? EVP_sha256() : NULL;
-    if (!md) { t_lasterr = ERROR_INVALID_PARAMETER; return FALSE; }
-    EVP_MD_CTX *c = EVP_MD_CTX_new();
-    if (!c || !EVP_DigestInit_ex(c, md, NULL)) { EVP_MD_CTX_free(c); return FALSE; }
+    int a = alg == CALG_MD5 ? PH_MD5 : alg == CALG_SHA1 ? PH_SHA1 : alg == CALG_SHA_256 ? PH_SHA256 : -1;
+    if (a < 0) { t_lasterr = ERROR_INVALID_PARAMETER; return FALSE; }
+    PlatHash *c = malloc(sizeof *c);
+    if (!c) return FALSE;
+    ph_init(c, a);
     *out = (HCRYPTHASH)c;
     return TRUE;
 }
-BOOL CryptHashData(HCRYPTHASH h, const BYTE *data, DWORD n, DWORD flags) { (void)flags; return EVP_DigestUpdate((EVP_MD_CTX *)h, data, n) == 1; }
+BOOL CryptHashData(HCRYPTHASH h, const BYTE *data, DWORD n, DWORD flags) { (void)flags; ph_update((PlatHash *)h, data, n); return TRUE; }
 BOOL CryptGetHashParam(HCRYPTHASH h, DWORD param, BYTE *out, DWORD *n, DWORD flags) {
     (void)flags;
-    EVP_MD_CTX *c = (EVP_MD_CTX *)h;
-    DWORD size = (DWORD)EVP_MD_CTX_get_size(c);
+    PlatHash *c = (PlatHash *)h, copy;
+    DWORD size = (DWORD)ph_size(c->alg);
     if (param == HP_HASHSIZE) { if (*n < 4) return FALSE; memcpy(out, &size, 4); *n = 4; return TRUE; }
     if (param != HP_HASHVAL || *n < size) { *n = size; return FALSE; }
-    EVP_MD_CTX *copy = EVP_MD_CTX_new();               /* Windows lets the hash be read and then closed: finish a copy */
-    unsigned int len = 0;
-    BOOL ok = copy && EVP_MD_CTX_copy_ex(copy, c) && EVP_DigestFinal_ex(copy, out, &len);
-    EVP_MD_CTX_free(copy);
-    *n = len;
-    return ok;
+    copy = *c;                                         /* Windows lets the hash be read and then closed: finish a copy */
+    ph_final(&copy, out);
+    *n = size;
+    return TRUE;
 }
-BOOL CryptDestroyHash(HCRYPTHASH h) { EVP_MD_CTX_free((EVP_MD_CTX *)h); return TRUE; }
+BOOL CryptDestroyHash(HCRYPTHASH h) { free((PlatHash *)h); return TRUE; }
 
 static BOOL bad_ptr(const void *p, UINT_PTR n, int write) {
     if (!p) return n != 0;

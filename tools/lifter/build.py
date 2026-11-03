@@ -20,19 +20,25 @@ GEN = os.path.join(HERE, os.environ.get('RECOMP_GEN', 'gen_eh_o2'))      # side-
 OBJ = os.path.join(HERE, os.environ.get('RECOMP_OBJ', 'obj_eh_o1'))
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # scripts\setup.py sets RECOMP_CLANG (LLVM/clang 9.0.0)
 # RECOMP_TARGET=linux: a native Linux build (ELF objects, the game and the modules as .so files, the exe linked with the
-# system's SDL3 / FreeType / OpenSSL). The Win32 calls of the host sources come from plat/windows.h + plat_posix.c.
+# system's SDL3 / FFmpeg). The Win32 calls of the host sources come from plat/windows.h + plat_posix.c.
 # RECOMP_TARGET=macos: the same on macOS / Apple Silicon (Mach-O, .dylib files; plan/phases/MAC1_port.md). Work in progress:
 # the host runtime compiles and its platform layer passes tests/plat_selftest.c; the game library and the module libraries
 # are made as .dylib (build_nro.py, build_opt.py), not yet built from a dump on a Mac (MAC3).
 TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'
 TARGET_MACOS = os.environ.get('RECOMP_TARGET') == 'macos'
-TARGET_POSIX = TARGET_LINUX or TARGET_MACOS
+# RECOMP_TARGET=android: the Android build (Vulkan) for RECOMP_ANDROID_ABI (arm64-v8a, the default; x86_64: the emulator), with
+# the NDK's clang (RECOMP_CLANG). Every part is a shared library: the host runtime is libmain.so, which SDL's Java activity
+# loads (android_main.c: SDL_main), the game libtomodachi_game.so; scripts/android/build_apk.py packs them.
+TARGET_ANDROID = os.environ.get('RECOMP_TARGET') == 'android'
+ANDROID_ABI = os.environ.get('RECOMP_ANDROID_ABI', 'arm64-v8a')
+TARGET_POSIX = TARGET_LINUX or TARGET_MACOS or TARGET_ANDROID
 PLAT_FLAGS = ['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] if TARGET_POSIX else []
 MACOS_MIN = ['-mmacosx-version-min=14.4'] if TARGET_MACOS else []     # os_sync_wait_on_address (plat_posix.c): macOS 14.4+
 PLAT_FLAGS += MACOS_MIN
+PLAT_FLAGS += ['--target=%s-linux-android29' % ('x86_64' if ANDROID_ABI == 'x86_64' else 'aarch64')] if TARGET_ANDROID else []
 # x86-64: 16-byte atomics (the lifted LDXP/STXP, CASP) inline as cmpxchg16b; without it -O1 code on Linux calls
 # __atomic_compare_exchange_16 (libatomic) and -O2 code on Windows __sync_val_compare_and_swap_16, neither of them linked
-PLAT_FLAGS += ['-mcx16'] if not TARGET_MACOS else []
+PLAT_FLAGS += ['-mcx16'] if not TARGET_MACOS and not (TARGET_ANDROID and ANDROID_ABI != 'x86_64') else []
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN] + PLAT_FLAGS
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'nnpad_gca.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
                 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
@@ -161,7 +167,7 @@ def cmd_compile(jobs, force):
 
 # The lifted game code lives in ssbu_game.dll, linked only when obj\ changes; the exe holds just the
 # host runtime, so the edit-link-run loop costs a couple of seconds (see game_shim.c, gamedll.c).
-GAME_DLL = os.environ.get('RECOMP_DLL', 'tomodachi_game' + ('.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'))
+GAME_DLL = os.environ.get('RECOMP_DLL', 'libtomodachi_game.so' if TARGET_ANDROID else 'tomodachi_game' + ('.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'))
 HOST_FLAGS = ['-O1', '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
               '-Ddyn_syms=(*game_dyn_syms_p)', '-Ddyn_sym_count=(*game_dyn_sym_count_p)', '-DGAME_DLL_NAME="%s"' % GAME_DLL,
               '-I', os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'include'),
@@ -189,9 +195,25 @@ HAVE_FFMPEG = os.path.isfile(os.path.join(FFMPEG_ROOT, 'include', 'libavcodec', 
 if HAVE_FFMPEG and not TARGET_POSIX:
     HOST_SOURCES.append('mf_ffmpeg.c')
     HOST_FLAGS = HOST_FLAGS + ['-I', os.path.join(FFMPEG_ROOT, 'include')]
-if TARGET_POSIX:
+if TARGET_ANDROID:
+    # no pkg-config: SDL3's headers from SDL3_ROOT (its source tree) and the libSDL3.so built for the ABI (ANDROID_SDL3_LIB),
+    # Mesa's GL header that the NDK lacks (plat/android: compiled against, never called; gl_none.c answers the GL 1.1 calls).
+    # No FreeType (nnfontll.c decodes the TrueType outlines itself: plat/ft_mini.h), no FFmpeg (no movies: movie_none.c).
+    HOST_FLAGS = HOST_FLAGS + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat'), '-I', os.path.join(HERE, 'plat', 'android')]
+    HOST_SOURCES = [n for n in HOST_SOURCES if n not in ('net_relay.c', 'nnmovie_mf.c')] + ['plat_posix.c', 'net_off.c', 'movie_none.c', 'gl_none.c', 'android_main.c']
+    LIBS = [os.environ.get('ANDROID_SDL3_LIB', 'libSDL3.so'), '-landroid', '-llog', '-lm', '-ldl']
+    CXX_FLAGS = CXX_FLAGS + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat'), '-I', os.path.join(HERE, 'plat', 'android'),
+                                          '-I', os.path.join(os.environ.get('SDL3_ROOT', ''), 'include')]
+    if HAVE_IMGUI:
+        LIBS += ['-lc++_static', '-lc++abi']
+elif TARGET_POSIX:
+    # SDL3_PREFIX (scripts/setup.py): the SDL3 install_deps.sh built (deps/sdl3-linux), by its folders, as pkg-config breaks a
+    # path with a space into two words (the exe finds libSDL3.so.0 beside it: rpath $ORIGIN)
+    _sdl = os.environ.get('SDL3_PREFIX')
     def pkg(*args):
-        return subprocess.run(['pkg-config'] + list(args) + ['sdl3', 'freetype2', 'openssl', 'libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'], capture_output=True, text=True, check=True).stdout.split()
+        out = subprocess.run(['pkg-config'] + list(args) + (['sdl3'] if not _sdl else []) + ['libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'],
+                             capture_output=True, text=True, check=True).stdout.split()
+        return (['-I', os.path.join(_sdl, 'include')] if '--cflags' in args else ['-L', os.path.join(_sdl, 'lib'), '-lSDL3']) + out if _sdl else out
     _sdl_inc = HOST_FLAGS.index('-I', HOST_FLAGS.index('-Ddyn_sym_count=(*game_dyn_sym_count_p)'))      # the SDL3 VC package: the system's SDL3 instead
     HOST_FLAGS = HOST_FLAGS[:_sdl_inc] + HOST_FLAGS[_sdl_inc + 2:] + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
     # plat_mf.c: the Media Foundation subset nnmovie_mf.c uses, on FFmpeg. Not in the Linux build yet: online play
@@ -252,6 +274,8 @@ def link_dll(objs, dll, rsp, implib=True, fltused=False, map_file=None):
         return subprocess.run([CLANG, '-dynamiclib', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-install_name,@rpath/' + os.path.basename(dll), '-Wl,-undefined,dynamic_lookup'], capture_output=True, text=True, errors='replace')
     if TARGET_LINUX:          # a .so: -z now resolves everything at load, as a DLL is
         return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-soname,' + os.path.basename(dll), '-Wl,-z,now'], capture_output=True, text=True, errors='replace')
+    if TARGET_ANDROID:        # Android binds everything at load: a missing name must fail here (--no-undefined), not at start
+        return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-soname,' + os.path.basename(dll), '-Wl,--no-undefined'], capture_output=True, text=True, errors='replace')
     if not NOCRT:
         return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll] + (['-Wl,/MAP:' + map_file] if map_file else []), capture_output=True, text=True, errors='replace')
     os.makedirs(libdir, exist_ok=True)
@@ -325,6 +349,8 @@ def game_import_lib(objdir):
 def compile_host(job):
     src, obj = job
     flags = CXX_FLAGS if src.endswith('.cpp') else HOST_FLAGS
+    if TARGET_ANDROID and os.path.basename(src) == 'boot.c':
+        flags = flags + ['-Dmain=tomo_main']        # android_main.c's SDL_main calls it
     r = subprocess.run([CLANG, '-c'] + flags + [src, '-o', obj], capture_output=True, text=True)
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
@@ -337,7 +363,10 @@ def cmd_link(host_only=False):
     objdir = os.path.join(HERE, 'obj_host', os.path.splitext(exe)[0])
     os.makedirs(objdir, exist_ok=True)
     t0 = time.time()
-    newest_dep = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith(('.h', '.inc'))] + [os.path.getmtime(os.path.join(HERE, 'build.py'))])
+    plat = os.path.join(HERE, 'plat')      # plat/*.h too (windows.h, ft_mini.h, plat_hash.h: every POSIX host file takes them)
+    newest_dep = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith(('.h', '.inc'))] +
+                     [os.path.getmtime(os.path.join(plat, h)) for h in (os.listdir(plat) if os.path.isdir(plat) else []) if h.endswith('.h')] +
+                     [os.path.getmtime(os.path.join(HERE, 'build.py'))])
     # nvn_vk.c includes the other nvn_vk*.c files as one translation unit: an edit of one of them must rebuild nvn_vk.obj
     newest_vk = max(os.path.getmtime(os.path.join(HERE, n)) for n in os.listdir(HERE) if n.startswith('nvn_vk') and n.endswith('.c'))
     objs, jobs = [], []
@@ -371,8 +400,12 @@ def cmd_link(host_only=False):
         game = ['-Wl,-undefined,dynamic_lookup'] if host_only else [os.path.join(HERE, GAME_DLL)]
         r = subprocess.run([CLANG] + MACOS_MIN + objs + game + ['-Wl,-rpath,@executable_path'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     elif TARGET_LINUX:
-        game = ['-Wl,--unresolved-symbols=ignore-in-object-files'] if host_only else ['-L', HERE, '-l:' + GAME_DLL]      # host alone: a compile + link check, not runnable
+        game = ['-L', HERE, '-l:' + GAME_DLL] if not host_only or os.path.exists(os.path.join(HERE, GAME_DLL)) else ['-Wl,--unresolved-symbols=ignore-in-object-files']      # host alone without the library: a compile + link check, not runnable
         r = subprocess.run([CLANG] + objs + game + ['-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
+    elif TARGET_ANDROID:      # libmain.so, which SDL's activity loads; the game library by name from the app's library folder
+        game = (['-L', HERE, '-l:' + GAME_DLL, '-Wl,--no-undefined'] if not host_only or os.path.exists(os.path.join(HERE, GAME_DLL))
+                else ['-Wl,--unresolved-symbols=ignore-in-object-files'])      # (host alone with the library built: still linked to it, DT_NEEDED)
+        r = subprocess.run([CLANG] + PLAT_FLAGS + ['-shared', '-Wl,-soname,libmain.so'] + objs + game + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     else:
         r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0 and not TARGET_POSIX:

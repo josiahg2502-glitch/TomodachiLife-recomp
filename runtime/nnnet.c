@@ -35,7 +35,9 @@
 #include <wincrypt.h>
 #include "sdklift.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 #define A0 (c->x[0])
 #define A1 (c->x[1])
