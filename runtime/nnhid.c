@@ -700,9 +700,11 @@ static int mouse_test(float *x, float *y, int *b, int *wheel) {
     }
     return in;
 }
-/* While the mouse moves (and half a second after) the left stick gets a nudge too small to move anything else, its sign
- * flipping every poll: the game hides its hand 2-3 s after the last stick input, and a position put in by tomo.c is not
- * one. The hand itself stays on the mouse (tomo.c puts the position in before every update). */
+/* While the mouse moves (and half a second after) the left stick gets a small push twice a second, its sign flipping at each
+ * push: the game hides its hand 2-3 s after the last stick input, and a position put in by tomo.c is not one. The hand itself
+ * stays on the mouse (tomo.c puts the position in before every update). The push was every poll with the sign flipping every
+ * poll: where a game frame reads the pad twice or skips a read it saw one sign only, and what the stick moves there crept off
+ * the screen in a line (issue #25). */
 static volatile LONG g_tap_a, g_hold_a;            /* tomo.c (the island: a click on the hand): A for a few polls / A held until let go */
 void nnhid_tap_a(void) { InterlockedExchange(&g_tap_a, 1); }
 void nnhid_hold_a(int on) { InterlockedExchange(&g_hold_a, on); }
@@ -789,7 +791,13 @@ static void mouse_poll(uint64_t *buttons, int *lx, int *ly, int *rx, int *ry) {
         float dx = g_mouse_xy[0] - 640.0f, dy = g_mouse_xy[1] - 360.0f, d = sqrtf(dx * dx + dy * dy);
         if (carry && !*lx && !*ly && d > 40.0f) { float m = (d - 40.0f) / 260.0f; if (m > 1.0f) m = 1.0f; *lx = (int)(dx / d * m * STICK_MAX); *ly = (int)(-dy / d * m * STICK_MAX); } }
     if (flick && !*lx && !*ly) { flick--; *lx = flick_dir * STICK_MAX; }
-    else if (g_mouse_on && free_hand && !island && !carry && nudge > 0 && !*lx && !*ly) { nudge--; *lx = (nudge & 1) ? STICK_MAX / 6 : -STICK_MAX / 6; }
+    else if (g_mouse_on && free_hand && !island && !carry && !*lx && !*ly) {
+        static DWORD last; static int sign = 1, hold;
+        const DWORD now = GetTickCount();
+        if (nudge > 0 && now - last >= 500) { last = now; sign = -sign; hold = 2; }
+        if (hold > 0) { hold--; *lx = sign * (STICK_MAX / 6); }
+    }
+    if (nudge > 0) nudge--;
 }
 /* Keys as a stick: a diagonal lies on the circle like a stick's (not 1.41 x as fast). While the game's free hand is up, a
  * key first moves it at half the stick, the full stick after 0.3 s held: a tap nudges the hand onto a small target, a
