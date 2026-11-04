@@ -723,7 +723,11 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     InterlockedExchange(&g_ready, 1);
     for (;;) {
         SDL_Event e;
+#ifdef __ANDROID__
+        SDL_Delay(4); while (SDL_PollEvent(&e)) {}     /* SDL's wait polls every millisecond here, with all it does per poll: a whole core in the emulator */
+#else
         if (SDL_WaitEventTimeout(&e, 8)) { while (SDL_PollEvent(&e)) {} }       /* the watch saw them; the keyboard state is current */
+#endif
         plat_window_service();
         window_mode_service(w);
         menu_sdl_service();
