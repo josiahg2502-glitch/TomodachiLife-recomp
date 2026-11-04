@@ -114,11 +114,10 @@ def main():
         binaries = os.path.join(build, 'binaries', state.get('game_version', '1.0.0'))
         for n in os.listdir(binaries):
             run([adb, 'push', os.path.join(binaries, n), dst + '/game/'])
-        fonts = os.path.join(build, 'sysdata', 'fonts')
-        fonts = fonts if os.path.isdir(fonts) else os.path.join(REPO, 'runtime', 'fonts_open')
-        for n in os.listdir(fonts):
-            if n.lower().endswith(('.ttf', '.bfttf', '.otf')):
-                run([adb, 'push', os.path.join(fonts, n), dst + '/fonts/'])
+        for fonts in (os.path.join(REPO, 'runtime', 'fonts_open'), os.path.join(build, 'sysdata', 'fonts')):      # the console's, where there are any, over the open-source ones
+            for n in os.listdir(fonts) if os.path.isdir(fonts) else []:
+                if n.lower().endswith(('.ttf', '.bfttf', '.otf')):
+                    run([adb, 'push', os.path.join(fonts, n), dst + '/fonts/'])
         ui = os.path.join(build, 'work', 'ui')         # the settings page's fonts, taken from the game's files (scripts/launcher_art.py)
         if os.path.isdir(ui):
             run([adb, 'push', ui, dst + '/'])

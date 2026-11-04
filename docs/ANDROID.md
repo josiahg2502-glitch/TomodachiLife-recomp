@@ -47,7 +47,7 @@ card, laid out like this:
 TomodachiLife/
   game/     main.elf, sdk.elf, main.npdm   (from build/binaries/<version>/)
             romfs/                         (your dump's romfs folder)
-  fonts/    the files of build/sysdata/fonts (or runtime/fonts_open)
+  fonts/    the files of runtime/fonts_open, and those of build/sysdata/fonts if you have that folder
   ui/       the files of build/work/ui     (the settings page's fonts)
 ```
 
@@ -75,6 +75,8 @@ Saves stay.
   attach it to a bug report.
 - An `env.txt` file beside that log sets options for the next start, one `NAME=value` per line (the same variables as
   on Windows).
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`: the app on the device was built in another folder (each folder signs with its own key).
+  Remove the app first; your saves are in the `TomodachiLife` folder and stay.
 - "The game's files were not found": check that `TomodachiLife/game/main.elf` exists at the top of the storage or SD
   card, and that "All files access" is allowed for the app (Settings > Apps > Tomodachi Life > Permissions).
 
