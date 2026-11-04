@@ -53,7 +53,8 @@ distrobox enter tomodachi
 scripts/linux/install.sh ~/path/to/your/dump
 ```
 
-The application menu entry starts the game inside the container. To play in Game Mode, add it to Steam as a
+The game starts at 720p on a Steam Deck (PC Settings, **Resolution**, changes it). The application menu entry starts the game
+inside the container. To play in Game Mode, add it to Steam as a
 non-Steam game (Steam > Add a game > Add a non-Steam game > Tomodachi Life).
 
 ## Troubleshooting

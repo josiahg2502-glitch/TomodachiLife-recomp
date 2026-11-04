@@ -521,7 +521,7 @@ const std::vector<Option>& options() {
     static const std::vector<Option> o = {
         {"DISPLAY", "window", "windowed", {{"windowed", "Window"}, {"borderless", "Borderless"}, {"fullscreen", "Fullscreen"}}},
         {"WINDOW SIZE", "size", "1280x720", {{"1280x720", "1280 x 720"}, {"1600x900", "1600 x 900"}, {"1920x1080", "1920 x 1080"}, {"2560x1440", "2560 x 1440"}, {"3840x2160", "3840 x 2160"}}},
-        {"RESOLUTION", "resolution_scale", "1.0", {{"1.0", "1080p"}, {"1.5", "1620p"}, {"2.0", "4K"}, {"3.0", "3240p"}}},
+        {"RESOLUTION", "resolution_scale", "1.0", {{"0.5", "540p"}, {"0.6667", "720p"}, {"1.0", "1080p"}, {"1.5", "1620p"}, {"2.0", "4K"}, {"3.0", "3240p"}}},
         // as the game's PC Settings (menu.cpp) since 2026-11-01: 16:9 by default, no fixed 21:9 / 32:9 (the game reads them as 16:9)
         {"WIDESCREEN", "widescreen", "off", {{"off", "Off (16:9)"}, {"auto", "Fit the screen (up to 21:9)"}}},
         {"FRAME RATE", "frame_rate", "60", {{"60", "60 fps (drops to 30 when needed)"}, {"30", "30 fps (as on the console)"}}},

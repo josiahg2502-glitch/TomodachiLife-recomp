@@ -153,6 +153,12 @@ def main():
         import json
         env['RECOMP_BIN'] = os.path.join(os.path.abspath(a.pc_build), 'binaries', json.load(open(state)).get('game_version', '1.0.0'))
     py = sys.executable
+    # the self-tests' reference data: an install with the prebuilt Windows exe did not make it (scripts/setup.py step_tables)
+    if not os.path.isfile(os.path.join(work, 'sdktest_data.h')):
+        import install
+        subprocess.run([py, 'gen_sdktest.py'], cwd=work, env=dict(env, SUYU_ROOT=install.fetch_suyu()), check=True)
+    if not os.path.isfile(os.path.join(work, 'quad_tests.h')):
+        subprocess.run([py, 'gen_quad_tests.py'], cwd=work, env=env, check=True)
     if not a.host_only:
         r = subprocess.run([py, 'build_opt.py', 'main', str(a.jobs)], cwd=work, env=env)
         if r.returncode:

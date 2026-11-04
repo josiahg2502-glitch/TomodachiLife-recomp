@@ -1724,7 +1724,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_SCREEN: S.window = (display_window_mode() + dir + 3) % 3; display_set_window_mode(S.window); ini("window", k_window[S.window]); break;
     case T_SIZE: S.size = ((S.size < 0 ? 0 : S.size) + dir + N(k_sizes)) % N(k_sizes); display_set_client_size(k_sizes[S.size][0], k_sizes[S.size][1]);
         snprintf(v, sizeof v, "%d", k_sizes[S.size][0]); ini("width", v); snprintf(v, sizeof v, "%d", k_sizes[S.size][1]); ini("height", v); break;
-    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, "%.4g", S.scale); ini("resolution_scale", v); break;
+    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, S.scale == (float)(int)S.scale ? "%.1f" : "%.4g", S.scale); ini("resolution_scale", v); break;
     case T_WIDE: g_t_wide = (g_t_wide + dir + N(k_wide)) % N(k_wide); ini("widescreen", k_wide[g_t_wide]); break;
     case T_FPS: g_t_fps = g_t_fps == 60 ? 30 : 60; snprintf(v, sizeof v, "%d", g_t_fps); ini("frame_rate", v); break;
     case T_VSYNC: { int k = 0; for (int i = 0; i < N(k_vsync_order); i++) if (k_vsync_order[i] == S.vsync) k = i;

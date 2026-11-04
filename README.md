@@ -63,7 +63,7 @@ screen then shows "preparing shaders (once)" with a count, the time spent and th
 
 - **PLAY** starts the game.
 - **GAME** shows the game version (1.0.0 or 1.0.4) and lets you choose another game folder.
-- **SETTINGS**: window or full screen, resolution (up to 4K and above), widescreen (*Off*, 16:9, by default; *Fit the
+- **SETTINGS**: window or full screen, resolution (540p to 4K and above), widescreen (*Off*, 16:9, by default; *Fit the
   screen* for ultrawide monitors up to 21:9: the 3D view widens, menus keep their 16:9 shape in the middle), frame rate
   (60 fps by default), vsync, volume, language, Local Play online (saved in `build\config\graphics.ini`).
 - **SAVE DATA**: back up and restore your save, or import a save dumped from your Switch (the folder with `Map.sav`,
