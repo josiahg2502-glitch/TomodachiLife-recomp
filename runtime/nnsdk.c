@@ -462,6 +462,7 @@ static void os_SetMemoryHeapSize(Ctx *c) {
 }
 static void os_AllocateMemoryBlockHeap(Ctx *c) {         /* (uintptr_t *out, size) */
     void *p = g_heap_used + A1 <= g_heap_size ? VirtualAlloc(NULL, (SIZE_T)A1, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE) : NULL;   /* write watch: nvn_gl.c skips hashing unwritten textures */
+    if (!p && g_heap_used + A1 <= g_heap_size) printf("nn::os: a memory block of %llu MB could not be committed: RAM and page file are full\n", (unsigned long long)(A1 >> 20));
     if (p) { wr64(A0, (uint64_t)(uintptr_t)p); g_heap_used += A1; { void nvn_ww_region(uint64_t base, uint64_t size, int add); nvn_ww_region((uint64_t)(uintptr_t)p, A1, 1); } }
     RET(p ? 0 : 0x1003);
 }

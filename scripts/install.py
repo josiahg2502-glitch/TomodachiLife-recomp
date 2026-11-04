@@ -349,8 +349,10 @@ def step_packages(cx):
         return 'skip', 'all there'
     if cx.a.dry_run:
         return 'dry', 'would install with pip: ' + ' '.join(missing)
+    if in_private_python():                  # the launcher makes it, without pip, and makes it again when an import fails (boot::python_ok)
+        raise Stop('the installer\'s Python lacks %s' % ' '.join(missing), 'Press TRY AGAIN: the launcher sets it up again. An antivirus may be holding files back.')
     req = os.path.join(REPO, 'requirements.txt')
-    cmd = [sys.executable, '-m', 'pip', 'install'] + ([] if in_private_python() else ['--user'])
+    cmd = [sys.executable, '-m', 'pip', 'install', '--user']
     cmd += ['-r', req] if os.path.isfile(req) else missing
     say('   installing %s' % ' '.join(missing))
     rc, tail = stream(cmd, prefix='   ')

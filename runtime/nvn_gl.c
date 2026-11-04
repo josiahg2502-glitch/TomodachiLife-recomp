@@ -8335,6 +8335,23 @@ int nvn_renderer_is_vk(void) {                     /* boot.c --renderer (the ins
     const int r = gfx_options()->renderer;
     return r == 2 ? !gpu_has_nvidia() : !r;
 }
+/* hostrt.c, after the crash report: a crash inside the graphics driver in the game's first seconds, with renderer = auto: the next
+ * start uses the other renderer. Not onto OpenGL on an AMD card: that is what crashed in 1.0.0 (issues #23, #24). */
+void nvn_crash_in_driver(const char *module) {
+    static const char *const k[] = {"nvoglv", "nvgpucomp", "nv-vk", "atio", "atig", "amdvlk", "amdxc", "amdihk", "ig", "vulkan-1"};
+    const char *t = getenv("TOMO_CRASH_MODULE"), *forced = getenv("SSBU_RENDERER");      /* (TOMO_CRASH_MODULE, a test: as if the crash were in this module) */
+    int driver = 0;
+    if (t && t[0]) module = t;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!_strnicmp(module, k[i], strlen(k[i]))) driver = 1;
+    if (!driver || gfx_options()->renderer != 2 || (forced && forced[0]) || nvn_front_frame_next() >= 1200) return;
+    const int vk = nvn_renderer_is_vk();
+#ifdef _WIN32
+    if (vk) { DISPLAY_DEVICEA d; d.cb = sizeof d; for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &d, 0); i++, d.cb = sizeof d) if (strstr(d.DeviceID, "VEN_1002")) return; }
+#endif
+    printf("nvn: the graphics driver crashed at the start: the next start uses %s\n", vk ? "OpenGL" : "Vulkan");
+    fflush(stdout);
+    gfx_ini_set("renderer", vk ? "opengl" : "always_vulkan");
+}
 /* Called by display.c once the window exists. */
 void nvn_gl_start(void *hwnd) {
     g_hwnd = hwnd;

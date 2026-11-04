@@ -1116,6 +1116,12 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
     fflush(stdout);
     crash_file_report(ep);                          /* the console report is out: a fault in what follows (stack, heap) cannot take it away */
     diag_minidump(ep, "crash");
+    {   void nvn_crash_in_driver(const char *module);
+        HMODULE mod = NULL;
+        char mname[MAX_PATH] = "";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)er->ExceptionAddress, &mod) && mod) GetModuleFileNameA(mod, mname, MAX_PATH);
+        nvn_crash_in_driver(base_name(mname));
+    }
     report_and_exit(4);
     return EXCEPTION_EXECUTE_HANDLER;
 }

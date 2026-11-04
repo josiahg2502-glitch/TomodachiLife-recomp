@@ -46,6 +46,7 @@
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -90,16 +91,26 @@ bool is_dir(const fs::path& p) { std::error_code e; return fs::is_directory(p, e
 
 /* ------------------------------------------------------------------ --bootstrap: the installer's private Python
  * The INSTALL screen's first step runs this exe again as "TomodachiLauncher.exe --bootstrap" (its output goes to
- * build\logs\launcher_install.log): the python.org embeddable package into deps\python, checked against its SHA-256, pip
- * from its pinned wheel, then requirements.txt, as scripts\bootstrap.ps1 does by hand (keep the pins the same in both).
+ * build\logs\launcher_install.log): the python.org embeddable package into deps\python and the wheels of requirements.txt
+ * (keep the pins the same), each checked against its SHA-256. A wheel is a zip: unpacking it is installing it, so neither pip
+ * nor Python's own TLS is involved. pip stopped installs (code 1) when it was damaged, when an antivirus took files from it,
+ * and behind proxies that Windows knows and pip does not (issue #22).
  * The launcher used to run that script in a hidden PowerShell with the execution policy bypassed, which is the shape of
  * malware: antivirus programs warned about it (2026-11-02). Now no PowerShell is involved: the download and the hash are
  * Windows calls and the zips are unpacked by Windows' own tar.exe, as Setup.exe does. */
 namespace boot {
 const wchar_t* const kEmbedUrl = L"https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip";
 const char* const kEmbedSha = "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297";
-const wchar_t* const kPipUrl = L"https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl";
-const char* const kPipSha = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e";
+const struct { const wchar_t* url; const char* file; const char* sha; } kWheels[] = {
+    {L"https://files.pythonhosted.org/packages/d9/82/b9c06c870f3bd8767c201f1edbdf9e8dc34be5b0fbc5682c4f80fe948475/zstandard-0.25.0-cp313-cp313-win_amd64.whl",
+     "zstandard-0.25.0-cp313-cp313-win_amd64.whl", "1f830a0dac88719af0ae43b8b2d6aef487d437036468ef3c2ea59c51f9d55fd5"},
+    {L"https://files.pythonhosted.org/packages/d7/ed/1b16fb66a37e1b9e41370b93b2c614c7da761a5b2a41dc333f7af4639962/pillow-13.0.0-cp313-cp313-win_amd64.whl",
+     "pillow-13.0.0-cp313-cp313-win_amd64.whl", "9dda0788a9932776a75d8bcc020076edc308ce2508b51f6739a45e3158b3fc42"},
+    {L"https://files.pythonhosted.org/packages/80/18/3f8c882d5f729310c99aa784a51b329d4791efd3c43374ed4ef6f57806a4/pycryptodome-4.1.0-cp39-abi3-win_amd64.whl",
+     "pycryptodome-4.1.0-cp39-abi3-win_amd64.whl", "f7bb8fcbfd72c840a17b67543b984018ead3247f7054bb729e24a8dda436eb35"},
+    {L"https://files.pythonhosted.org/packages/18/e0/f06028aea741bbecb2a7e9648f4643235279a770c7ffaf70bd4860c73661/lz4-4.4.5-cp313-cp313-win_amd64.whl",
+     "lz4-4.4.5-cp313-cp313-win_amd64.whl", "da68497f78953017deb20edff0dba95641cc86e7423dfadf7c0264e1ac60dc22"},
+};
 
 void say(const std::string& s) { printf("%s\n", s.c_str()); fflush(stdout); }      // the INSTALL screen shows the last line
 std::wstring quote(const fs::path& p) { const std::wstring w = p.wstring(); return L"\"" + w + (!w.empty() && w.back() == L'\\' ? L"\\" : L"") + L"\""; }
@@ -189,25 +200,22 @@ bool site_on(const fs::path& py) {                         // the embeddable pac
     return false;
 }
 
-bool packages(const fs::path& dl, const fs::path& py, const fs::path& exe) {      // site-packages, pip, requirements.txt
+bool packages(const fs::path& dl, const fs::path& py, const fs::path& exe) {      // site-packages and the wheels of requirements.txt
     const fs::path site = py / "Lib" / "site-packages";
     std::error_code e;
     if (!site_on(py)) { say("The Python package has no python._pth to change."); return false; }
-    const fs::path whl = dl / "pip-26.2.1-py3-none-any.whl";      // a wheel is a zip: unpacking it is installing pip
-    if (!fetch(kPipUrl, whl, kPipSha)) return false;
     fs::create_directories(site, e);
-    if (!unzip(whl, site)) return false;
+    for (const auto& w : kWheels) {
+        const fs::path whl = dl / w.file;
+        if (!fetch(w.url, whl, w.sha) || !unzip(whl, site)) return false;
+    }
     // the embeddable Python leaves the script's folder out of sys.path (its ._pth isolates it), and our scripts import their
     // neighbours: a .pth line puts the running script's folder first, as a normal Python does
     if (FILE* f = _wfopen((site / "ssbu_scriptdir.pth").wstring().c_str(), L"wb")) {
         fputs("import sys, os; a = sys.argv[0] if sys.argv else ''; (a and os.path.isfile(a) and sys.path.insert(0, os.path.dirname(os.path.abspath(a))))\r\n", f);
         fclose(f);
     }
-    say("Installing pip and the Python packages (about 30 MB) ...");
-    if (run(quote(exe) + L" -m pip --version")) { say("pip could not be installed into deps\\python."); return false; }
-    const int code = run(quote(exe) + L" -m pip install --only-binary=:all: --no-warn-script-location --disable-pip-version-check -r " + quote(g_repo / "requirements.txt"));
-    if (code) { say("pip install -r requirements.txt failed (code " + std::to_string(code) + "): is this PC online?"); return false; }
-    if (!python_ok(exe)) { say("The private Python does not import its packages."); return false; }
+    if (!python_ok(exe)) { say("The installer's Python does not start or lacks its packages (its error is above): is an antivirus holding files back?"); return false; }
     return true;
 }
 
@@ -571,6 +579,12 @@ public:
     bool game_running() const { return game_.hProcess != nullptr; }
     // --auto-install <dump folder> (tests): the INSTALL screen's whole way with that dump and no questions; 0 = installed
     void auto_install(const std::string& dump) { auto_dump_ = dump; start_setup(); }
+    // LAUNCHER_TEST_EXIT=<code>:<log file> with --shot: the status line after such an end
+    void test_exit(const char* spec) {
+        exit_code_ = DWORD(strtoul(spec, nullptr, 0));
+        if (const char* c = strchr(spec, ':')) log_ = fs::u8path(c + 1);
+        exit_reason_ = exit_reason(exit_code_);
+    }
     void play_direct() {      // --play (Tomodachi Life.exe): the game at once, the window only if it cannot start or ends badly
         direct_ = true;
         play();
@@ -661,6 +675,7 @@ public:
             CloseHandle(game_.hProcess); CloseHandle(game_.hThread);
             game_ = {};
             exit_code_ = code;
+            exit_reason_ = code ? exit_reason(code) : std::string();
             session_min_ = int((SDL_GetTicks() - started_) / 60000);
             if (direct_ && code == 0) { quit_ = true; return; }      // --play: the game was quit normally, nothing to show
             direct_ = false;
@@ -1364,6 +1379,42 @@ private:
         SDL_HideWindow(window_);
     }
 
+    // What the game's log says about the way it ended, in a line a player can act on (it must fit the status line: about 75 letters).
+    // 0x00000004: the crash handler (hostrt.c); 0x00000001: it could not start (exit(1)), or Task Manager or an antivirus ended it.
+    std::string exit_reason(DWORD code) const {
+        std::string text;
+        if (FILE* f = _wfopen(log_.wstring().c_str(), L"rb")) {
+            fseek(f, 0, SEEK_END);
+            const long size = ftell(f), keep = std::min(size, 1L << 20);
+            fseek(f, size - keep, SEEK_SET);
+            text.resize(size_t(keep));
+            text.resize(fread(&text[0], 1, text.size(), f));
+            fclose(f);
+        }
+        const auto has = [&](const char* s) { return text.find(s) != std::string::npos; };
+        if (has("could not be committed") || has("cannot map ") || has("cannot allocate"))
+            return "Not enough memory: close other programs or enlarge Windows' page file.";
+        if (code == 4) {
+            std::string mod;
+            const size_t at = text.rfind("HOST EXCEPTION");
+            if (at != std::string::npos) {
+                const size_t a = text.find('(', at), b = text.find(" + ", at);
+                if (a != std::string::npos && b != std::string::npos && a < b) mod = text.substr(a + 1, b - a - 1);
+            }
+            if (has("the next start uses")) return "The graphics driver crashed (" + mod + "): the next start uses the other renderer.";
+            std::string low = mod;
+            std::transform(low.begin(), low.end(), low.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+            for (const char* d : {"ati", "amd", "nvo", "nvg", "nv-", "ig", "vulkan-1", "opengl32"})
+                if (low.rfind(d, 0) == 0) return "The graphics driver crashed (" + mod + "): please update it.";
+            return "The game crashed" + (mod.empty() ? std::string() : " in " + mod) + ". Please report it with its log (see MORE).";
+        }
+        if (code == 1) {
+            if (has("cannot open ") || has("short read") || has("is not an ELF")) return "A game file could not be read (log: see MORE).";
+            return "It could not start, or Task Manager or an antivirus ended it (log: see MORE).";
+        }
+        return "The reason is in its log: see MORE.";
+    }
+
     std::string fit(const std::string& text, float px, float width) {
         if (width <= 0 || font_.width(r_, text, px) <= width) return text;
         std::string t = text;
@@ -1450,7 +1501,7 @@ private:
         } else if (exit_code_ != 0) {
             c = kBad; paint_.cross(ix, y - px * 0.7f, icon * 0.8f, H * 0.0035f, c);
             char b[160];
-            snprintf(b, sizeof b, "The game closed with an error (0x%08lX). Details: %s", (unsigned long)exit_code_, log_.filename().string().c_str());
+            snprintf(b, sizeof b, "The game closed with an error (0x%08lX).", (unsigned long)exit_code_);
             line = b;
         } else if (ready()) {
             paint_.check(ix, y - px * 0.78f, icon, H * 0.0035f, c);
@@ -1463,7 +1514,8 @@ private:
                  : "This folder is not the game, only a part its installer downloads.";
         }
         font_.draw(r_, x, y, fit(line, px, layout_.w * 0.6f), px, c);
-        if (!installed() && !can_install())
+        if (exit_code_ != 0 && !game_running()) detail = exit_reason_;
+        else if (!installed() && !can_install())
             detail = "Press PLAY and download Tomodachi Life PC Setup.exe from the release page.";
         else if (!installed()) detail = "It builds the game on this PC from your own game files and keys: about 40 minutes, once.";
         else if (selected_ == kGame) detail = game_dir_.string();
@@ -1565,6 +1617,7 @@ private:
     std::vector<std::pair<int, std::string>> mii_slots_;
     PROCESS_INFORMATION game_{};
     DWORD exit_code_ = 0;
+    std::string exit_reason_;
     bool direct_ = false;      // --play: quit with the game
     Uint64 started_ = 0;
     std::mutex dialog_mutex_;
@@ -1646,6 +1699,7 @@ int main(int argc, char** argv) {
     int rc = 0;
     {
         Launcher launcher(window, renderer);
+        if (const char* te = getenv("LAUNCHER_TEST_EXIT")) launcher.test_exit(te);
         if (auto_dump) launcher.auto_install(auto_dump);
         else if (play_now && !shot && !import_dir) launcher.play_direct();
         if (import_mii) { printf("%s\n", launcher.import_mii_now(import_mii, import_slot).c_str()); fflush(stdout); }
