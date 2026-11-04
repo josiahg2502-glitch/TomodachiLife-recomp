@@ -795,7 +795,7 @@ private:
         return !st.empty() && !want.empty() && can_install() && parse_json(st)["version"].str() != want;
     }
     // an update keeps the built game: the new runtime is linked and the shaders prepared again for it
-    std::string install_time() const { return installed() ? "About 15 minutes (update)" : "About 40 minutes"; }
+    std::string install_time() const { return installed() ? "About 20 minutes (update)" : "About 40 minutes"; }
     // exefs\main.elf of the game folder; a dump made by the installer keeps only main (the console's format) and setup.py
     // converts it into build\binaries\<version>\main.elf: the newest of those then.
     // shortcut: that one is taken for any game folder without main.elf, matching or not; a folder check would need the NSO
