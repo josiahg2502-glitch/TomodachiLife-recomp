@@ -613,6 +613,7 @@ struct VTex {
     VView *views; VTex *next, *prev;
     VTex *shadow; int shadow_ok;                   /* 2026-10-21 (AMD render bugs): a copy of this depth target for the shaders that sample it while it is bound (depth_copy_on) */
     VkBuffer bk; VMem bk_mem; uint32_t bk_ok;      /* decode 2 (no BC textures on the GPU): the blocks the GPU wrote into layer 0's levels (bit = level), for copy-backs (bk_level) */
+    uint32_t ci_type, ci_usage, ci_flags; int nfmt; /* what it was made with (the image pool, vpool_take) */
 };
 /* ---- Track O: internal resolution scale (graphics.ini resolution_scale; SSBU_VK_SCALE wins; plan\phases\O1_options.md, session 7).
  * A texture of the screen class (2D, one layer, attachable, the game's size exactly 1920x1080 >> k, k = 0..6) gets an image
@@ -746,6 +747,50 @@ static void probe_pass(void) {                       /* TEST (SSBU_VK_UILOG): af
     cmd_begin();
     busy = 0;
 }
+/* The game makes its ~22 render targets anew every frame (a frame graph: new texture objects over the same memory, finalized
+ * at the end of the frame; 2026-11-03: 28 images and 109 views made and destroyed per frame). A finalized render target's image
+ * waits here for the next texture of its shape, with its views. Over the same memory it keeps its picture, as the console's
+ * memory would; from other memory it is cleared as a new image is. In the queue's order the image's earlier uses come first, so
+ * it need not wait for them. Unclaimed for two seconds it goes. SSBU_VK_IMGPOOL=0: off. */
+#define VPOOL_MAX 128
+static struct { VTex *vt; uint8_t *mem; long long frame; } g_vpool[VPOOL_MAX];
+static int g_vpool_n;
+static LONG64 g_vpool_same, g_vpool_other;
+static void garbage_add(VTex *vt) {
+    if (g_ngarbage == g_garbage_cap) { g_garbage_cap = g_garbage_cap ? g_garbage_cap * 2 : 256; g_garbage = realloc(g_garbage, sizeof *g_garbage * (size_t)g_garbage_cap); }
+    g_garbage[g_ngarbage].vt = vt; g_garbage[g_ngarbage++].serial = R.serial + 1;       /* the command buffer being recorded may still name it */
+}
+static int vpool_put(VTex *vt, Tex *t) {
+    static int on = -1;
+    if (on < 0) on = getenv("SSBU_VK_IMGPOOL") ? atoi(getenv("SSBU_VK_IMGPOOL")) : 1;      /* 2: in-run A/B, off in the odd 300-frame windows */
+    if (!on || (on == 2 && (nvn_front_frame_next() / 300) & 1) || !t->rt_tick || !vt->ci_usage || vt->decode || vt->expand || g_vpool_n == VPOOL_MAX) return 0;
+    g_vpool[g_vpool_n].vt = vt; g_vpool[g_vpool_n].mem = t->mem; g_vpool[g_vpool_n++].frame = nvn_front_frame_next();
+    return 1;
+}
+static VTex *vpool_take(const VkImageCreateInfo *ci, const VTex *want, const Tex *t, int *same) {
+    int at = -1;
+    for (int i = g_vpool_n - 1; i >= 0; i--) {
+        const VTex *o = g_vpool[i].vt;
+        if (o->fmt != want->fmt || o->nfmt != want->nfmt || o->w != want->w || o->h != want->h || o->d != want->d || o->levels != want->levels || o->layers != want->layers || o->samples != want->samples ||
+            o->is3d != want->is3d || o->rs != want->rs || o->ci_type != (uint32_t)ci->imageType || o->ci_usage != ci->usage || o->ci_flags != ci->flags) continue;
+        if (g_vpool[i].mem == t->mem) { at = i; break; }
+        if (at < 0) at = i;
+    }
+    if (at < 0) return NULL;
+    VTex *o = g_vpool[at].vt;
+    *same = g_vpool[at].mem == t->mem;
+    if (*same) g_vpool_same++; else g_vpool_other++;
+    g_vpool[at] = g_vpool[--g_vpool_n];
+    return o;
+}
+static void vpool_age(void) {                         /* after a present */
+    long long now = nvn_front_frame_next();
+    for (int i = 0; i < g_vpool_n; ) {
+        if (now - g_vpool[i].frame < 120) { i++; continue; }
+        garbage_add(g_vpool[i].vt);
+        g_vpool[i] = g_vpool[--g_vpool_n];
+    }
+}
 static void vk_drop(int kind, void *host) {
     if (kind != K_TEX) return;
     Tex *t = host;
@@ -755,6 +800,7 @@ static void vk_drop(int kind, void *host) {
     t->vk = NULL;
     for (int i = 0; i < 8; i++) if (R.col[i].tex == t) { pass_end(); R.col[i].tex = NULL; }
     if (R.depth.tex == t) { pass_end(); R.depth.tex = NULL; }
+    if (vpool_put(vt, t)) return;
     if (g_ngarbage == g_garbage_cap) { g_garbage_cap = g_garbage_cap ? g_garbage_cap * 2 : 256; g_garbage = realloc(g_garbage, sizeof *g_garbage * (size_t)g_garbage_cap); }
     g_garbage[g_ngarbage].vt = vt; g_garbage[g_ngarbage++].serial = R.serial + 1;       /* the command buffer being recorded may still name it */
 }
@@ -1128,6 +1174,14 @@ static VTex *vt_get2(Tex *t, int sync) {
         if (vt->is3d && can_color) ci.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;      /* a slice as a render target: a 2D view of it */
         if (ci.imageType == VK_IMAGE_TYPE_2D && vt->w == vt->h && vt->layers >= 6 && vt->samples == 1) ci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vt->nfmt = b->format;
+        int same_mem = 0;
+        VTex *pooled = can_color || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? vpool_take(&ci, vt, t, &same_mem) : NULL;
+        if (pooled) {                              /* the image, its memory and its views stay; all else as just worked out */
+            free(vt);
+            vt = pooled; vt->t = t; vt->shadow_ok = 0; vt->bk_ok = 0; vt->feedback = 0;
+            t->vk = vt;
+        } else {
         VkResult r = vkCreateImage(V.device, &ci, NULL, &vt->img);
         if (r != VK_SUCCESS) vkd_fail("vkCreateImage (NVN format 0x%x -> %d, target %d, %dx%dx%d, %d levels, %d layers, %d samples): %s", b->format, (int)vt->fmt, b->target, vt->w, vt->h, vt->d, vt->levels, vt->layers, vt->samples, vk_result_name(r));
         VkMemoryRequirements rq;
@@ -1136,11 +1190,15 @@ static VTex *vt_get2(Tex *t, int sync) {
         vt->mem = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
         VKC(vkBindImageMemory(V.device, vt->img, vt->mem.mem, vt->mem.off));
         vt->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vt->ci_type = (uint32_t)ci.imageType; vt->ci_usage = ci.usage; vt->ci_flags = ci.flags;
         vt->next = g_vtex_all; if (g_vtex_all) g_vtex_all->prev = vt; g_vtex_all = vt;
         t->vk = vt;
         R.images++; R.images_live++; nvn_front_count(5, 1);
         g_fmt_hist[b->format & 255]++;
-        if (can_color || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {      /* an image nothing was written to reads as zero (the OpenGL driver's behaviour, which the comparison saw) */
+        }
+        {   static int il = -1; if (il < 0) il = getenv("SSBU_VK_IMGLOG") != NULL;      /* TEST: every image made */
+            if (il) printf("imglog: frame %lld fmt 0x%x target %d %dx%dx%d levels %d layers %d samples %d mem %p guest %llx rt_tick %lld alias %d\n", (long long)nvn_front_frame_next(), b->format, b->target, vt->w, vt->h, vt->d, vt->levels, vt->layers, vt->samples, (void *)t->mem, (unsigned long long)t->guest, t->rt_tick, t->alias_from != NULL); }
+        if (!same_mem && (can_color || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT)) {      /* an image nothing was written to reads as zero (the OpenGL driver's behaviour, which the comparison saw) */
             VkImageSubresourceRange sr = {vt->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
             vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             if (vt->samples == 1) {
@@ -4156,13 +4214,17 @@ static void vk_submit(void *arg) {
     LONG64 t1 = tk();
     if (g_in_fight) { g_tl_t0 = t0; g_tl_first = g_tl_last = 0; } else g_tl_t0 = 0;
     nvn_front_batch_begin();
+    static int blog = -1; if (blog < 0) blog = getenv("TOMO_BATCHLOG") != NULL;      /* TEST: each batch: draws, dispatches, ms */
+    LONG64 bl_d = R.frame_draws, bl_c = R.dispatches, bl_t0 = tk();
     nvn_front_batch_snap(j, 1);                    /* the write-watch scan; the submission copies (ring_put) */
+    LONG64 bl_t1 = tk();
     R.gen++;                                       /* guest memory may have changed since the last batch */
     if (g_scan_on) { LONG64 ts = tk(); Scan s; scan_begin(&s); for (int i = 0; i < j->count; i++) scan_list(j->handles[i], 0, &s); g_tm[9] += tk() - ts; }      /* session 4: what this batch will need goes to the workers before it is replayed */
     { void nvn_front_racechk(const uint64_t *handles, int count, int phase); nvn_front_racechk(j->handles, j->count, 1);      /* round 18, TEST (SSBU_RACECHK) */
       for (int i = 0; i < j->count; i++) replay(j->handles[i], 0);
       nvn_front_racechk(j->handles, j->count, 2); }
     nvn_front_batch_snap(j, 0);
+    if (blog) { LARGE_INTEGER fq; QueryPerformanceFrequency(&fq); if (nvn_front_frame_next() % 300 < 3) printf("batchlog: frame %lld lists %d draws %lld dispatches %lld scan wait %.2f ms replay %.2f ms\n", (long long)nvn_front_frame_next(), j->count, (long long)(R.frame_draws - bl_d), (long long)(R.dispatches - bl_c), (double)(bl_t1 - bl_t0) * 1000.0 / (double)fq.QuadPart, (double)(tk() - bl_t1) * 1000.0 / (double)fq.QuadPart); }
     cb_batch_end();
     if (g_cpurt_n) rt_copy_back_vk();               /* issue #12: CPU-read targets drawn in this batch, back into guest memory */
     g_tm[7] += t1 - t0; g_tm[3] += tk() - t1;
@@ -4757,6 +4819,7 @@ swap: ;
         if (holdlog_on() && g_up_fr_tk * 1000 > 3 * fq.QuadPart) { static int nl; if (nl++ < 300) printf("nvn_vk_upl: frame %lld (%s): %d textures made or read at their use, %.1f MB, %.1f ms\n", (long long)frame, g_in_fight ? "fight" : "no fight", g_up_fr_n, (double)g_up_fr_bytes / 1048576.0, (double)g_up_fr_tk * 1000.0 / (double)fq.QuadPart); }
         g_up_fr_tk = g_up_fr_bytes = 0; g_up_fr_n = 0;
         tex_ahead(frame);
+        vpool_age();
     }
     if (frame % 300 == 0) {                      /* where the render thread's time went, per frame, in the last 300 frames */
         static LONG64 last[12], last_sets, last_flush, last_reused, last_disp;
@@ -4810,6 +4873,7 @@ swap: ;
         printf("nvn_vk: totals at frame %lld: %lld images made (%lld live, %lld views), %lld uploads (%lld MB), %lld shader modules, %lld pipelines, %lld descriptor sets, %lld command buffers, %lld ring wraps, %lld feedback passes, %lld MB device memory\n",
                (long long)frame, (long long)R.images, (long long)R.images_live, (long long)R.views, (long long)R.uploads, (long long)(R.upload_bytes >> 20), (long long)R.modules, (long long)R.pipelines, (long long)R.sets,
                (long long)R.flushes, (long long)R.ring_wraps, (long long)R.feedback, (long long)(g_mem_total >> 20));
+    if (frame % 600 == 0) printf("nvn_vk: image pool at frame %lld: %lld taken over the same memory, %lld from other memory, %d waiting\n", (long long)frame, (long long)g_vpool_same, (long long)g_vpool_other, g_vpool_n);
     if (frame % 600 == 0 && R.dispatches) {
         LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
         printf("nvn_vk: compute at frame %lld: %lld dispatches, %lld KB copied back to guest memory, draws using a vertex buffer written by compute in the same batch: %lld, copy-backs forced inside a batch: %lld, waits for the GPU before a copy-back: %lld (%.1f ms in all), %lld buffers made; words the guest wrote into a range pending copy-back: %lld (also written by compute: %lld)\n",

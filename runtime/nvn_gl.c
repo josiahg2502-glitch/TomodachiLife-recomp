@@ -992,17 +992,17 @@ void nvn_ww_region(uint64_t base, uint64_t size, int add) {      /* nnsdk.c: mem
 #define WW_CHUNK_SHIFT 21
 static uint64_t *g_wwc, g_wwc_n, g_wwc_cap;       /* the chunks (address >> WW_CHUNK_SHIFT), sorted when g_wwc_sorted */
 static int g_wwc_sorted = 1;
-static struct { uint64_t chunk; LONG64 asked; } g_wwc_set[1 << 14];      /* membership (open addressing; 0 = empty); asked: the scans requested when it was added */
+static struct { uint64_t chunk; LONG64 asked, used; } g_wwc_set[1 << 14];      /* membership (open addressing; 0 = empty); asked: the scans requested when it was added; used: the scan applied when something last asked about it */
 static volatile LONG64 g_wws_asked, g_wws_applied;      /* scans requested by the game; the newest one the render thread has stamped */
 static SRWLOCK g_wwc_lock = SRWLOCK_INIT;                  /* g_wwc: the render thread adds, the scan thread reads */
 static void ww_chunk_mark(uint64_t addr, uint64_t size) {
     for (uint64_t ch = addr >> WW_CHUNK_SHIFT, last = (addr + size - 1) >> WW_CHUNK_SHIFT; ch <= last; ch++) {
         unsigned h = (unsigned)((ch * 0x9E3779B97F4A7C15ULL) >> 50);
         for (;; h = (h + 1) & ((1u << 14) - 1)) {
-            if (g_wwc_set[h].chunk == ch) break;
+            if (g_wwc_set[h].chunk == ch) { g_wwc_set[h].used = g_wws_applied; break; }
             if (g_wwc_set[h].chunk) continue;
             if (g_wwc_n >= (1u << 13)) return;     /* (16 GB of chunks: the full scan below takes over) */
-            g_wwc_set[h].chunk = ch; g_wwc_set[h].asked = g_wws_asked;
+            g_wwc_set[h].chunk = ch; g_wwc_set[h].asked = g_wws_asked; g_wwc_set[h].used = g_wws_applied;
             AcquireSRWLockExclusive(&g_wwc_lock);
             if (g_wwc_n == g_wwc_cap) { g_wwc_cap = g_wwc_cap ? g_wwc_cap * 2 : 256; g_wwc = realloc(g_wwc, g_wwc_cap * sizeof *g_wwc); }
             g_wwc[g_wwc_n++] = ch; g_wwc_sorted = 0;
@@ -1010,6 +1010,44 @@ static void ww_chunk_mark(uint64_t addr, uint64_t size) {
             break;
         }
     }
+}
+/* The range's chunks are in the scan, and the scan applied last asked for them (one requested before a chunk came says nothing
+ * about it). A question counts as a use. */
+static int ww_chunk_trusted(uint64_t addr, uint64_t size) {
+    for (uint64_t ch = addr >> WW_CHUNK_SHIFT, last = (addr + size - 1) >> WW_CHUNK_SHIFT; ch <= last; ch++) {
+        unsigned h = (unsigned)((ch * 0x9E3779B97F4A7C15ULL) >> 50);
+        for (;; h = (h + 1) & ((1u << 14) - 1)) {
+            if (!g_wwc_set[h].chunk) return 0;
+            if (g_wwc_set[h].chunk == ch) { if (g_wwc_set[h].asked >= g_wws_applied) return 0; g_wwc_set[h].used = g_wws_applied; break; }
+        }
+    }
+    return 1;
+}
+/* Chunks nothing asked about for ~1000 scans (5 s) leave the scan: its cost grows with what it walks (510 chunks, 2.4 ms a batch
+ * on the island, the render thread waits for it: 12 % of its time, 2026-11-04). The system keeps collecting their writes
+ * meanwhile: the next question brings the chunk back, is not trusted until a scan asked for it, and that scan reports them.
+ * TOMO_WW_IDLE=<scans>, 0: never. Render thread. */
+static void ww_chunk_sweep(void) {
+    static LONG64 last, idle = -1;
+    static struct { uint64_t chunk; LONG64 asked, used; } old[1 << 14];
+    if (idle < 0) idle = getenv("TOMO_WW_IDLE") ? atoll(getenv("TOMO_WW_IDLE")) : 1024;
+    if (!idle || g_wws_applied - last < 256) return;
+    last = g_wws_applied;
+    uint64_t stale = 0;
+    for (unsigned i = 0; i < 1u << 14; i++) if (g_wwc_set[i].chunk && g_wws_applied - g_wwc_set[i].used > idle) stale++;
+    if (!stale) return;
+    memcpy(old, g_wwc_set, sizeof old);
+    memset(g_wwc_set, 0, sizeof g_wwc_set);
+    AcquireSRWLockExclusive(&g_wwc_lock);
+    g_wwc_n = 0;
+    for (unsigned i = 0; i < 1u << 14; i++) {
+        if (!old[i].chunk || g_wws_applied - old[i].used > idle) continue;
+        unsigned h = (unsigned)((old[i].chunk * 0x9E3779B97F4A7C15ULL) >> 50);
+        while (g_wwc_set[h].chunk) h = (h + 1) & ((1u << 14) - 1);
+        g_wwc_set[h].chunk = old[i].chunk; g_wwc_set[h].asked = old[i].asked; g_wwc_set[h].used = old[i].used;
+        g_wwc[g_wwc_n++] = old[i].chunk;
+    }
+    ReleaseSRWLockExclusive(&g_wwc_lock);
 }
 static int u64_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 /* The scan runs on a thread of its own (2026-10-30): GetWriteWatch with its reset costs about 60 us a call, a few ms a frame
@@ -1126,6 +1164,7 @@ static void ww_scan_apply(uint64_t seq) {           /* render thread, at the sta
         if (lg) { LONG64 d = pf_now() - w0; wt += d; wn++; if (d > 5000) wbig++;
                   if (wn % 900 == 0) { printf("wwwait: %.3f ms a batch on average, %lld of 900 batches over 0.5 ms%c", (double)wt / 1e4 / 900.0, (long long)wbig, 10); wt = 0; wbig = 0; } } }
     g_wws_applied = seq ? (LONG64)seq : InterlockedIncrement64(&g_wws_asked);
+    ww_chunk_sweep();
     AcquireSRWLockExclusive(&g_wws_lock);
     if (g_wws_all) g_ww_floor = ++g_ww_stamp;
     if (g_wws_n) { uint64_t stamp = ++g_ww_stamp; for (size_t i = 0; i < g_wws_n; i++) ww_stamp(g_wws_pg[i], stamp); }
@@ -1161,10 +1200,7 @@ uint64_t nvn_front_range_keep(uint64_t addr, uint64_t size) {
     uint64_t now = ww_range_stamp(addr, size, 0);
     if (!now) return 0;
     ww_chunk_mark(addr, size);
-    for (uint64_t ch = addr >> WW_CHUNK_SHIFT, last = (addr + size - 1) >> WW_CHUNK_SHIFT; ch <= last; ch++)
-        for (unsigned h = (unsigned)((ch * 0x9E3779B97F4A7C15ULL) >> 50); g_wwc_set[h].chunk; h = (h + 1) & ((1u << 14) - 1))
-            if (g_wwc_set[h].chunk == ch) { if (g_wwc_set[h].asked >= g_wws_applied) now = 0; break; }
-    return now;
+    return ww_chunk_trusted(addr, size) ? now : 0;
 }
 uint64_t nvn_front_ww_stamp(void) { return g_ww_stamp; }      /* a write stamped later gets a larger one */
 void nvn_front_ww_note(uint64_t addr, uint64_t size) { ww_note(addr, size); }      /* the render thread wrote guest memory */
@@ -1378,7 +1414,7 @@ static GLuint twin_copy(Tex *t, uint64_t key) {   /* the GL texture copied from,
 static uint64_t tex_ww_newest(Tex *t, const uint8_t *src) {
     static int on = -1;
     if (on < 0) on = !(getenv("TOMO_TEX_WWSCAN") && getenv("TOMO_TEX_WWSCAN")[0] == '0');
-    if (on && t->ww_marked && !g_wws_sync) { uint64_t s = ww_range_stamp((uint64_t)(uintptr_t)src, t->data_size, t->uploaded && !t->dirty && t->ww_hashed ? t->ww_seen : 0); if (s) return s; }
+    if (on && t->ww_marked && !g_wws_sync && ww_chunk_trusted((uint64_t)(uintptr_t)src, t->data_size)) { uint64_t s = ww_range_stamp((uint64_t)(uintptr_t)src, t->data_size, t->uploaded && !t->dirty && t->ww_hashed ? t->ww_seen : 0); if (s) return s; }
     uint64_t r = ww_newest(src, t->data_size);
     if (on && r && !g_wws_sync && !t->b.packaged) { ww_chunk_mark((uint64_t)(uintptr_t)src, t->data_size); t->ww_marked = 1; }
     return r;
@@ -2322,8 +2358,7 @@ static size_t arena_put_slow(uint64_t addr, uint64_t size) {
     }
     static int keep = -1; if (keep < 0) keep = !(getenv("TOMO_ARENA_KEEP") && getenv("TOMO_ARENA_KEEP")[0] == '0');
     unsigned h = (unsigned)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 2654435761u) >> 19, pick = 8192;
-    uint64_t now = keep ? ww_range_stamp(addr, size, 0) : 0;
-    if (now) ww_chunk_mark(addr, size);             /* its pages are asked for at every batch from now on (ww_scan_regions) */
+    uint64_t now = keep ? nvn_front_range_keep(addr, size) : 0;      /* its pages are asked for at every batch from now on (ww_scan_regions) */
     for (int probe = 0; probe < 8; probe++) {
         unsigned i = (h + (unsigned)probe) & 8191;
         if (g_acache[i].addr == addr && g_acache[i].size == size && arena_tag_ok(g_acache[i].arena)) {
