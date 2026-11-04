@@ -2795,6 +2795,7 @@ static uint64_t g_pw_qseen[16384];
 static CRITICAL_SECTION g_pw_stripe[64];
 static volatile LONG g_pw_cold, g_shw_ctx_failed;
 static volatile LONG64 g_pw_named, g_pw_progs, g_pw_warmed, g_pw_cold_n, g_pw_ticks, g_pw_missing, g_pw_dup, g_pw_gate_ticks, g_pw_gates, g_pw_compiled;
+#define WMASK_BINDING 90                   /* storage block that collects which storage buffers a translated compute program wrote */
 static int pw_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("SSBU_PAIR_WARM"); m = e ? atoi(e) : 1; } return m; }
 static int pw_seen(uint64_t vh, uint32_t vl, uint64_t fh, uint32_t fl, uint32_t mask) {
     unsigned k = (unsigned)((vh ^ fh * 0x9E3779B97F4A7C15ULL) >> 20) & 4095;
@@ -3109,6 +3110,34 @@ static DWORD WINAPI shd_worker(LPVOID arg) {
         if (j) { g_shw_head = j->next; if (!g_shw_head) g_shw_tail = NULL; }
         LeaveCriticalSection(&g_shw_lock);
         if (!j) continue;
+        if (j->stage == 6) {                           /* a compute stage of the store (shp_compute) */
+            MxIn in;
+            MxOut out;
+            uint32_t lmem;
+            memset(&in, 0, sizeof in);
+            in.stage = MX_COMPUTE; in.code = j->data; in.code_len = j->code_len;
+            if (j->cdata_size) { in.cdata = j->data + j->code_len; in.cdata_size = j->cdata_size; }
+            memcpy(&lmem, j->data + j->code_len + j->cdata_size, 4);
+            in.binding_base = 0; in.ssbo_base = 40; memcpy(in.local_size, j->key, 12);
+            in.smem_bytes = j->key[3]; in.lmem_bytes = lmem;
+            in.track_writes = 1; in.wmask_binding = WMASK_BINDING;
+            if (mx_translate(&in, &out)) {
+                char path[320];
+                size_t len = strlen(out.glsl);
+                shd_path(path, sizeof path, sh_hash(0x9E3779B97F4A7C15ULL ^ 5u, out.glsl, len), len);
+                if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
+                    GLint ok = 0;
+                    int saved = 0;
+                    GLuint q = shd_compile_save(0x91B9 /* COMPUTE_SHADER */, out.glsl, path, &ok, &saved);
+                    if (q) glDeleteProgram(q);
+                    if (saved) InterlockedIncrement64(&g_pw_compiled);
+                    while (glGetError()) {}
+                }
+                free(out.glsl);
+            } else InterlockedIncrement64(&g_pw_missing);
+            InterlockedIncrement64(&g_shp_done); shp_finish_check();
+            InterlockedIncrement64(&g_shw_done); free(j); continue;
+        }
         if (j->stage >= 2) {
             pw_job(j, pw_pipe, pw_empty);
             if (j->stage == 4) { InterlockedIncrement64(&g_shp_done); shp_finish_check(); }
@@ -3164,7 +3193,7 @@ static void shd_workers_start(void) {
  * stage). Measured on the RTX 3060: a stage compile 81 ms, a cold pair 6 ms; the first preparation takes minutes, once.
  * Done once per store, shader-text settings (resolution scale, widescreen), driver and exe (name, size, time): the key of
  * the last complete one is in <cache>/prepared_<exe>.txt; a start with the same key queues nothing. TOMO_SHADER_PREP=0 = off,
- * TOMO_SHADER_STORE=<dir> = another store. Compute stages are left out (their text depends on the images bound). */
+ * TOMO_SHADER_STORE=<dir> = another store. Compute stages are compiled with no image bound (none of the game's binds one). */
 static volatile LONG g_shp_marked;
 static int g_shp_store;                            /* the store is read: its preparation covers every pair (prec_load warms none at start) */
 static uint64_t g_shp_key;
@@ -3227,6 +3256,33 @@ static void shp_variant(const ShJob *j, uint32_t int_attrs) {      /* worker: th
     InterlockedIncrement64(&g_shp_total);
     pw_enqueue(v);
 }
+/* Where a compute stage's instructions start in its data block: the 0x12345679 layout has a header first, and control +0x708
+ * says how long (0x100; the first word of the code is a scheduling word, the last two groups are the EXIT and the branch to
+ * itself, at exactly that offset + the size at +0x6f8). */
+static uint32_t compute_code_off(uint32_t magic, uint32_t off) { return magic == 0x12345679u ? (off ? off : 0x100) : 0; }
+/* A compute stage of the store: its job for the workers (stage 6; key: work group size, shared memory; the local memory's
+ * size after the code and constants), the text as compute_glsl makes it with no image bound. */
+static int shp_compute(const uint8_t *c, size_t size, uint64_t control, uint64_t data) {
+    uint32_t v, ctl[8], local[3], smem, lmem;
+    if (control + 0x760 > size || data + 0x40 > size) return 0;
+    memcpy(&v, c + control, 4); if (v != 0x98761234u) return 0;
+    memcpy(&v, c + control + 0x714, 4); if (v != 5) return 0;
+    memcpy(&v, c + data, 4);
+    memcpy(ctl, c + control + 0x6f0, 32);
+    const uint32_t off = compute_code_off(v, ctl[6]);
+    if (!ctl[2] || ctl[2] > (4u << 20) || data + off + ctl[2] > size) return 0;
+    const uint32_t cds = ctl[3] && ctl[4] && ctl[3] <= (1u << 20) && data + ctl[4] + ctl[3] <= size ? ctl[3] : 0;
+    memcpy(local, c + control + 0x748, 12); memcpy(&smem, c + control + 0x754, 4); memcpy(&lmem, c + control + 0x758, 4);
+    ShJob *j = calloc(1, sizeof *j + (size_t)ctl[2] + cds + 4);
+    j->stage = 6; j->code_len = (int)ctl[2]; j->cdata_size = cds;
+    memcpy(j->key, local, 12); j->key[3] = smem;
+    memcpy(j->data, c + data + off, ctl[2]);
+    if (cds) memcpy(j->data + ctl[2], c + data + ctl[4], cds);
+    memcpy(j->data + ctl[2] + cds, &lmem, 4);
+    InterlockedIncrement64(&g_shp_total);
+    pw_enqueue(j);
+    return 1;
+}
 static int shp_stage(const uint8_t *c, size_t size, uint64_t control, uint64_t data, const uint8_t **code, int *len, const uint8_t **cd, uint32_t *cds) {
     static const int8_t stage_of_type[16] = {-1, 0, 3, 4, 2, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
     uint32_t v;
@@ -3288,7 +3344,7 @@ static void shp_queue(void) {                      /* render thread, start (prec
         if (nw) printf("nvn_gl: shader preparation: %d pairs were warmed before (%s)%c", nw, g_shp_wpath, 10);
     }
     static uint64_t seen[1 << 15];
-    int ncont = 0, nvar = 0, ndup = 0;
+    int ncont = 0, nvar = 0, ndup = 0, ncomp = 0;
     g_shp_t0 = pf_now();
     InterlockedExchange(&g_shp_queueing, 1);
     for (char *line = txt, *next; line && *line; line = next) {
@@ -3323,6 +3379,7 @@ static void shp_queue(void) {                      /* render thread, start (prec
                 const uint8_t *k; const uint8_t *kd; int kl; uint32_t kds;
                 int s = shp_stage(c, size, control, data, &k, &kl, &kd, &kds);
                 if (s >= 0) { code[s] = k; len[s] = kl; cd[s] = kd; cds[s] = kds; }
+                else ncomp += shp_compute(c, size, control, data);
             }
             if (!code[0]) continue;
             size_t need = (size_t)len[0] + cds[0] + (size_t)len[1] + cds[1];
@@ -3344,7 +3401,7 @@ static void shp_queue(void) {                      /* render thread, start (prec
         free(c);
     }
     free(txt);
-    if (nvar) {                                    /* while the loading screen waits, more workers than in play */
+    if (nvar || ncomp) {                           /* while the loading screen waits, more workers than in play */
         SYSTEM_INFO si;
         GetSystemInfo(&si);
         int want = (int)si.dwNumberOfProcessors - 2;
@@ -3352,7 +3409,7 @@ static void shp_queue(void) {                      /* render thread, start (prec
         if (getenv("SSBU_SHADER_WORKERS")) want = g_shw_n;      /* (the count asked for, as for the run-time workers) */
         for (; g_shw_n < want; g_shw_n++) { DWORD tid = 0; CloseHandle(CreateThread(NULL, 0, shd_worker, NULL, 0, &tid)); if (g_shw_n < 8) g_shw_tid[g_shw_n] = tid; }
     }
-    printf("nvn_gl: shader preparation: %d variations of %d containers queued (%d repeated), %d workers%c", nvar, ncont, ndup, g_shw_n, 10);
+    printf("nvn_gl: shader preparation: %d variations and %d compute stages of %d containers queued (%d repeated), %d workers%c", nvar, ncomp, ncont, ndup, g_shw_n, 10);
     InterlockedExchange(&g_shp_queueing, 0);
     shp_finish_check();
 }
@@ -5660,7 +5717,6 @@ static void mem_stats(const char *what, uint64_t addr, uint64_t size) {
     for (unsigned k = 0; k < 12 && k * 4 + 4 <= size; k++) printf(" %g", f[k]);
     printf("\n");
 }
-#define WMASK_BINDING 90                   /* storage block that collects which storage buffers a translated compute program wrote */
 static Tex *image_tex(int stage, int k, View *v) {            /* NVN image handle = texture ID in the texture pool (nvnDeviceGetImageHandle) */
     uint32_t tid = (uint32_t)S.nvn_img[stage][k];
     Tex *t = NULL;
@@ -8474,10 +8530,6 @@ static void stage_keep_cdata(Stage *st, const uint8_t *base) {        /* base: t
  * control: magic 0x98761234, offset of the NV_gpu_program5 text at +0x14, its length at +0x18. */
 __declspec(thread) long long nvn_setsh_part[8];
 static void prog_set_shaders_(Ctx *c);
-/* Where a compute stage's instructions start in its data block: the 0x12345679 layout has a header first, and control +0x708
- * says how long (0x100; the first word of the code is a scheduling word, the last two groups are the EXIT and the branch to
- * itself, at exactly that offset + the size at +0x6f8). */
-static uint32_t compute_code_off(uint32_t magic, uint32_t off) { return magic == 0x12345679u ? (off ? off : 0x100) : 0; }
 static void prog_set_shaders(Ctx *c) {             /* session 8: the call timed part by part; a line for every call over 2 ms (SSBU_VK_SETSH_LOG=<ms> changes the limit, 0 = no lines) */
     static int lim = -1; static LONG nl; static LONG64 fq;
     if (lim < 0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); fq = f.QuadPart; lim = getenv("SSBU_VK_SETSH_LOG") ? atoi(getenv("SSBU_VK_SETSH_LOG")) : 2; }
