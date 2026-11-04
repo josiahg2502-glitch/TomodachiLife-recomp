@@ -427,7 +427,8 @@ static void audio_work_size(Ctx *c) { RET(0x100000); }
  * 48 kHz) so the game's streaming and sound-state logic run as on the console. */
 typedef struct { uint64_t played; uint32_t consumed, popped, pos, last_index, seen; float frac; int32_t af; int16_t yn1, yn2, abuf[14];
                  int bq_on[2]; double bq[2][6][4]; int heard, starve;      /* the voice's two biquad filters: on last update, state per channel */
-                 int speech, dry, gaps, filt; uint32_t clock, rate; uint64_t from; float vpeak, gpeak; double e_in, e_out; } SilentVoice;      /* (speech log) */
+                 int speech, dry, gaps, filt; uint32_t clock, rate; uint64_t from; float vpeak, gpeak; double e_in, e_out;      /* (speech log) */
+                 float *pb[6][48]; float pg[6][48]; int pn[6]; } SilentVoice;      /* the buffers and gains of the update before (the ramps) */
 /* Speech log (on in every build, 2026-11-01: the user heard a line "getting missed and another being really quiet"): one
  * line per 16-bit voice (the Mii speech the game synthesizes) when it ends: the local time it began, how long it played,
  * its highest volume and total gain, and how often it ran dry and was fed again mid-line. A muted line (volume 0: the game's
@@ -843,6 +844,33 @@ static void fx_aux(uint64_t ep, uint64_t pp, int mix) {
         ein[slot] = eout[slot] = 0;
     }
 }
+/* The light limiter (7; the game's MasterLimiter on the final mix: -3 dB, attack 10 us, release 300 ms, look-ahead 0.5 ms), after
+ * the reference (yuzu/eden audio_core command/effect/light_limiter.cpp). Parameters: +0xe channels, +0x24 attack, +0x28 release,
+ * +0x2c threshold, +0x30 input gain, +0x34 output gain, +0x38 look-ahead samples. Without it the sum of many sounds went out
+ * unlimited, louder than on the console (issue #8). TOMO_AUDIO_LIMITER=0: passed through. */
+static void fx_limiter(uint64_t pp, int mix) {
+    static float avg[6], gain[6] = {1, 1, 1, 1, 1, 1}, look[6][256];
+    static int at[6];
+    const int nch = (int)rd16(pp + 0xe), nla = (int)rd32(pp + 0x38);
+    const float atk = rdf(pp + 0x24), rel = rdf(pp + 0x28), thr = rdf(pp + 0x2c), ig = rdf(pp + 0x30), og = rdf(pp + 0x34);
+    if (nch < 1 || nch > 6 || nla < 1 || nla > 256 || !(thr > 0.0f)) return;
+    for (int c = 0; c < nch; c++) {
+        const int bi = (int8_t)rd8(pp + (uint64_t)c), bo = (int8_t)rd8(pp + 6 + (uint64_t)c);
+        if (bi < 0 || bi >= g_amix[mix].buffers || bo < 0 || bo >= g_amix[mix].buffers) continue;
+        const float *in = g_abuf[mix][bi];
+        float *out = g_abuf[mix][bo];
+        for (int k = 0; k < 240; k++) {
+            const float x = in[k] / 32768.0f * ig, ax = fabsf(x);
+            avg[c] += (ax - avg[c]) * (ax > avg[c] ? atk : rel);
+            const float att = avg[c] > thr ? thr / avg[c] : 1.0f;
+            gain[c] += (att - gain[c]) * (att < gain[c] ? atk : rel);
+            const float y = look[c][at[c]];
+            look[c][at[c]] = x;
+            if (++at[c] >= nla) at[c] = 0;
+            out[k] = y * gain[c] * og * 32768.0f;
+        }
+    }
+}
 static void afx_run_mix(int mix) {                       /* the effects of one mix, in process order, on its buffers */
     static int off = -1;
     if (off < 0) off = getenv("TOMO_AUDIO_FX") && getenv("TOMO_AUDIO_FX")[0] == '0';
@@ -855,6 +883,15 @@ static void afx_run_mix(int mix) {                       /* the effects of one m
             AFx *x = &g_afx[e];
             if (x->type != type || rd8(ep + 1)) { x->type = type; x->ready = 0; memset(x->bq, 0, sizeof x->bq); }
             if (type == 2) { fx_aux(ep, pp, mix); continue; }
+            if (type == 7 && rd8(ep + 2)) { static int lim = -1; if (lim < 0) lim = !(getenv("TOMO_AUDIO_LIMITER") && getenv("TOMO_AUDIO_LIMITER")[0] == '0'); if (lim) fx_limiter(pp, mix); continue; }
+            {   static int log7 = -1; static uint32_t said7;      /* TOMO_AUDIOLOG: the parameters of the limiter and the compressor once */
+                if (log7 < 0) log7 = getenv("TOMO_AUDIOLOG") != NULL;
+                if (log7 && type >= 7 && e < 32 && !(said7 >> e & 1)) {
+                    said7 |= 1u << e;
+                    printf("audio: effect %u type %d on mix %d enabled %d, words from +0:", e, type, mix, rd8(ep + 2));
+                    for (int w = 0; w < 0x60; w += 4) printf(" %08x", rd32(pp + (uint64_t)w));
+                    printf("%c", 10);
+                } }
             if (!rd8(ep + 2) || type >= 7) continue;   /* disabled, or passed through */
             int nch = type == 6 ? (int8_t)rd8(pp + (rd32(pp + 0xc) == 0 && rdf(pp + 0x10) != 0.0f ? 0x24 : 0x16)) : (int)rd16(pp + 0xe);
             if (nch != 1 && nch != 2 && nch != 4 && nch != 6) continue;
@@ -1068,14 +1105,31 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 }
             }
             int routed = graph && (tn[0] || (cc > 1 && tn[1]));   /* no destination known for this voice: the direct stereo path */
+            /* A gain goes from its last value to the new one over the update's 240 samples, as the DSP's mix ramps do: a step at
+             * every update clicks while a sound fades. tg0 + k * td: a route new this update starts at its gain. */
+            float tg0[6][48], td[6][48];
+            if (routed) for (uint32_t ch = 0; ch < cc && ch < 6; ch++) {
+                for (int t = 0; t < tn[ch]; t++) {
+                    float g0 = tg[ch][t];
+                    if (t < s->pn[ch] && s->pb[ch][t] == tb[ch][t]) g0 = s->pg[ch][t];
+                    else for (int q = 0; q < s->pn[ch]; q++) if (s->pb[ch][q] == tb[ch][t]) { g0 = s->pg[ch][q]; break; }
+                    tg0[ch][t] = g0; td[ch][t] = (tg[ch][t] - g0) / 240.0f;
+                }
+                for (int t = 0; t < tn[ch]; t++) { s->pb[ch][t] = tb[ch][t]; s->pg[ch][t] = tg[ch][t]; }
+                s->pn[ch] = tn[ch];
+            }
             {   static int vlog = -1; static unsigned long long vu;      /* TOMO_AUDIOLOG=2: every playing voice's total gain, every 400 updates (2 s); =3: also each voice's first audible update */
                 if (vlog < 0) vlog = getenv("TOMO_AUDIOLOG") ? atoi(getenv("TOMO_AUDIOLOG")) : 0;
                 if (vlog >= 2 && i == 0) vu++;
                 int first = vlog >= 3 && vol > 0.0f && !s->heard; if (vol > 0.0f) s->heard = 1;
-                if (vlog >= 2 && (vu % 400 == 0 || first) && vol > 0.0f) {
+                if (vlog >= 2 && (g_audio_updates % (vlog >= 5 ? 20 : 400) == 0 || first) && vol > 0.0f) {
                     float sum = 0; for (uint32_t ch = 0; ch < cc && ch < 6; ch++) { if (routed) for (int t = 0; t < tn[ch]; t++) sum += tg[ch][t]; else sum += gl[ch] + gr[ch]; }
                     printf("audio-voice%s: update %llu voice %u fmt %u rate %u ch %u vol %.3f gain %.3f %s mix %d splitter %d filters %d data %llx\n", first ? " START" : "", (unsigned long long)g_audio_updates, id, fmt, rate, cc, vol, sum,
                            routed ? "routed" : "direct", (int)rd32(v + (rev >= 15 ? 0x70 : 0x58)), (int)rd32(v + (rev >= 15 ? 0x74 : 0x5c)), bqn, (unsigned long long)rd64(wb));
+                    if (first) {      /* the first bytes of its samples (scratchpad audname.py finds the sound in the game's archives) */
+                        uint64_t b0 = wb + ((index + pending) & 3) * 0x38, d0 = rd64(b0);
+                        if (d0 > 0x10000) printf("audio-wave: voice %u update %llu bytes %016llx%016llx%016llx\n", id, (unsigned long long)g_audio_updates, (unsigned long long)rd64(d0), (unsigned long long)rd64(d0 + 8), (unsigned long long)rd64(d0 + 16));
+                    }
                 }
             }
             if (vol > 0.0f && play == 0) { if (routed) g_routed++; else g_direct++; }
@@ -1139,7 +1193,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             val = (float)y;
                         }
                         if (fmt == 2 && ch == 0) s->e_out += (double)val * val;
-                        if (routed) { if (ch < 6) for (int t = 0; t < tn[ch]; t++) tb[ch][t][o] += val * tg[ch][t]; }
+                        if (routed) { if (ch < 6) for (int t = 0; t < tn[ch]; t++) tb[ch][t][o] += val * (tg0[ch][t] + td[ch][t] * (float)o); }
                         else { g_mix[o][0] += val * gl[ch]; g_mix[o][1] += val * gr[ch]; }
                     }
                 }
