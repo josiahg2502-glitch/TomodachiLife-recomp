@@ -134,6 +134,9 @@ def main():
     game = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'build', 'dump')
     if len(sys.argv) > 2:                                      # another build folder (the install location, scripts/setup.py)
         WORK = os.path.join(sys.argv[2], 'work')
+    if sys.argv[3:] == ['--fonts']:                            # Linux: no launcher there, only the settings menu's fonts
+        ui_fonts(game)
+        return
     path = os.path.join(game, ARCHIVE)
     if not os.path.exists(path):
         sys.exit('no %s: give the game folder (exefs/ and romfs/)' % path)

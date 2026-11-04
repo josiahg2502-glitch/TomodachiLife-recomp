@@ -941,6 +941,7 @@ def step_prepare(cx):
     cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'shader_store.py'), game, cx.build, os.path.join(cx.bin, 'main.elf')], cwd=REPO)
     say('  shader store: %s' % os.path.join(cx.build, 'cache', 'shader_store'))
     if cx.linux:                              # Vulkan: every stage of the store translated to SPIR-V now (no window, no GPU needed)
+        cx.run('prepare', [sys.executable, os.path.join(REPO, 'scripts', 'launcher_art.py'), game, cx.build, '--fonts'], cwd=REPO)
         t0 = time.time()
         out = cx.run('prepare', ['./' + LINUX_EXE, '--prepare-shaders', '../cache/shader_store'], log='prepare_shaders')
         say('  shaders: %s (%s)' % (next((l.strip() for l in reversed(out.splitlines()) if l.strip()), 'prepared'), fmt(time.time() - t0)))

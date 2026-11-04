@@ -559,6 +559,22 @@ static void im_init(int h) {
             if (*out[i] && g_have_keys) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(keyf, sizes[i] * u, &m, keys); }
             if (i == 1) printf("menu: game-styled screen: font %s, button glyphs %s\n", *out[i] ? path : "(none)", g_have_keys ? "the game's" : "drawn");
         }
+#else
+        /* Linux: ui/ in the working directory, build-linux/work; Android: SSBU_UI_DIR, beside the game's files */
+        const char *dir = getenv("SSBU_UI_DIR") ? getenv("SSBU_UI_DIR") : "ui";
+        char path[1200], keyf[1200];
+        snprintf(keyf, sizeof keyf, "%s/keys.ttf", dir);
+        FILE *probe = fopen(keyf, "rb");
+        g_have_keys = probe != NULL;
+        if (probe) fclose(probe);
+        for (int i = 0; i < 3; i++) {
+            snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+            probe = fopen(path, "rb");
+            *out[i] = probe ? io.Fonts->AddFontFromFileTTF(path, sizes[i] * u) : NULL;
+            if (probe) fclose(probe);
+            if (*out[i] && g_have_keys) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(keyf, sizes[i] * u, &m, keys); }
+            if (i == 1) printf("menu: game-styled screen: font %s, button glyphs %s\n", *out[i] ? path : "(none)", g_have_keys ? "the game's" : "drawn");
+        }
 #endif
         for (int i = 0; i < 3; i++) if (!*out[i]) *out[i] = io.Fonts->Fonts[0];
         (void)u;
@@ -1627,17 +1643,31 @@ extern "C" void tomo_save_now(void);
 extern "C" int tomo_save_state(void);
 enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_FF, T_FASTM, T_CTRL, T_MOUSE, T_SAVE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
+static int t_shown(int row) {
+#ifdef __ANDROID__
+    return row != T_SCREEN && row != T_SIZE && row != T_RENDER && row != T_MOUSE;      /* a handheld: no window, Vulkan only, no mouse */
+#else
+    (void)row;
+    return 1;
+#endif
+}
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
-static const float k_res[] = {1.0f, 1.5f, 2.0f, 3.0f};
-static const char *const k_res_name[] = {"1080p", "1620p", "4K", "Above 4K (3240p)"};
+static const float k_res[] = {0.5f, 0.6667f, 1.0f, 1.5f, 2.0f, 3.0f};      /* below 1080p: handhelds and weak GPUs */
+static const char *const k_res_name[] = {"540p", "720p", "1080p", "1620p", "4K", "Above 4K (3240p)"};
 static const char *const k_wide[] = {"off", "auto"};
 static const char *const k_wide_name[] = {"Off (16:9)", "Fit the screen"};
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
 static const char *const k_renderer_name[] = {"Vulkan", "OpenGL (NVIDIA cards)", "Automatic"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (Tab or both sticks)", "Faster menus and loading", "Controls", "Mouse controls", "Save now", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language",
+#ifdef __ANDROID__
+    "Fast-forward (both sticks)",
+#else
+    "Fast-forward (Tab or both sticks)",
+#endif
+    "Faster menus and loading", "Controls", "Mouse controls", "Save now", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
@@ -1694,7 +1724,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_SCREEN: S.window = (display_window_mode() + dir + 3) % 3; display_set_window_mode(S.window); ini("window", k_window[S.window]); break;
     case T_SIZE: S.size = ((S.size < 0 ? 0 : S.size) + dir + N(k_sizes)) % N(k_sizes); display_set_client_size(k_sizes[S.size][0], k_sizes[S.size][1]);
         snprintf(v, sizeof v, "%d", k_sizes[S.size][0]); ini("width", v); snprintf(v, sizeof v, "%d", k_sizes[S.size][1]); ini("height", v); break;
-    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, "%.2f", S.scale); ini("resolution_scale", v); break;
+    case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, "%.4g", S.scale); ini("resolution_scale", v); break;
     case T_WIDE: g_t_wide = (g_t_wide + dir + N(k_wide)) % N(k_wide); ini("widescreen", k_wide[g_t_wide]); break;
     case T_FPS: g_t_fps = g_t_fps == 60 ? 30 : 60; snprintf(v, sizeof v, "%d", g_t_fps); ini("frame_rate", v); break;
     case T_VSYNC: { int k = 0; for (int i = 0; i < N(k_vsync_order); i++) if (k_vsync_order[i] == S.vsync) k = i;
@@ -1721,8 +1751,8 @@ static void t_act(int a) {
     }
     if (g_t_page == 1) { tc_act(a); return; }
     switch (a) {
-    case A_UP: g_t_sel = (g_t_sel + T_N - 1) % T_N; break;
-    case A_DOWN: g_t_sel = (g_t_sel + 1) % T_N; break;
+    case A_UP: do g_t_sel = (g_t_sel + T_N - 1) % T_N; while (!t_shown(g_t_sel)); break;
+    case A_DOWN: do g_t_sel = (g_t_sel + 1) % T_N; while (!t_shown(g_t_sel)); break;
     case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL && g_t_sel != T_SAVE) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
     case A_OK: if (g_t_sel == T_QUIT) { g_t_dlg = 1; g_t_dlg_sel = 1; }
         else if (g_t_sel == T_VOLUME && (S.volume < 0 || S.volume >= 100)) { S.volume = 0; t_change(T_VOLUME, 0); }
@@ -1916,7 +1946,9 @@ static void draw_tomo(void) {
     t_band(dl, 0, W, by + 870.0f * u, H, 14.0f * u, 640.0f * u, (float)t * 25.0f * u, t_col(0xFFD05A, in));
     t_text(dl, g_ft_title, 54.0f * u, bx + bw * 0.5f, by + 92.0f * u + rise, 0.5f, t_col(NAVY, in), g_t_page == 1 ? "Controls" : "PC Settings");
 
-    const int nrows = g_t_page == 1 ? 10 : T_N;
+    int shown_rows = 0;
+    for (int r = 0; r < T_N; r++) shown_rows += t_shown(r);
+    const int nrows = g_t_page == 1 ? 10 : shown_rows;
     const float pitch = (nrows * 76.0f > 840.0f ? 840.0f / (float)nrows : 76.0f) * u;      /* 11 rows of 76, more rows closer */
     const float rw = 1180.0f * u, gap = 10.0f * u, rh = pitch - gap, rx = bx + (bw - rw) * 0.5f, ry0 = by + 160.0f * u + rise;
     int pending = 0;
@@ -1944,8 +1976,10 @@ static void draw_tomo(void) {
         if (g_tc_top > 0) dl->AddTriangleFilled(ImVec2(bx + bw * 0.5f, ry0 - 26.0f * u), ImVec2(bx + bw * 0.5f - 16.0f * u, ry0 - 10.0f * u), ImVec2(bx + bw * 0.5f + 16.0f * u, ry0 - 10.0f * u), t_col(NAVY, in));
         if (g_tc_top + nrows < TC_N) { const float yb = ry0 + nrows * pitch; dl->AddTriangleFilled(ImVec2(bx + bw * 0.5f, yb + 10.0f * u), ImVec2(bx + bw * 0.5f - 16.0f * u, yb - 6.0f * u), ImVec2(bx + bw * 0.5f + 16.0f * u, yb - 6.0f * u), t_col(NAVY, in)); }
     }
-    for (int r = 0; r < T_N && g_t_page == 0; r++) {
-        ImVec2 a(rx, ry0 + (float)r * pitch), b(rx + rw, ry0 + (float)r * pitch + rh);
+    for (int r = 0, row = 0; r < T_N && g_t_page == 0; r++) {
+        if (!t_shown(r)) continue;
+        const float rowy = ry0 + (float)row++ * pitch;
+        ImVec2 a(rx, rowy), b(rx + rw, rowy + rh);
         const bool over = !g_t_dlg && m.x >= a.x && m.x < b.x && m.y >= a.y && m.y < b.y;
         if (over && moved) g_t_sel = r;
         const int chosen = r == g_t_sel && !g_t_dlg;
@@ -2007,7 +2041,13 @@ static void draw_hint(float a) {
     float bw = io.DisplaySize.x, bh = bw * 9.0f / 16.0f;
     if (bh > io.DisplaySize.y) { bh = io.DisplaySize.y; bw = bh * 16.0f / 9.0f; }
     const float bx = (io.DisplaySize.x - bw) * 0.5f, by = (io.DisplaySize.y - bh) * 0.5f, u = bh / 1080.0f;
+#if defined(__ANDROID__)
+    const char *s = "PC Settings: the Back button";
+#elif defined(_WIN32)
     const char *s = "PC Settings: F1 or the HOME button";
+#else
+    const char *s = "PC Settings: F1, or hold - and +";      /* (a Steam Deck's HOME button is Steam's) */
+#endif
     const float tw = g_ft_small->CalcTextSizeA(30.0f * u, FLT_MAX, 0.0f, s).x;
     const ImVec2 p(bx + 40.0f * u, by + 40.0f * u), q(p.x + tw + 64.0f * u, p.y + 68.0f * u);      /* top left: the game's speech bubbles are at the bottom */
     dl->AddRectFilled(ImVec2(p.x, p.y + 6.0f * u), ImVec2(q.x, q.y + 6.0f * u), t_col(0xE0A800, 0.6f * a), 34.0f * u);
@@ -2019,6 +2059,7 @@ static void set_open(int on) {
     if (on == (g_open != 0)) return;
     if (on) {
         g_t_sel = 0; g_t_dlg = 0; g_t_opened = 1; g_t_page = 0;
+        while (!t_shown(g_t_sel)) g_t_sel++;
         InterlockedExchange(&g_open, 1);
         InterlockedExchange(&g_guard, 1);
         g_section_req = g_section;

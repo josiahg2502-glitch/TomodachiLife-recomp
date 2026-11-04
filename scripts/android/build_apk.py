@@ -119,6 +119,9 @@ def main():
         for n in os.listdir(fonts):
             if n.lower().endswith(('.ttf', '.bfttf', '.otf')):
                 run([adb, 'push', os.path.join(fonts, n), dst + '/fonts/'])
+        ui = os.path.join(build, 'work', 'ui')         # the settings page's fonts, taken from the game's files (scripts/launcher_art.py)
+        if os.path.isdir(ui):
+            run([adb, 'push', ui, dst + '/'])
         print('copying the RomFS (6 GB, 66,000 files: about 10 minutes over USB) to the device ...', flush=True)
         run([adb, 'shell', 'rm', '-rf', dst + '/game/romfs'])
         run([adb, 'push', state['dump']['romfs'], dst + '/game/'])

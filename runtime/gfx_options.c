@@ -117,7 +117,7 @@ static const char *const k_default_ini =
 "\r\n"
 "; resolution_scale = 1.0\r\n"
 /* PR #8 (stephenjayakar): the range goes above 1.0 (supersampling); capped at 2.0 here (review 2026-10-16), strong GPUs only */
-";   Internal resolution scale, 0.25 to 2.0 (Vulkan only; OpenGL ignores it). 1.0 = the game's 1920x1080. 0.75 = 1440x810,\r\n"
+";   Internal resolution scale, 0.25 to 2.0 on Vulkan, 0.5 to 3.0 on OpenGL. 1.0 = the game's 1920x1080. 0.75 = 1440x810,\r\n"
 ";   0.5 = 960x540: the main switch for a weak GPU. The whole picture is drawn smaller, the 2D interface too (it gets\r\n"
 ";   softer), and is scaled to the window size. Above 1.0 it is drawn larger (strong GPUs only: GPU time and memory grow\r\n"
 ";   with the square): 1.5 = 2880x1620, 2.0 = 3840x2160 (a 4K screen pixel for pixel); a picture more than twice the\r\n"
@@ -232,6 +232,24 @@ static void opt_path(char *out) {
     snprintf(tmp, sizeof tmp, "%s\\..\\config\\graphics.ini", exe);
     if (!_fullpath(out, tmp, MAX_PATH)) snprintf(out, MAX_PATH, "%s", tmp);
 }
+/* The file for a first start. A Steam Deck's panel is 800 lines high: the game is drawn for it at 720p, not for a TV at 1080p
+ * (here and not later: the install's shader preparation reads the same file). PC Settings > Resolution changes it. */
+static void write_default_ini(FILE *f) {
+    const char *k = "\nresolution_scale = 1.0", *p = NULL;
+#if defined(__linux__) && !defined(__ANDROID__)
+    FILE *d = fopen("/sys/class/dmi/id/board_vendor", "r");
+    char v[16] = "";
+    if (d) { if (!fgets(v, sizeof v, d)) v[0] = 0; fclose(d); }
+    if (!strncmp(v, "Valve", 5)) p = strstr(k_default_ini, k);
+#endif
+    if (!p) { fwrite(k_default_ini, 1, strlen(k_default_ini), f); return; }
+    fwrite(k_default_ini, 1, (size_t)(p - k_default_ini), f);
+    fputs("\nresolution_scale = 0.6667", f);
+    fputs(p + strlen(k), f);
+}
+static int g_fresh;
+int gfx_options_fresh(void) { gfx_options(); return g_fresh; }
+void gfx_scale_set(float v) { gfx_options(); g_opt.scale = v; }
 static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     (void)once; (void)arg; (void)ctx;
     GfxOptions *o = &g_opt;
@@ -244,7 +262,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         char b[MAX_PATH];
         snprintf(b, sizeof b, "%s", o->path);
         for (char *p = b + 3; *p; p++) if (*p == '\\' || *p == '/') { *p = 0; CreateDirectoryA(b, NULL); *p = '\\'; }
-        if ((f = fopen(o->path, "wb")) != NULL) { fwrite(k_default_ini, 1, strlen(k_default_ini), f); fclose(f); written = 1; }
+        if ((f = fopen(o->path, "wb")) != NULL) { write_default_ini(f); fclose(f); written = g_fresh = 1; }
         f = fopen(o->path, "rb");
     }
     char line[512];

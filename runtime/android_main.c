@@ -143,6 +143,7 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char *argv[]) {
     printf("android: the game's files: %s\n", base);
     snprintf(p, sizeof p, "%s/game/romfs", base); setenv("SSBU_ROMFS", p, 1);
     snprintf(p, sizeof p, "%s/fonts", base); setenv("SSBU_FONTS", p, 1);
+    snprintf(p, sizeof p, "%s/ui", base); setenv("SSBU_UI_DIR", p, 1);      /* the settings page's fonts (scripts/android/build_apk.py --push) */
     snprintf(p, sizeof p, "%s/userdata", base); mkdir(p, 0755); setenv("SSBU_USERDATA", p, 1);
     snprintf(p, sizeof p, "%s/mods", base); mkdir(p, 0755); setenv("TOMO_MODS", p, 0);      /* (where a player can put them) */
     setenv("SSBU_RENDERER", "vk", 1);                 /* (the OpenGL renderer is Windows only) */

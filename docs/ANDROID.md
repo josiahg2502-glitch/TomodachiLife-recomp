@@ -48,6 +48,7 @@ TomodachiLife/
   game/     main.elf, sdk.elf, main.npdm   (from build/binaries/<version>/)
             romfs/                         (your dump's romfs folder)
   fonts/    the files of build/sysdata/fonts (or runtime/fonts_open)
+  ui/       the files of build/work/ui     (the settings page's fonts)
 ```
 
 Then install the APK (open it on the device, or `adb install`).

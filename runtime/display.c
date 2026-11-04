@@ -710,6 +710,12 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) { printf("display: SDL video cannot start: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
     const GfxOptions *go = gfx_options();
     int cw = go->width, ch = go->height;
+#ifdef __ANDROID__
+    {   /* the first start on a handheld whose panel is below 1080p: the game is drawn for it at 720p (PC Settings > Resolution changes it) */
+        const SDL_DisplayMode *pm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+        if (gfx_options_fresh() && pm && (pm->w < pm->h ? pm->w : pm->h) < 1000) { gfx_scale_set(0.6667f); gfx_ini_set("resolution_scale", "0.6667"); }
+    }
+#endif
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
 #ifdef __ANDROID__
     flags |= SDL_WINDOW_FULLSCREEN;                /* a handheld: the whole screen, without the system bars (SDLActivity's immersive mode) */

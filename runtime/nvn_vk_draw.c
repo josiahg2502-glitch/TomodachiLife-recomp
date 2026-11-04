@@ -1156,7 +1156,7 @@ static VTex *vt_get2(Tex *t, int sync) {
         vt->levels = nvn_front_tex_levels(t); vt->layers = nvn_front_tex_layers(t); vt->samples = b->samples > 1 ? b->samples : 1; vt->is3d = b->target == 2;
         if (b->target == 0 || b->target == 3) { ci.imageType = VK_IMAGE_TYPE_1D; vt->h = 1; if (b->target == 3) vt->layers = b->height > 0 && b->depth <= 1 ? b->height : vt->layers; }
         else ci.imageType = vt->is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-        if (RS_ON && (b->target == 1 || b->target == 5) && vt->layers == 1 && !vt->decode && rs_screen_class(vt->w, vt->h) && !(rs_ui_native() && wintex_is(t)) &&
+        if (RS_ON && (((b->target == 1 || b->target == 5) && vt->layers == 1) || b->target == 4) && !vt->decode && rs_screen_class(vt->w, vt->h) && !(rs_ui_native() && wintex_is(t)) &&      /* (target 4, an array: drawn with a scaled depth target) */
             (vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT || (f.kind != 4 && fmt_supported(vt->fmt, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)))) {      /* track O: a screen-class target */
             int gw = vt->w, gh = vt->h, lv = 1;
             vt->w = (int)((float)gw * rs_scale() + 0.5f); vt->h = (int)((float)gh * rs_scale() + 0.5f);
@@ -4763,7 +4763,9 @@ swap: ;
     if (progress) cmd_wait_all();
     /* The swapchain has the window texture's colour class: a blit between them then keeps the stored values (the OpenGL
      * path blits with FRAMEBUFFER_SRGB off). */
-    VkFormat want = vt && (vt->fmt == VK_FORMAT_R8G8B8A8_SRGB || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB) ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+    int want_srgb = vt && (vt->fmt == VK_FORMAT_R8G8B8A8_SRGB || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB);
+    VkFormat want = V.format.format == VK_FORMAT_R8G8B8A8_UNORM || V.format.format == VK_FORMAT_R8G8B8A8_SRGB      /* the order of colours the surface offers: Android has RGBA only (BGRA came out with red and blue swapped) */
+                  ? (want_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM) : (want_srgb ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM);
     if (want != V.format.format) { cmd_wait_all(); swapchain_destroy(); V.format.format = want; printf("nvn_vk: swapchain format %d (the window texture's colour class)\n", (int)want); }
     uint32_t index = 0;
     VkResult r = VK_SUCCESS;
