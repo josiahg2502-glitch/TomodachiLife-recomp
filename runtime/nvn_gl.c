@@ -733,7 +733,7 @@ void nvn_wide_camera(void) { g_wide_camera = 1; }
 static int rs_on(void) { return rs_factor() != 1.0f || wide_k() != 1.0f; }
 static int rs_class(const TexBuilder *b) {
     Fmt f;
-    if (!rs_on() || b->target != 1 || b->samples > 1 || b->depth > 1 || (b->flags & 0x10) || !fmt_get(b->format, &f) || f.kind == 4) return 0;
+    if (!rs_on() || (b->target != 1 && b->target != 4) || b->samples > 1 || (b->target == 1 && b->depth > 1) || (b->flags & 0x10) || !fmt_get(b->format, &f) || f.kind == 4) return 0;      /* (target 4, an array: drawn with a scaled depth target) */
     for (int k = 0; k < 7; k++) if (b->width == 1920 >> k && b->height == 1080 >> k) return 1;
     return 0;
 }
