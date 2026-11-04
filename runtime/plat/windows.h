@@ -516,6 +516,7 @@ uintptr_t plat_module_base(HMODULE m);                   /* load address (on Win
 #define CP_UTF8 65001
 int MultiByteToWideChar(UINT cp, DWORD flags, LPCSTR s, int n, LPWSTR w, int wn);
 int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n, LPCSTR def, LPBOOL used);
+UINT GetACP(void);
 
 /* ---- input (SDL keyboard state; plat_posix.c) ---- */
 #define WM_KEYDOWN 0x0100                  /* window messages: named by shared code, never sent (the window is SDL's) */

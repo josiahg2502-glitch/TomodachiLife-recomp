@@ -1820,6 +1820,7 @@ int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n,
     }
     return k;
 }
+UINT GetACP(void) { return CP_UTF8; }      /* (the conversions above are always UTF-8) */
 
 /* ================================================================ keyboard, focus, message boxes (SDL) */
 static SDL_Scancode vk_scancode(int vk) {
