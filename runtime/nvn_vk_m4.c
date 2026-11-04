@@ -247,6 +247,8 @@ static void vstage_build(VStage *v, const SSrc *src) {
         if (s == 0) in.depth_m1 = !(nvn_front_clip_modes() >> 8 & 0xff);
         if (!mx_translate(&in, &out)) {
             printf("nvn_vk: %s: machine code not translated: %s\n", what, out.why); fflush(stdout);
+            {   const char *fd = getenv("TOMO_VK_FAILDUMP");      /* TEST: the machine code of a stage that was not translated */
+                if (fd) { static volatile LONG nf; char pth[300]; snprintf(pth, sizeof pth, "%s/%d_%ld.bin", fd, s, InterlockedIncrement(&nf)); FILE *ff = fopen(pth, "wb"); if (ff) { fwrite(src->code, 1, (size_t)src->code_len, ff); fclose(ff); } } }
             const char *gd = getenv("TOMO_VK_GLSL");          /* TEST: the OpenGL translation of a stage Vulkan cannot take, to read */
             MxIn g = in; MxOut go; memset(&go, 0, sizeof go); g.target = 0;
             if (gd && mx_translate(&g, &go)) { char pth[300]; snprintf(pth, sizeof pth, "%s/%d_id%d_gl.glsl", gd, s, v->id); FILE *gf = fopen(pth, "w"); if (gf) { fputs(go.glsl, gf); fclose(gf); } }
@@ -2144,10 +2146,10 @@ static int cont_stage(uint64_t control, uint64_t data, SSrc *o) {      /* as nvn
     if (len <= 0 || len > (4 << 20)) return -1;
     memcpy(ctl, (const void *)(uintptr_t)(control + 0x6f0), 32);
     if (g32(control + 0x714) == 5) {
-        o->stage = 5; o->code = (const uint8_t *)(uintptr_t)data; o->code_len = len;
+        o->stage = 5; o->code = (const uint8_t *)(uintptr_t)(data + (g32(data) == 0x12345679u ? (ctl[6] ? ctl[6] : 0x100) : 0)); o->code_len = len;      /* (a header before the code, as nvnProgramSetShaders reads it: compute_code_off) */
         for (int k = 0; k < 3; k++) o->local[k] = g32(control + 0x748 + (uint64_t)k * 4);
         o->smem = g32(control + 0x754); o->lmem = g32(control + 0x758);
-        if (ctl[3] && ctl[4]) { o->cdata = o->code + ctl[4]; o->cdata_size = ctl[3]; }
+        if (ctl[3] && ctl[4]) { o->cdata = (const uint8_t *)(uintptr_t)data + ctl[4]; o->cdata_size = ctl[3]; }
         return 2;
     }
     if (g32(data) != 0x12345678u) return -1;

@@ -8474,6 +8474,10 @@ static void stage_keep_cdata(Stage *st, const uint8_t *base) {        /* base: t
  * control: magic 0x98761234, offset of the NV_gpu_program5 text at +0x14, its length at +0x18. */
 __declspec(thread) long long nvn_setsh_part[8];
 static void prog_set_shaders_(Ctx *c);
+/* Where a compute stage's instructions start in its data block: the 0x12345679 layout has a header first, and control +0x708
+ * says how long (0x100; the first word of the code is a scheduling word, the last two groups are the EXIT and the branch to
+ * itself, at exactly that offset + the size at +0x6f8). */
+static uint32_t compute_code_off(uint32_t magic, uint32_t off) { return magic == 0x12345679u ? (off ? off : 0x100) : 0; }
 static void prog_set_shaders(Ctx *c) {             /* session 8: the call timed part by part; a line for every call over 2 ms (SSBU_VK_SETSH_LOG=<ms> changes the limit, 0 = no lines) */
     static int lim = -1; static LONG nl; static LONG64 fq;
     if (lim < 0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); fq = f.QuadPart; lim = getenv("SSBU_VK_SETSH_LOG") ? atoi(getenv("SSBU_VK_SETSH_LOG")) : 2; }
@@ -8541,7 +8545,7 @@ static void prog_set_shaders_(Ctx *c) {
                              rd32(data), rd32(data + 4), rd32(data + 8), rd32(data + 12), rd32(control + 0x748), rd32(control + 0x74c), rd32(control + 0x750));
                 for (int k = 0; k < 3; k++) p->st[5].local[k] = rd32(control + 0x748 + (uint64_t)k * 4);
                 p->st[5].smem_bytes = rd32(control + 0x754); p->st[5].lmem_bytes = rd32(control + 0x758);
-                if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + (rd32(data) == 0x12345679u ? (rd32(control + 0x6f0) ? rd32(control + 0x6f0) : 0x100) : 0)); p->st[5].code_len = len; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
+                if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + compute_code_off(rd32(data), rd32(control + 0x708))); p->st[5].code_len = len; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
             }
             continue;
         }
@@ -8565,7 +8569,7 @@ static void prog_set_shaders_(Ctx *c) {
             }
             for (int k = 0; k < 3; k++) p->st[5].local[k] = rd32(control + 0x748 + (uint64_t)k * 4);      /* work group size */
             p->st[5].smem_bytes = rd32(control + 0x754); p->st[5].lmem_bytes = rd32(control + 0x758);
-            if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + (rd32(data) == 0x12345679u ? (rd32(control + 0x6f0) ? rd32(control + 0x6f0) : 0x100) : 0)); p->st[5].code_len = len; p->st[5].state = 4; p->st[5].dumped = 0; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
+            if (len > 0 && len < (4 << 20)) { p->st[5].code = P(data + compute_code_off(rd32(data), rd32(control + 0x708))); p->st[5].code_len = len; p->st[5].state = 4; p->st[5].dumped = 0; p->st[5].glsl_state = 0; memcpy(p->st[5].ctl, P(control + 0x6f0), 32); stage_keep_cdata(&p->st[5], P(data)); }
             continue;
         }
         if (!data || rd32(data) != 0x12345678u) { logf_limited(&nlog2, 10, "nvn_gl: program #%d shader %d: no text and no recognisable code section\n", p->serial, i); continue; }
