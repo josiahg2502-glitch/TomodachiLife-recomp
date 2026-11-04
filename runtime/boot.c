@@ -467,6 +467,7 @@ int main(int argc, char **argv) {
     }
     /* track V: `--prepare-shaders [folder]` translates every stage of the shader containers in the folder (default
      * ..\cache\vk_containers, filled by tools_vk/bnsh_extract.py) into ..\cache\vk; no game, no window, no GPU (nvn_vk_m4.c) */
+    if (argc > 1 && !strcmp(argv[1], "--renderer")) { int nvn_renderer_is_vk(void); puts(nvn_renderer_is_vk() ? "vk" : "gl"); fflush(stdout); return 0; }      /* the installer: which renderer this PC gets, so which shaders to prepare */
     if (argc > 1 && !strcmp(argv[1], "--prepare-shaders")) { int nvn_vk_prepare_shaders(const char *); return nvn_vk_prepare_shaders(argc > 2 ? argv[2] : NULL); }
     /* data symbols the game imports from the SDK module get their real values (see gen_sdkdata.py) */
     for (int i = 0; i < sdk_data_count; i++) {
@@ -531,7 +532,7 @@ int main(int argc, char **argv) {
                 Sleep(left < 0 ? 20 : 100);
             }
             printf("shaders: %lld known programs made ready before the game started (%.1f s)\n", total, (double)(GetTickCount64() - t0) / 1000.0);
-            if (only) { printf("shaders: prepared%s\n", left ? " (NOT all: stopped)" : ""); fflush(stdout); ExitProcess(left ? 3 : 0); }      /* (the last job writes the store's "prepared" key before it counts as done) */
+            if (only) { void nvn_front_prepare_end(void); nvn_front_prepare_end(); printf("shaders: prepared%s\n", left ? " (NOT all: stopped)" : ""); fflush(stdout); ExitProcess(left ? 3 : 0); }      /* (the last job writes the store's "prepared" key before it counts as done) */
             { void tomo_timeline(const char *what); tomo_timeline("the game starts (shaders ready)"); }
             display_title_note("starting the game");
         }

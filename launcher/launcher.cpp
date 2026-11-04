@@ -1199,7 +1199,8 @@ private:
         quit_armed_ = false;
         SetEnvironmentVariableA("PYTHONIOENCODING", "utf-8");      // find_inputs.py prints file names such as "Tomodachi Life(TM)_ ..."
         SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
-        if (python().empty() || !is_file(python())) start_bootstrap();
+        // issue #22: a python.exe whose pip or packages are damaged stopped every install at "pip could not install": bootstrap repairs it
+        if (python().empty() || !boot::python_ok(python())) start_bootstrap();
         else start_scan();
     }
     void start_bootstrap() {
@@ -1338,7 +1339,6 @@ private:
         // the environment of scripts\play.ps1
         SetEnvironmentVariableW(L"SSBU_ROMFS", (game_dir_ / "romfs").wstring().c_str());
         SetEnvironmentVariableA("SSBU_ERROR_DIALOG", "0");
-        if (!GetEnvironmentVariableA("SSBU_RENDERER", nullptr, 0)) SetEnvironmentVariableA("SSBU_RENDERER", "gl");
         SetEnvironmentVariableA("SSBU_OS_CONSOLE_CORES", "1");
         SetEnvironmentVariableA("SSBU_KEYBOARD_PLAYER", "1");
         SetEnvironmentVariableA("SSBU_SHOW", "1");

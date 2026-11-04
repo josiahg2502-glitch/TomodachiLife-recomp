@@ -1925,6 +1925,11 @@ static volatile LONG64 g_gap_prev, g_gap_max;      /* nvn_vk_draw.c vk_present2:
 static int g_prep_limited;                         /* SSBU_VK_PREP_LIMIT (test): not the whole game: no marker */
 static HANDLE g_pcw_thread;
 typedef struct { void *data; size_t n; int marker, where, one_call, prio; LONG64 t_get, t_q; } PcWrite;
+static void prep_marker_write(void) {
+    if (g_prep_limited || !g_prep_marker[0]) return;
+    FILE *mf = fopen(g_prep_marker, "wb");
+    if (mf) { fprintf(mf, "%d containers, %lld variations\n", g_prep_nfiles, (long long)g_prep_vars); fclose(mf); printf("nvn_vk_prep: marker %s written with the pipeline cache: the next start skips the preparation\n", g_prep_marker); }
+}
 static void pcache_write(PcWrite *w) {
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
     char tmp[176];
@@ -1940,10 +1945,7 @@ static void pcache_write(PcWrite *w) {
            w->where == 0 ? "on the exit path" : w->where == 1 ? "by the render thread inside a held loading screen" : "BY THE PREPARATION THREAD DURING PLAY (SSBU_VK_PCSAVE=prep: the behaviour before session 12)",
            (double)w->t_get * 1000.0 / (double)fq.QuadPart, w->one_call ? "one call" : "two calls: size, then data", w->prio, (double)(t1 - t0) * 1000.0 / (double)fq.QuadPart, w->where == 1 ? " by a thread of its own" : "",
            (double)g_gap_max * 1000.0 / (double)fq.QuadPart, (long long)nvn_front_frame_next(), g_in_fight ? "IN A FIGHT" : "no fight");
-    if (ok && w->marker && !g_prep_limited && g_prep_marker[0]) {
-        FILE *mf = fopen(g_prep_marker, "wb");
-        if (mf) { fprintf(mf, "%d containers, %lld variations\n", g_prep_nfiles, (long long)g_prep_vars); fclose(mf); printf("nvn_vk_prep: marker %s written with the pipeline cache: the next start skips the preparation\n", g_prep_marker); }
-    }
+    if (ok && w->marker) prep_marker_write();
     fflush(stdout);
     free(w->data);
 }
@@ -1980,13 +1982,15 @@ static void pcache_save_at(int where, int marker) {
     VkResult r = VK_INCOMPLETE;
     void *data = NULL;
     int one = 0;
-    if (!g_pcache || V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) return;      /* lavapipe: never a hit, gigabytes to read out at exit */
+    if (!g_pcache) return;
+    if (V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) { if (marker) prep_marker_write(); return; }      /* lavapipe: never a hit, gigabytes to read out at exit */
     /* lavapipe (Mesa, WSL): 0 hits every run from the cache it was given, and the file grew 0.2-0.8 GB a run up to 6.6 GB
      * (50 s to read at start). shortcut: a driver like that alternates between one run's file and none; a marker if it matters. */
     if (g_pc_had_data && !g_fb_hit[0] && !g_fb_hit[1] && g_fb_miss[0] + g_fb_miss[1] >= 64) {
         printf("nvn_vk: pipeline cache NOT saved and deleted: the driver compiled %lld stage libraries and links and found none in the cache it was given\n", (long long)(g_fb_miss[0] + g_fb_miss[1]));
         fflush(stdout);
         DeleteFileA(g_pcache_path);
+        if (marker) prep_marker_write();
         return;
     }
     if (where == 0) {       /* session 14: the exit path rewrote the whole file (0.9 GB: 5-11 s with the window still there) even when nothing was added */
@@ -2633,7 +2637,10 @@ static DWORD WINAPI sweep_main(void *arg) {
     }
     return 0;
 }
-static void prep_start(void) {
+static volatile int g_prep_started;
+static void prep_start_inner(void);
+static void prep_start(void) { prep_start_inner(); g_prep_started = 1; }
+static void prep_start_inner(void) {
     const char *e = getenv("SSBU_VK_PREP");
     if (getenv("SSBU_VK_SWEEP_LOG") && atoi(getenv("SSBU_VK_SWEEP_LOG"))) CloseHandle(CreateThread(NULL, 0, sweep_main, NULL, 0, NULL));
     int on = e ? atoi(e) != 0 : (D.has_gpl && gpl_sep());
@@ -2666,6 +2673,17 @@ static void prep_start(void) {
     }
     if (!on || !g_m4_on) { printf("nvn_vk_prep: the preparation of every container is off (%s)\n", e ? "SSBU_VK_PREP=0" : "no stage libraries: SSBU_VK_GPL is not 2 or the driver lacks VK_EXT_graphics_pipeline_library"); return; }
     g_prep_thread = CreateThread(NULL, 0, prep_main, NULL, 0, NULL);
+}
+/* TOMO_PREPARE_ONLY (the installer, boot.c): what is left of the preparation; -1 while it has not begun, 0 at its end or when
+ * there is none on this device. No game runs: every worker at normal priority. */
+long long nvn_vk_prep_left(long long *total) {
+    if (!g_prep_started) return -1;
+    if (!g_prep_thread || g_prep_marked || g_prep_state == 2 || g_prep_state == 3) return 0;
+    g_prep_urgent = 1;
+    WakeAllConditionVariable(&g_jq_cv);
+    const LONG64 t = g_pq_queued + (LONG64)(g_prep_nfiles - g_prep_read) * 90, left = t - g_pq_done;
+    *total = t;
+    return left > 0 ? left : 1;
 }
 /* `ssbu_vk1.exe --prepare-shaders [folder]` (boot.c): no game, no window, no Vulkan device. Every *.bnsh file of the folder
  * (tools_vk/bnsh_extract.py writes them from data.arc) is walked as the scan above walks a container in the game's memory

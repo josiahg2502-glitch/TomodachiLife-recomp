@@ -51,9 +51,9 @@ static const char *const k_default_ini =
 "; Delete the file to get it written again with these defaults. A line starting with ';' is a comment.\r\n"
 "; Every value below is the default; the defaults draw exactly what the game draws on the console.\r\n"
 "\r\n"
-"; renderer = vulkan | opengl\r\n"
-";   vulkan: the default since 2026-10-09. opengl: the first renderer (NVIDIA only), kept as a fallback.\r\n"
-"renderer = vulkan\r\n"
+"; renderer = auto | always_vulkan | opengl\r\n"
+";   auto: OpenGL on an NVIDIA graphics card, Vulkan on every other card (the default). always_vulkan, opengl: that one on any card.\r\n"
+"renderer = auto\r\n"
 "\r\n"
 "; window = windowed | borderless | fullscreen\r\n"
 ";   windowed:   a normal window with the client size below.\r\n"
@@ -231,7 +231,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     GfxOptions *o = &g_opt;
     int written = 0, unknown = 0;
     memset(o, 0, sizeof *o);
-    o->width = 1280; o->height = 720; o->scale = 1.0f; o->present = 5;      /* vsync = auto when the key is missing (track V session 14) */
+    o->renderer = 2; o->width = 1280; o->height = 720; o->scale = 1.0f; o->present = 5;      /* vsync = auto when the key is missing (track V session 14) */
     opt_path(o->path);
     FILE *f = fopen(o->path, "rb");
     if (!f) {
@@ -248,7 +248,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         if (!line[0] || line[0] == ';' || line[0] == '#' || line[0] == '[' || !(eq = strchr(line, '='))) continue;
         *eq = 0; val = eq + 1;
         trim(key); trim(val);
-        if (!_stricmp(key, "renderer")) o->renderer = !_stricmp(val, "opengl") || !_stricmp(val, "gl");
+        if (!_stricmp(key, "renderer")) o->renderer = !_stricmp(val, "opengl") || !_stricmp(val, "gl") ? 1 : !_stricmp(val, "always_vulkan") ? 0 : 2;      /* "vulkan": what older versions wrote as the default and the launcher overrode with OpenGL: auto */
         else if (!_stricmp(key, "window")) o->window_mode = !_stricmp(val, "borderless") ? 1 : !_stricmp(val, "fullscreen") ? 2 : 0;
         else if (!_stricmp(key, "width")) { int v = atoi(val); if (v >= 320 && v <= 16384) o->width = v; }
         else if (!_stricmp(key, "height")) { int v = atoi(val); if (v >= 180 && v <= 16384) o->height = v; }
@@ -283,9 +283,9 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
                                                      : "custom (every key of graphics.ini as written; 'profile = low' is the set for a weak or integrated GPU)");
     static const char *const k_win[3] = {"windowed", "borderless", "fullscreen"}, *const k_vs[6] = {"clock", "on", "off", "mailbox", "display", "auto"};
     printf("graphics options: %s (%s): renderer=%s window=%s %dx%d vsync=%s gpu=%s console_mode=%s resolution_scale=%.2f anisotropic_filtering=%d frame_time_overlay=%s%s\n", o->path,
-           written ? "written with the defaults" : f ? "read" : "NOT readable, defaults used", o->renderer ? "opengl" : "vulkan", k_win[o->window_mode], o->width, o->height, k_vs[o->present],
+           written ? "written with the defaults" : f ? "read" : "NOT readable, defaults used", o->renderer == 2 ? "auto" : o->renderer ? "opengl" : "always_vulkan", k_win[o->window_mode], o->width, o->height, k_vs[o->present],
            o->gpu[0] ? o->gpu : "auto", o->handheld ? "handheld" : "docked", o->scale, o->aniso, o->overlay ? "on" : "off", unknown ? " (lines with an unknown key were ignored)" : "");
-    if (o->scale != 1.0f && o->renderer) printf("graphics options: resolution_scale=%.2f: the OpenGL renderer draws the screen-sized targets at %dx%d (0.5 .. 3.0)\n", o->scale, (int)(1920 * o->scale + 0.5f), (int)(1080 * o->scale + 0.5f));
+    if (o->scale != 1.0f && o->renderer == 1) printf("graphics options: resolution_scale=%.2f: the OpenGL renderer draws the screen-sized targets at %dx%d (0.5 .. 3.0)\n", o->scale, (int)(1920 * o->scale + 0.5f), (int)(1080 * o->scale + 0.5f));
     if (o->scale != 1.0f && (o->scale < 0.25f || o->scale > 2.0f)) printf("graphics options: resolution_scale=%.2f is outside 0.25 .. 2.0: the nearest of the two is used\n", o->scale);      /* PR #8 (stephenjayakar): above 1.0 allowed (nvn_vk_draw.c RS_MAX = 2.0) */
     fflush(stdout);
     return TRUE;

@@ -349,7 +349,7 @@ static void utf8_cut(char *s, int max_bytes) {        /* at most max_bytes bytes
 static const char *const k_window[] = {"windowed", "borderless", "fullscreen"};
 static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto"};      /* GfxOptions.present */
 static const char *const k_latency[] = {"normal", "low", "lowest"};
-static const char *const k_renderer[] = {"vulkan", "opengl"};
+static const char *const k_renderer[] = {"always_vulkan", "opengl", "auto"};      /* index = GfxOptions.renderer */
 static const int k_aniso_v[] = {0, 2, 4, 8, 16};
 static const char *const k_aniso[] = {"game", "2", "4", "8", "16"};
 static const char *const k_profile[] = {"custom", "low"};
@@ -1623,7 +1623,7 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
@@ -1634,7 +1634,8 @@ static const char *const k_wide_name[] = {"Off (16:9)", "Fit the screen"};
 static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock, on, off (indices of k_vsync) */
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Quit to desktop"};
+static const char *const k_renderer_name[] = {"Vulkan", "OpenGL (NVIDIA cards)", "Automatic"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
@@ -1660,6 +1661,7 @@ static int t_changed(int r) {                  /* a setting read at start, chang
     case T_WIDE: return g_t_wide != g_t_wide0;
     case T_FPS: return g_t_fps != g_t_fps0;
     case T_VSYNC: return S.vsync != S0.vsync;
+    case T_RENDER: return S.renderer != S0.renderer;
     case T_LANG: return S.lang != S0.lang;
     }
     return 0;
@@ -1673,6 +1675,7 @@ static void t_value(int r, char *v, int n) {
     case T_WIDE: snprintf(v, (size_t)n, "%s", k_wide_name[g_t_wide]); break;
     case T_FPS: snprintf(v, (size_t)n, "%d fps", g_t_fps); break;
     case T_VSYNC: snprintf(v, (size_t)n, "%s", k_vsync_name[S.vsync]); break;
+    case T_RENDER: snprintf(v, (size_t)n, "%s", k_renderer_name[S.renderer]); break;
     case T_VOLUME: snprintf(v, (size_t)n, "%d", S.volume < 0 ? 100 : S.volume); break;
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
@@ -1692,6 +1695,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_FPS: g_t_fps = g_t_fps == 60 ? 30 : 60; snprintf(v, sizeof v, "%d", g_t_fps); ini("frame_rate", v); break;
     case T_VSYNC: { int k = 0; for (int i = 0; i < N(k_vsync_order); i++) if (k_vsync_order[i] == S.vsync) k = i;
         S.vsync = k_vsync_order[(k + dir + N(k_vsync_order)) % N(k_vsync_order)]; ini("vsync", k_vsync[S.vsync]); break; }
+    case T_RENDER: S.renderer = (S.renderer + dir + N(k_renderer)) % N(k_renderer); ini("renderer", k_renderer[S.renderer]); break;
     case T_VOLUME: S.volume = (S.volume < 0 ? 100 : S.volume) + dir * 10; S.volume = S.volume < 0 ? 0 : S.volume > 100 ? 100 : S.volume;
         nnaudio_set_volume(S.volume); snprintf(v, sizeof v, "%d", S.volume); ini("volume", v); break;
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;

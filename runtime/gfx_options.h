@@ -3,7 +3,7 @@
 #define GFX_OPTIONS_H
 typedef struct {
     char path[260];
-    int renderer;            /* 0 Vulkan (default), 1 OpenGL                               env SSBU_RENDERER=vk|gl wins */
+    int renderer;            /* 0 always Vulkan, 1 OpenGL, 2 auto (default: OpenGL on NVIDIA, else Vulkan)   env SSBU_RENDERER=vk|gl wins */
     int window_mode;         /* 0 windowed, 1 borderless (desktop size), 2 fullscreen (borderless, topmost, covering the monitor) */
     int width, height;       /* client size of the windowed mode */
     int present;             /* 0 clock (mailbox, else immediate, paced by our 60 Hz clock), 1 vsync on (fifo), 2 vsync off (immediate), 3 mailbox;   env SSBU_VK_PRESENT wins */

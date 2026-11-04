@@ -89,7 +89,6 @@ def main():
         romfs = os.path.join(build, 'dump', 'romfs')       # the folder was moved: state.json still names the old place
     env['SSBU_ROMFS'] = romfs
     env['SSBU_USERDATA'] = os.path.abspath(a.userdata or os.path.join(build, 'userdata'))
-    env.setdefault('SSBU_RENDERER', 'gl')
     env['SSBU_OS_CONSOLE_CORES'] = '1'
     env['SSBU_KEYBOARD_PLAYER'] = '1'
     if os.path.isdir(os.path.join(build, 'sysdata', 'fonts')):

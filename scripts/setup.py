@@ -969,10 +969,15 @@ def prepare_shaders(cx):
         return
     shutil.copy2(exe, play)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_', 'TOMO_'))}
-    env.update(SSBU_ROMFS=cx.state['dump']['romfs'], SSBU_USERDATA=os.path.join(cx.build, 'userdata'), SSBU_RENDERER='gl',
+    env.update(SSBU_ROMFS=cx.state['dump']['romfs'], SSBU_USERDATA=os.path.join(cx.build, 'userdata'),
                SSBU_SHOW='0', SSBU_VOLUME='0', TOMO_PREPARE_ONLY='1')
     os.makedirs(env['SSBU_USERDATA'], exist_ok=True)
     say('  shaders: compiling every shader of the game for your graphics card now (10-30 minutes, once), so the game starts quickly')
+    # OpenGL on NVIDIA cards, Vulkan on the others (the exe's own choice): Vulkan's stages are translated first, on all processors, without the GPU
+    r = subprocess.run([play, '--renderer'], cwd=cx.work, env=env, capture_output=True, text=True, errors='replace')
+    if r.returncode == 0 and r.stdout.strip().splitlines()[-1:] == ['vk']:
+        out = cx.run('prepare', [play, '--prepare-shaders', '../cache/shader_store'], log='prepare_shaders')
+        say('  shaders: %s' % next((l.strip() for l in reversed(out.splitlines()) if l.strip()), 'translated'))
     os.makedirs(cx.logs, exist_ok=True)
     t0, last = time.time(), 0.0
     moved = [time.time(), '']                 # the last time the "N of M ready" count changed, and that line

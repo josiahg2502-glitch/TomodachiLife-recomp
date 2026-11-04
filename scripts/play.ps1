@@ -9,7 +9,6 @@ $ini = "$repo\build\config\launcher.ini"
 if (Test-Path $ini) { $g = Select-String -Path $ini -Pattern '^\s*game\s*=\s*([^;#]*?)\s*$' | Select-Object -First 1; if ($g) { $dump = $g.Matches[0].Groups[1].Value } }
 $env:SSBU_ROMFS = "$dump\romfs"
 $env:SSBU_ERROR_DIALOG = '0'
-if (-not $env:SSBU_RENDERER) { $env:SSBU_RENDERER = 'gl' }
 $env:SSBU_OS_CONSOLE_CORES = '1'
 $env:SSBU_KEYBOARD_PLAYER = '1'                 # keyboard merged into player 1, so it is recorded with the pad
 $env:SSBU_REC = "$work\play_$Name.rec"

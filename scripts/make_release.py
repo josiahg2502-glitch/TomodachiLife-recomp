@@ -42,7 +42,7 @@ spec.loader.exec_module(setup)
 
 EXE = setup.EXE
 PACKAGE_FILES = [EXE, 'SDL3.dll', setup.LAUNCHER, setup.BNTX_PNG]
-OPTIONAL_FILES = ['opus.dll']
+OPTIONAL_FILES = ['opus.dll', 'ssbu_glslang.dll']
 # what may be in the zip besides PACKAGE_FILES / OPTIONAL_FILES
 PACKAGE_EXTRA = re.compile(r'^(manifest\.json|README\.txt|LICENSE-[A-Za-z0-9_.-]+\.txt)$')
 
@@ -237,6 +237,8 @@ def main():
     ap.add_argument('--llvm'), ap.add_argument('--sdl3'), ap.add_argument('--vulkan-headers'), ap.add_argument('--suyu')
     ap.add_argument('--launcher-llvm', help='an LLVM whose clang compiles C++17 against the MSVC library (default C:\\Program Files\\LLVM)')
     ap.add_argument('--opus', help='opus.dll to ship beside the exe (optional; BSD licence)')
+    ap.add_argument('--glslang-dll', required=True, help='ssbu_glslang.dll (runtime/build_glslang.bat makes it), LICENSE-glslang.txt beside it: '
+                    'the Vulkan renderer, which every graphics card but NVIDIA\'s gets, cannot start without it')
     ap.add_argument('--imgui', help='Dear ImGui v1.91.9b folder (imgui.h, imgui.cpp): the settings menu (F1) is built into the exe '
                                     '(MIT licence, shipped as LICENSE-imgui.txt); default IMGUI_ROOT or <repo>/deps/imgui; without it no menu')
     ap.add_argument('--against', help='a build\\work folder made from a dump: check that none of its tables is in the package')
@@ -336,6 +338,9 @@ def main():
     files = list(PACKAGE_FILES)
     for f in PACKAGE_FILES:
         shutil.copy2(os.path.join(work, f), os.path.join(pkg, f))
+    shutil.copy2(a.glslang_dll, os.path.join(pkg, 'ssbu_glslang.dll'))
+    shutil.copy2(os.path.join(os.path.dirname(os.path.abspath(a.glslang_dll)), 'LICENSE-glslang.txt'), os.path.join(pkg, 'LICENSE-glslang.txt'))
+    files += ['ssbu_glslang.dll', 'LICENSE-glslang.txt']
     if a.opus:
         shutil.copy2(a.opus, os.path.join(pkg, 'opus.dll'))
         files.append('opus.dll')

@@ -992,7 +992,8 @@ void nvn_ww_region(uint64_t base, uint64_t size, int add) {      /* nnsdk.c: mem
 #define WW_CHUNK_SHIFT 21
 static uint64_t *g_wwc, g_wwc_n, g_wwc_cap;       /* the chunks (address >> WW_CHUNK_SHIFT), sorted when g_wwc_sorted */
 static int g_wwc_sorted = 1;
-static struct { uint64_t chunk; } g_wwc_set[1 << 14];      /* membership (open addressing; 0 = empty) */
+static struct { uint64_t chunk; LONG64 asked; } g_wwc_set[1 << 14];      /* membership (open addressing; 0 = empty); asked: the scans requested when it was added */
+static volatile LONG64 g_wws_asked, g_wws_applied;      /* scans requested by the game; the newest one the render thread has stamped */
 static SRWLOCK g_wwc_lock = SRWLOCK_INIT;                  /* g_wwc: the render thread adds, the scan thread reads */
 static void ww_chunk_mark(uint64_t addr, uint64_t size) {
     for (uint64_t ch = addr >> WW_CHUNK_SHIFT, last = (addr + size - 1) >> WW_CHUNK_SHIFT; ch <= last; ch++) {
@@ -1001,7 +1002,7 @@ static void ww_chunk_mark(uint64_t addr, uint64_t size) {
             if (g_wwc_set[h].chunk == ch) break;
             if (g_wwc_set[h].chunk) continue;
             if (g_wwc_n >= (1u << 13)) return;     /* (16 GB of chunks: the full scan below takes over) */
-            g_wwc_set[h].chunk = ch;
+            g_wwc_set[h].chunk = ch; g_wwc_set[h].asked = g_wws_asked;
             AcquireSRWLockExclusive(&g_wwc_lock);
             if (g_wwc_n == g_wwc_cap) { g_wwc_cap = g_wwc_cap ? g_wwc_cap * 2 : 256; g_wwc = realloc(g_wwc, g_wwc_cap * sizeof *g_wwc); }
             g_wwc[g_wwc_n++] = ch; g_wwc_sorted = 0;
@@ -1020,7 +1021,7 @@ static SRWLOCK g_wws_lock = SRWLOCK_INIT;                  /* the pages found an
 static uint64_t *g_wws_pg;
 static size_t g_wws_n, g_wws_cap;
 static int g_wws_all, g_wws_sync = -1;
-static volatile LONG64 g_wws_asked, g_wws_done;
+static volatile LONG64 g_wws_done;
 static volatile LONG g_wws_started;
 static HANDLE g_wws_ev, g_wws_done_ev;
 static volatile LONG g_hot_page[1 << 18];                 /* by page (hashed buckets): the frame a question last found it written by the game (SnapSet) */
@@ -1124,6 +1125,7 @@ static void ww_scan_apply(uint64_t seq) {           /* render thread, at the sta
         else while (g_wws_done < (LONG64)seq) WaitForSingleObject(g_wws_done_ev, 1);
         if (lg) { LONG64 d = pf_now() - w0; wt += d; wn++; if (d > 5000) wbig++;
                   if (wn % 900 == 0) { printf("wwwait: %.3f ms a batch on average, %lld of 900 batches over 0.5 ms%c", (double)wt / 1e4 / 900.0, (long long)wbig, 10); wt = 0; wbig = 0; } } }
+    g_wws_applied = seq ? (LONG64)seq : InterlockedIncrement64(&g_wws_asked);
     AcquireSRWLockExclusive(&g_wws_lock);
     if (g_wws_all) g_ww_floor = ++g_ww_stamp;
     if (g_wws_n) { uint64_t stamp = ++g_ww_stamp; for (size_t i = 0; i < g_wws_n; i++) ww_stamp(g_wws_pg[i], stamp); }
@@ -1152,6 +1154,20 @@ static void ww_note(uint64_t addr, uint64_t size) {      /* the emulator wrote g
 /* Round 16 (nvn_vk_draw.c, SSBU_VK_CBKEEP): the same question for any guest range: has the CPU written a page of it since
  * the stamp the caller remembers? 0 = the memory is not write-watched. Render thread only. */
 uint64_t nvn_front_mem_newest(const void *p, size_t n) { return ww_newest(p, n); }
+/* nvn_vk_draw.c ring_put, as arena_put_slow here: the range's newest write stamp, its chunks asked for at every scan from now
+ * on. 0 = do not keep it: not write-watched, or a chunk the scan applied last did not ask for yet (a scan requested before
+ * the chunk was marked says nothing about it: what the game wrote there would be missed for a batch). */
+uint64_t nvn_front_range_keep(uint64_t addr, uint64_t size) {
+    uint64_t now = ww_range_stamp(addr, size, 0);
+    if (!now) return 0;
+    ww_chunk_mark(addr, size);
+    for (uint64_t ch = addr >> WW_CHUNK_SHIFT, last = (addr + size - 1) >> WW_CHUNK_SHIFT; ch <= last; ch++)
+        for (unsigned h = (unsigned)((ch * 0x9E3779B97F4A7C15ULL) >> 50); g_wwc_set[h].chunk; h = (h + 1) & ((1u << 14) - 1))
+            if (g_wwc_set[h].chunk == ch) { if (g_wwc_set[h].asked >= g_wws_applied) now = 0; break; }
+    return now;
+}
+uint64_t nvn_front_ww_stamp(void) { return g_ww_stamp; }      /* a write stamped later gets a larger one */
+void nvn_front_ww_note(uint64_t addr, uint64_t size) { ww_note(addr, size); }      /* the render thread wrote guest memory */
 
 /* ---- software-decoded (ASTC) textures off the render thread
  * A room or a talking scene brings dozens of ASTC textures at once; decoded here, the frame waited 100-300 ms (the game's
@@ -2483,7 +2499,7 @@ static volatile LONG g_pw_listed_done;                      /* the start-up queu
 long long nvn_front_warm_pending(long long *total) {
     LONG64 q = g_shw_queued, d = g_shw_done;
     *total = q;
-    if (g_vk) return 0;                     /* the OpenGL warm-up never runs on Vulkan: boot waited its 15-minute limit before starting the game */
+    if (g_vk) { long long nvn_vk_prep_left(long long *total); return getenv("TOMO_PREPARE_ONLY") ? nvn_vk_prep_left(total) : 0; }      /* the OpenGL warm-up never runs on Vulkan: boot waited its 15-minute limit before starting the game */
     return g_pw_listed_done && !g_shp_queueing ? (q > d ? q - d : 0) : -1;
 }
 static int g_shd_mode = -1;
@@ -8209,19 +8225,38 @@ static DWORD WINAPI render_thread(LPVOID arg) {
     return 0;
 }
 
+/* renderer = auto: OpenGL with any NVIDIA adapter (an Optimus laptop's too: the exports at the top of this file send the game
+ * to it), the renderer made on NVIDIA's driver; Vulkan on every other card: AMD's OpenGL driver crashed inside atio6axx.dll,
+ * showed a black screen or ran at 1 fps (issues #18, #23, #24). SSBU_GPU_VENDOR=nvidia|other: a test of the choice on any PC. */
+static int gpu_has_nvidia(void) {
+    const char *t = getenv("SSBU_GPU_VENDOR");
+    if (t && t[0]) return !_stricmp(t, "nvidia");
+#ifdef _WIN32
+    DISPLAY_DEVICEA d;
+    d.cb = sizeof d;
+    for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &d, 0); i++, d.cb = sizeof d) if (strstr(d.DeviceID, "VEN_10DE")) return 1;
+#endif
+    return 0;
+}
+int nvn_renderer_is_vk(void) {                     /* boot.c --renderer (the installer) asks too */
+    const char *e = getenv("SSBU_RENDERER");
+    if (e && e[0]) return !strcmp(e, "vk");
+    const int r = gfx_options()->renderer;
+    return r == 2 ? !gpu_has_nvidia() : !r;
+}
 /* Called by display.c once the window exists. */
 void nvn_gl_start(void *hwnd) {
     g_hwnd = hwnd;
     {   /* V1: which back end. SSBU_RENDERER=gl (default) | vk */
         const char *e = getenv("SSBU_RENDERER");
         if (e && e[0] && strcmp(e, "gl") && strcmp(e, "vk")) { printf("nvn: SSBU_RENDERER=%s is not a renderer (gl, vk)\n", e); fflush(stdout); ExitProcess(5); }
-        /* Track V session 4: VULKAN IS THE DEFAULT. SSBU_RENDERER=gl|vk wins; else renderer = vulkan | opengl of config\graphics.ini. */
-        g_vk = e && e[0] ? !strcmp(e, "vk") : !gfx_options()->renderer;
+        /* SSBU_RENDERER=gl|vk wins; else renderer = auto | always_vulkan | opengl of config\graphics.ini */
+        g_vk = nvn_renderer_is_vk();
 #ifndef _WIN32
         if (!g_vk) { printf("nvn: the OpenGL renderer is not part of the Linux build: Vulkan instead\n"); g_vk = 1; }
 #endif
         g_rb = g_vk ? &rb_vk : &rb_gl;
-        printf("nvn: renderer: %s (%s)\n", g_vk ? "Vulkan (nvn_vk.c)" : "OpenGL (nvn_gl.c)", e && e[0] ? "SSBU_RENDERER" : "graphics.ini; the default is Vulkan");
+        printf("nvn: renderer: %s (%s)\n", g_vk ? "Vulkan (nvn_vk.c)" : "OpenGL (nvn_gl.c)", e && e[0] ? "SSBU_RENDERER" : gfx_options()->renderer == 2 ? "auto: OpenGL on NVIDIA, Vulkan on other cards" : "graphics.ini");
     }
     InitializeCriticalSection(&g_job_lock);
     InitializeCriticalSection(&g_dead_lock);
@@ -10019,7 +10054,7 @@ int nvn_front_tex_changed(Tex *t) {
     if (!t->b.packaged && t->limit && src + t->data_size > t->limit) return 0;
     if (t->b.packaged && t->uploaded) return 0;
     LONG64 pf0 = pf_now();
-    uint64_t newest = ww_newest(src, t->data_size);
+    uint64_t newest = tex_ww_newest(t, src);      /* table lookups once its chunks are in the scan: no system call per texture */
     if (newest) {
         if (t->uploaded && !t->dirty && t->ww_hashed && newest <= t->ww_seen) { g_ww_clean++; pf_add(PF_TEXHASH, pf0); return 0; }
         t->ww_seen = newest;
@@ -10231,6 +10266,8 @@ static void vk_shutdown_at_exit(void) {
         fflush(stdout);
     }
 }
+
+void nvn_front_prepare_end(void) { if (g_vk) vk_shutdown_at_exit(); }      /* boot.c, TOMO_PREPARE_ONLY: the pipeline cache and the marker are written */
 
 /* nvnBufferFlushMappedRange / nvnMemoryPoolFlushMappedRange (nvn_stub.c): the CPU wrote this memory. Textures stored there are read again. */
 Tex *nvn_front_tex_first(void) { return g_all_tex; }

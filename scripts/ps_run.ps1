@@ -8,7 +8,6 @@ $dump = if ($env:TOMO_DUMP) { $env:TOMO_DUMP } else { "$repo\build\dump" }
 Set-Location $work
 if (-not $env:SSBU_ROMFS) { $env:SSBU_ROMFS = "$dump\romfs" }
 if (-not $env:SSBU_ERROR_DIALOG) { $env:SSBU_ERROR_DIALOG = '0' }
-if (-not $env:SSBU_RENDERER) { $env:SSBU_RENDERER = 'gl' }
 if (-not $env:SSBU_OS_CONSOLE_CORES) { $env:SSBU_OS_CONSOLE_CORES = '1' }
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = "$work\tomodachi_native.exe"
