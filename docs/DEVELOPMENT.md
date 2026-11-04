@@ -93,8 +93,9 @@ Host bugs fixed on the way, each one a hang:
 
 **Rendering and speed (2026-10-22, late):** the world runs at the game's 30 fps cap (from 14). Translated since:
 `TEX.B` (bindless handle in a register, through a hash table of resident GL handles per texture / sampler id pair that
-the back end fills as the game asks for handles), `RED`, `SHFL`, `FSWZADD`, `VMNMX`; the compute programs' code (data +
-ctl[0], or +0x100) so every compute program of the game runs. Per-frame costs cut: textures in CPU_NO_ACCESS pools are
+the back end fills as the game asks for handles), `RED`, `SHFL`, `FSWZADD`, `VMNMX`; the compute programs' code (their
+instructions start at data + control +0x708, 0x100 in all 61 of the game's; until 1.0.1 they were started at +0x880, in
+the middle). Per-frame costs cut: textures in CPU_NO_ACCESS pools are
 GPU-owned (the game remakes its render targets every frame: 30 MB of uploads and hashing a frame gone), write watch on
 the game's heap, no game-thread barrier for texture finalize / pool registration, no GPU sync after a dispatch. The
 shaders of earlier runs are compiled before the game starts behind a "preparing shaders" screen with a bar (text-only
@@ -153,10 +154,30 @@ python compile_main.py ..\..\build\gen_eh ..\..\build\obj 12
 
 The keys must cover key generation 0x0f or newer, since this game is newer than the keys in some emulator folders.
 
-## Next steps
+## State at 1.0.1
 
-1. Play through the intro dialogs into Mii creation and look at what the world is missing visually (the blue ghost
-   text under highlighted dialog lines first: `SSBU_DRAWLOG=<frame>` of a dialog frame).
-2. Audio mixing in the silent renderer (voices -> a host audio device) once the game is past loading.
-3. The Vulkan back end: `nvnCommandBufferReportCounter`.
-4. Rumble (the cut `SendVibrationValue` calls can drive nnhid.c's SDL rumble).
+Windows (OpenGL on NVIDIA, Vulkan on other cards), Linux and Android (Vulkan). What was learned in the last round, for whoever
+picks this up:
+
+- **Renderer choice:** `gfx_options.renderer` (`auto` | `always_vulkan` | `opengl`), `nvn_renderer_is_vk`. `--renderer` prints
+  the choice; `SSBU_GPU_VENDOR=other` simulates a non-NVIDIA card. AMD's OpenGL driver crashes or runs at 1 fps on this game.
+- **Vulkan on other GPUs** can be simulated on an NVIDIA card: `SSBU_VK_TEST` bits 8 (no D24), 512 (no vertex input dynamic
+  state), 1024 (no extended dynamic state 3, so no pipeline libraries); `SSBU_VK_PUSH=0`, `SSBU_VK_NO_BC=1`, `SSBU_VK_VALIDATE=1`.
+  Run them on a copy of `build/cache/vk`: records of one state are replayed by the next run.
+- **The frame:** the game remakes ~22 render targets every frame (a frame graph: new texture objects over the same memory),
+  submits one big command list and presents. `vpool_*` in `nvn_vk_draw.c` reuses their images. The game cannot start the next
+  frame before the replay of this one has finished, so the replay's length is the frame time.
+- **Write watch:** one scan per batch; chunks nothing asked about for ~1000 scans leave it (`ww_chunk_sweep`). A kept range or
+  texture is trusted only when the scan applied last asked for its chunks (`ww_chunk_trusted`).
+- **Measuring:** other programs on the same PC change the numbers by 30 %. Compare inside one run: a switch with a value 2
+  flips every 300 frames (`SSBU_VK_IMGPOOL=2`, `SSBU_VK_RINGKEEP=2`, `SSBU_VK_FASTDRAW=2`), then join the `nvn_vk_perf` and
+  `nvn_vk: frames` lines by window.
+- **Test sequences:** `SSBU_SEQ="600:Z @untilmark:island:Z/200 <polls>"` reaches the island; `TOMO_ISLE_GOTO="<poll>:x,z ..."` glides
+  its camera (the hand must be up: `150:l/2` steps keep it up); `TOMO_MOUSE_TEST`, `TOMO_SAVE_TEST=<poll>`, `TOMO_MENU_TEST=<frame>`.
+- **Audio:** `TOMO_AUDIOLOG=5` logs every voice's gain ten times a second and the first samples of each sound (searching those
+  in the `.bars` archives and streams names the sound). The game's sound engine is `alto`: attenuation curves in
+  `Sound/Attenuation`, leak-out of buildings in `SoundLeakOutParam`. Passed through: the compressor (only the `Voice_Speaker` bus).
+- **Save:** the save manager's request flag: `tomo.c` `save_now_step`. Its autosave counts at +0x948.
+- **Code mods:** `runtime/tomo_mod.h`, [MODDING.md](MODDING.md).
+- **Known gaps of the port against its own bar:** the PC Settings page opens by key, not from inside the game's own Settings
+  screen; arm64 and real AMD / Intel / Steam Deck hardware were not available for testing.
