@@ -62,3 +62,6 @@ non-Steam game (Steam > Add a game > Add a non-Steam game > Tomodachi Life).
 - `scripts/setup.py --target linux --status` shows which steps are done; `--redo <step>` repeats one.
 - The build's logs are in `build-linux/logs/`.
 - `install_deps.sh --no-system` skips the package manager if you install the packages yourself.
+- The game says the processor is drawing it, or it runs at a few frames per second and seems to freeze at new scenes: your
+  graphics card has no Vulkan 1.3 driver, so Mesa's software one (llvmpipe) took over. `using device` in `last_run.log` names the
+  device. Install the card's driver: the package `mesa-vulkan-drivers` or `vulkan-radeon` / `vulkan-intel`, or NVIDIA's own driver.

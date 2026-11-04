@@ -190,5 +190,18 @@ picks this up:
   `Sound/Attenuation`, leak-out of buildings in `SoundLeakOutParam`. Passed through: the compressor (only the `Voice_Speaker` bus).
 - **Save:** the save manager's request flag: `tomo.c` `save_now_step`. Its autosave counts at +0x948.
 - **Code mods:** `runtime/tomo_mod.h`, [MODDING.md](MODDING.md).
+- **The install runs no pip and no PowerShell:** both failed on players' PCs. `launcher.cpp` downloads the wheels itself
+  (`kWheels`, checked by SHA-256) and unpacks them with tar; `--shortcut` makes the shortcuts by COM.
+- **Folder names outside the PC's code page** (a Japanese folder on an English Windows): the exe's manifest makes UTF-8 its code
+  page (`stamp_manifest`, `tools/lifter/build.py`), the window is Unicode, the installer's Python runs with `PYTHONUTF8=1`, and
+  tar is given a working folder and a relative name, because Windows' tar takes its arguments through the code page.
+- **Why the game closed:** `exit_reason` in `launcher.cpp` turns the exit code into a sentence. 4 is the crash filter (report in
+  `build/work/tomodachi_play_crash.txt`), 1 a failed start or something ending the process from outside. A crash inside a graphics
+  driver in the first frames moves `renderer = auto` to the other renderer (`nvn_crash_in_driver`). Tests:
+  `LAUNCHER_TEST_EXIT=<code>:<log>` with `--shot`; `SSBU_CRASH_TEST` with `TOMO_CRASH_MODULE=<module>`.
+- **The POSIX layer:** `runtime/plat/windows.h` and `plat_posix.c` stand in for the Windows calls of the shared files. A new Windows
+  call in a shared file has to be added there, and only a build shows it: run Linux's link (`setup.py --target linux --only link`)
+  and Android's `build_libs.py --host-only` before a release. A failed `build_libs.py` leaves the old `libmain.so`, which
+  `build_apk.py` packs without a word, so stop at its exit code.
 - **Known gaps of the port against its own bar:** the PC Settings page opens by key, not from inside the game's own Settings
   screen; arm64 and real AMD / Intel / Steam Deck hardware were not available for testing.
