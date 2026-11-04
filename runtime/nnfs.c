@@ -135,6 +135,7 @@ static void mods_find(void) {
     if (!env || !env[0]) CreateDirectoryA(root, NULL);      /* so a player finds where mods go */
     snprintf(pat, sizeof pat, "%s\\*", root);
     HANDLE h = FindFirstFileA(pat, &fd);
+    printf("mods: the folder is %s%s\n", root, h == INVALID_HANDLE_VALUE ? " (it cannot be read)" : "");
     if (h == INVALID_HANDLE_VALUE) return;
     do if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.' && n < MODS_MAX) snprintf(names[n++], MAX_PATH, "%s", fd.cFileName);
     while (FindNextFileA(h, &fd));

@@ -2243,12 +2243,38 @@ static void resolve_stage(int s, VStage *v) {     /* every sampler of the stage;
             for (int first = g_ndtex - 1; k < MX_BX; k++) g_dtex[g_ndtex++] = g_dtex[first];
         } else resolve_sampler(s, v, i);
 }
+static int resmemo_on(void);
 static int bx_cmp(const void *a, const void *b) { uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
 static void bx_scan(int s, const VStage *v) {      /* TEX.B on Vulkan: the bindless handles in the stage's constant buffers are its candidates (MX_BX, sorted: the shader searches them) */
     static uint32_t words[16384], tmp[MX_BX + 1];
     uint32_t *c2w = (uint32_t *)R.c2[s] + 224;
     int n = 0, m = 0;
     if (!(v->cbufs & 1)) { g_bx_n[s] = MX_BX; return; }
+    /* The handles in the same ranges of constant buffers are the same within a batch (R.gen): the shadow and the colour pass
+     * of a model, its materials. 4-6 % of the render thread on the island. */
+    typedef struct { const VStage *v; uint64_t a[8], z[8]; uint32_t gen; int np, n; uint32_t h[MX_BX]; } BxMemo;
+    static BxMemo memo[1024];
+    BxMemo *me = NULL;
+    if (resmemo_on()) {
+        uint64_t a[8], z[8], hk = (uint64_t)(uintptr_t)v * 0x9E3779B97F4A7C15ULL;
+        int np = 0;
+        for (unsigned b = 3; b < 18; b++) {
+            const Range *r = &R.ubo[s][b - 3];
+            if (!(v->cbufs >> b & 1) || !r->addr || !r->size) continue;
+            if (np == 8) { np = -1; break; }
+            a[np] = r->addr; z[np++] = r->size;
+            hk = (hk ^ r->addr ^ (r->size << 40)) * 0x9E3779B97F4A7C15ULL;
+        }
+        if (np >= 0) {
+            me = &memo[hk >> 54];
+            if (me->gen == R.gen && me->v == v && me->np == np && !memcmp(me->a, a, sizeof a[0] * (size_t)np) && !memcmp(me->z, z, sizeof z[0] * (size_t)np)) {
+                memcpy(g_bx[s], me->h, sizeof me->h); memcpy(c2w, me->h, sizeof me->h);
+                g_bx_n[s] = me->n;
+                return;
+            }
+            me->gen = 0; me->v = v; me->np = np; memcpy(me->a, a, sizeof a[0] * (size_t)np); memcpy(me->z, z, sizeof z[0] * (size_t)np);
+        }
+    }
     if (v->bx_hint[0]) {                           /* the translator saw the loads that give the handles (cbuf, offset): those positions of every
                                                     * record, at the smallest record stride (16 .. 4096) whose distinct handles fit (a larger one is a subset) */
         for (unsigned stride = 16; stride <= 4096; stride <<= 1) {
@@ -2275,12 +2301,34 @@ static void bx_scan(int s, const VStage *v) {      /* TEX.B on Vulkan: the bindl
     qsort(g_bx[s], (size_t)n, sizeof g_bx[s][0], bx_cmp);
     for (int k = 0; k < MX_BX; k++) { if (k >= n) g_bx[s][k] = 0xffffffffu; c2w[k] = g_bx[s][k]; }
     g_bx_n[s] = n;
+    if (me) { memcpy(me->h, c2w, sizeof me->h); me->n = n; me->gen = R.gen; }
+}
+/* Most draws sample textures a draw before them sampled: within a batch (R.gen) a handle's view and sampler stay what they were
+ * while its image is in the same layout and is no target of the pass (resolve_sampler: a look in the pool under its lock, the
+ * texture's checks, its view list, the sampler's hash, for every sampler of every draw: 13 % of the render thread with 70 Miis).
+ * SSBU_VK_RESMEMO=0 off, 2 in-run A/B (off in the odd 300-frame windows); also bx_scan's memo. */
+typedef struct { uint64_t nh; const void *tp, *sp; Tex *t; VTex *vt; VkImageView view; VkSampler smp; VkImageLayout layout; uint32_t gen; int dim; } RsMemo;
+static RsMemo g_rsm[4096];
+static int resmemo_on(void) {
+    static int mode = -1;
+    if (mode < 0) mode = getenv("SSBU_VK_RESMEMO") ? atoi(getenv("SSBU_VK_RESMEMO")) : 1;
+    return mode == 1 || (mode == 2 && !((nvn_front_frame_next() / 300) & 1));
 }
 static void resolve_sampler(int s, VStage *v, int i) {
     unsigned u = v->smp[i].unit;
     Tex *t = NULL;
     View view;
     SamplerParams sp;
+    const uint64_t rm_nh = u >= 128 ? (g_bx_force != 0xffffffffu ? g_bx_force : 0) : u < 32 ? R.nvn_tex[s][u] : 0;
+    RsMemo *rm = NULL;
+    if (rm_nh && !D.has_ckpt && resmemo_on()) {
+        rm = &g_rsm[((rm_nh * 0x9E3779B97F4A7C15ULL) >> 52) ^ (unsigned)v->smp[i].dim];
+        if (rm->gen == R.gen && rm->nh == rm_nh && rm->dim == (int)v->smp[i].dim && rm->tp == R.tpool && rm->sp == R.spool && rm->vt->layout == rm->layout && !rm->t->alias_from && R.depth.tex != rm->t) {
+            int at = 0;
+            for (int k = 0; k < R.ncol; k++) at |= R.col[k].tex == rm->t;
+            if (!at) { g_dtex[g_ndtex].view = rm->view; g_dtex[g_ndtex].smp = rm->smp; g_dtex[g_ndtex].layout = rm->layout; g_ndtex++; return; }
+        }
+    }
     int r = u >= 128 ? (g_bx_force != 0xffffffffu ? nvn_front_handle(R.tpool, R.spool, g_bx_force, &t, &view, &sp) : 0)      /* TEX.B array slot (resolve_stage) */
           : u < 32 ? nvn_front_handle(R.tpool, R.spool, R.nvn_tex[s][u], &t, &view, &sp) : 0;
     DTexInfo *di = D.has_ckpt ? &g_dtex_info[g_ndtex] : NULL;      /* PR #32: for the device loss report, only with the markers on */
@@ -2318,6 +2366,12 @@ static void resolve_sampler(int s, VStage *v, int i) {
                 vt_layout(vt, VK_IMAGE_LAYOUT_GENERAL); }
             else vt_layout(vt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             g_dtex[g_ndtex].view = vt_view(vt, &e, dim, 0); g_dtex[g_ndtex].layout = vt->layout; if (di) di->dummy = 0;
+            if (rm && !attached && !t->alias_from) {
+                if (r & 2) g_dtex[g_ndtex].smp = sampler_get(&sp);
+                rm->nh = rm_nh; rm->tp = R.tpool; rm->sp = R.spool; rm->t = t; rm->vt = vt; rm->view = g_dtex[g_ndtex].view; rm->smp = g_dtex[g_ndtex].smp; rm->layout = vt->layout; rm->gen = R.gen; rm->dim = dim;
+                g_ndtex++;
+                return;
+            }
         } else { static int n; R.dummy_kind++;
             if (n < 3) printf("nvn_vk: (detail of the next line) frame %lld, program #%d, texture format 0x%x, %d x %d x %d, %d levels, draws so far with a dummy for a view-kind mismatch: %lld\n", (long long)nvn_front_frame_next(), R.prog[s] ? R.prog[s]->serial : -1, t->b.format, t->b.width, t->b.height, t->b.depth, nvn_front_tex_levels(t), (long long)R.dummy_kind);
             if (n++ < 20) printf("nvn_vk: texture unit %u of the %s stage: the shader declares view kind %d, the texture is kind %d (target %d, %d samples): a dummy is bound\n", u, s ? "fragment" : "vertex", dim, have, e.target, vt->samples); }
