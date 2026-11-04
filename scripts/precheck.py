@@ -224,17 +224,9 @@ def _long_paths():
 
 
 def check_paths(build_dir):
-    bad = []
-    for p in (REPO, os.path.abspath(build_dir)):
-        try:
-            p.encode('ascii')
-        except UnicodeEncodeError:
-            bad.append(p)
-    if bad:
-        return _r('warn', 'Folder names', 'this path has accented or special letters: %s ; some tools may fail on it. Use a plain folder such as C:\\ssbu' % bad[0])
     if _win() and len(os.path.abspath(build_dir)) > 80 and _long_paths() is False:
-        return _r('warn', 'Folder names', 'the build folder path is long and Windows long paths are off; use a shorter folder such as C:\\ssbu')
-    return _r('ok', 'Folder names', 'plain letters only')
+        return _r('warn', 'Folder names', 'the build folder path is long and Windows long paths are off; use a shorter folder such as C:\\Games\\TomodachiLife')
+    return _r('ok', 'Folder names', 'fine')
 
 
 def checks(build_dir, need_msvc=False, dump_dir=None, temp_gb=0.0):
