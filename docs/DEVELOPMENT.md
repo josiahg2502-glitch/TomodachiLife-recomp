@@ -176,7 +176,13 @@ picks this up:
   flips every 300 frames (`SSBU_VK_IMGPOOL=2`, `SSBU_VK_RINGKEEP=2`, `SSBU_VK_FASTDRAW=2`, `SSBU_VK_RESMEMO=2`), then join the
   `nvn_vk_perf` and `nvn_vk: frames` lines by window.
 - **The Android emulator** runs the game at 3-10 fps however fast the PC is (every Vulkan call goes through gfxstream): it
-  shows that things work, not how fast. `debuggerd -b <pid>` over adb, a few times, shows what the threads do.
+  shows that things work, not how fast; the game's own dynamic resolution and texture streaming then make it look coarse.
+  `debuggerd -b <pid>` over adb, a few times, shows what the threads do. Judge pictures by `adb exec-out screencap -p`: the
+  game's own saved pictures come from its render target and did not show the swapped colours of a wrong swapchain format.
+- **Android's life cycle:** Home takes the window away. `display.c` notes SDL's background events, `android_background_hold`
+  (`nvn_vk_draw.c`) holds the render thread at the present, which holds the game, and makes a new surface on return.
+- **Resolution scale:** 2D and array colour targets of a screen-class size scale with their depth target. `resolution_scale`
+  below 1.0 is what shows a mismatch at once: the pass overruns the depth image and the device is lost.
 - **Test sequences:** `SSBU_SEQ="600:Z @untilmark:island:Z/200 <polls>"` reaches the island; `TOMO_ISLE_GOTO="<poll>:x,z ..."` glides
   its camera (the hand must be up: `150:l/2` steps keep it up); `TOMO_MOUSE_TEST`, `TOMO_SAVE_TEST=<poll>`, `TOMO_MENU_TEST=<frame>`.
 - **Audio:** `TOMO_AUDIOLOG=5` logs every voice's gain ten times a second and the first samples of each sound (searching those
