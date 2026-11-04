@@ -192,7 +192,7 @@ def stream(cmd, env=None, cwd=None, on_line=None, hb=None, prefix=''):
     e = dict(os.environ if env is None else env)
     e.setdefault('PYTHONUNBUFFERED', '1')
     e.setdefault('PYTHONIOENCODING', 'utf-8')
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e, cwd=cwd, text=True, errors='replace', encoding='utf-8',
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e, cwd=cwd, text=True, encoding='utf-8',
                          errors='replace', bufsize=1)
     q = queue.Queue()
 
