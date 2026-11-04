@@ -430,7 +430,7 @@ static void fb_note(int kind, const FbRec *f, LONG64 ticks) {
                                                 !valid ? "no feedback from the driver" : hit ? "pipeline cache HIT" : "COMPILED NOW (not in the pipeline cache)", (double)ticks * 1000.0 / (double)fq.QuadPart, (double)f->duration / 1e6);
     }
 }
-static struct { PKey k; VkPipeline lib; } g_olib[128];
+static struct { PKey k; VkPipeline lib; } g_olib[4096];
 static int g_nolib;
 static VkPipeline g_vilib[3];
 static LONG64 g_gpl_made, g_gpl_made_tk, g_gpl_draw, g_gpl_draw_tk, g_gpl_draw_max, g_gpl_wait, g_gpl_wait_tk, g_gpl_link, g_gpl_link_tk, g_gpl_link_max, g_gpl_dlink, g_gpl_dlink_tk, g_gpl_dlink_max, g_gpl_dlink_fight;
@@ -547,7 +547,7 @@ static VkPipeline gpl_olib(const PKey *k0) {
     int i;
     for (i = 0; i < g_nolib; i++) if (!memcmp(&g_olib[i].k, &k, sizeof k)) break;
     if (i == g_nolib) {
-        if (g_nolib == 128) vkd_fail("more than 128 pass signatures (fragment output libraries)");
+        if (g_nolib == 4096) vkd_fail("more than 4096 pass signatures (fragment output libraries)");
         VkPipelineMultisampleStateCreateInfo ms; VkSampleMask smask;
         gpl_ms(&ms, &smask, k.samples, k.sshade);
         VkPipelineColorBlendAttachmentState ba[8];
