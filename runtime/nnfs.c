@@ -144,7 +144,7 @@ static void mods_find(void) {
         char dir[MAX_PATH];
         snprintf(dir, sizeof dir, "%s\\%s", root, names[i]);
         if (find_romfs(dir, 4, g_mods[g_mod_n])) printf("mods: %s: %s\n", names[i], g_mods[g_mod_n++]);
-        else printf("mods: %s: no romfs folder in it, not used\n", names[i]);
+        else printf("mods: %s: no romfs folder in it (no file of it replaces the game's)\n", names[i]);
     }
 }
 
@@ -765,6 +765,8 @@ static void fs_IsSaveDataExisting(Ctx *c) { RET(save_exists()); }
 static void fs_Commit(Ctx *c) {                          /* (const char *mount name) */
     const char *name = STR(0);
     char journal[MAX_PATH], marker[MAX_PATH];
+    {   static int lg = -1; if (lg < 0) lg = getenv("TOMO_FSLOG") != NULL;      /* TEST: who commits: the guest's return addresses */
+        if (lg) { printf("fs commit \"%s\" from %llx", name ? name : "", (unsigned long long)c->x[30]); uint64_t fp = c->x[29]; for (int k = 0; k < 14 && fp > 0x10000; k++) { printf(" %llx", (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8)); fp = *(uint64_t *)(uintptr_t)fp; } printf("%c", 10); fflush(stdout); } }
     fs_lock();
     Mount *m = name ? mount_find(name, strlen(name)) : NULL;
     if (!m) { fs_unlock(); RET(RESULT_NOT_MOUNTED); return; }

@@ -443,6 +443,7 @@ static void speech_end(SilentVoice *s, uint32_t id) {
                s->e_in > 0 && s->e_out > 0 ? 10.0 * log10(s->e_out / s->e_in) : 0.0);
     s->speech = 0;
 }
+static int g_speech_live, g_speech_seen;                 /* a 16-bit voice (the speech the game synthesizes) played in the last update */
 static SilentVoice g_sv[1024];
 static int g_bq_off = -1;                                /* TOMO_AUDIO_BQ=0: the voices' biquad filters are not applied (A/B) */
 static unsigned long long g_bq_voices;                   /* voice updates with a filter on (TOMO_AUDIOLOG) */
@@ -997,6 +998,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
         }
     }
     uint32_t rev = (rd32(in) >> 24) - '0';
+    g_speech_live = g_speech_seen; g_speech_seen = 0;      /* (the update before: the game's frame reads it) */
     uint32_t vsz = rev >= 15 ? 0x188 : 0x170, esz_out = rev >= 9 ? 0x90 : 0x10;
     uint32_t npool = rd32(in + 8) / 0x20, nvoice = rd32(in + 0xc) / vsz, neffect = rd32(in + 0x14) / 0xc0, nsink = rd32(in + 0x1c) / 0x140;
     uint64_t ip = in + 0x40 + rd32(in + 4);              /* memory pools follow the behaviour parameter */
@@ -1133,6 +1135,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 }
             }
             if (vol > 0.0f && play == 0) { if (routed) g_routed++; else g_direct++; }
+            if (fmt == 2) g_speech_seen = 1;
             if (fmt == 2) {                               /* speech log: this voice's peaks and mid-line gaps */
                 if (!s->speech) {
                     time_t now = time(NULL); struct tm *lt = localtime(&now);
@@ -1777,9 +1780,19 @@ static void dialog_mouse(Ctx *c) {
     nnhid_dialog_rects((const float (*)[4])scr, n < 64 ? n : 64, now_at < 64 ? now_at : -1);
     nnhid_dialog_mouse(!mouse ? 3 : over && (over == cur || focused) ? 1 : 2, focused);
 }
+/* graphics.ini fast_menus (the quality bar's faster menu, save and load animations): the fast-forward clock at 2x while almost
+ * nothing is drawn (the loading screen, its wipes; the world takes thousands of draws) and while buttons are up, except while a
+ * Mii speaks. Once a frame. */
+static void fast_menus_update(int mode, int up) {
+    int gfx_fast_menus(void), nnhid_frame_draws(void); void display_ff_auto(int on);
+    if (!gfx_fast_menus()) { display_ff_auto(0); return; }
+    const int draws = nnhid_frame_draws();
+    display_ff_auto(!g_speech_live && ((draws > 0 && draws <= 64) || (up && mode == 3)));
+}
 static void pointer_hook(Ctx *c, void *user) {
     prompts_publish();
     dialog_mouse(c);
+    fast_menus_update(*(const int *)(uintptr_t)(A0 + 0x1a0), *(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1);
     int nnhid_mouse(float xy[2]); void display_mouse_hand(void);
     float xy[2];
     (void)user;

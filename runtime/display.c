@@ -51,16 +51,17 @@ static int g_old_pacing = -1, g_clockstat;
  * more), nnaudio.c plays every ff-th sound buffer and releases the others on a clock ff times faster, tomo.c's audio
  * frame clock ticks ff times faster. TOMO_FF=<n> (test): always on. */
 volatile LONG g_ff = 1;
-static int g_ff_key, g_ff_pad, g_ff_env = -1;
+static int g_ff_key, g_ff_pad, g_ff_auto, g_ff_env = -1;
 int gfx_ff_speed(void);
 static void ff_update(void) {
     if (g_ff_env < 0) { const char *e = getenv("TOMO_FF"); g_ff_env = e ? atoi(e) : 0; }
-    int ff = g_ff_env > 1 ? g_ff_env : (g_ff_key || g_ff_pad) ? gfx_ff_speed() : 1;
+    int ff = g_ff_env > 1 ? g_ff_env : (g_ff_key || g_ff_pad) ? gfx_ff_speed() : g_ff_auto ? 2 : 1;
     if (ff != g_ff) { InterlockedExchange(&g_ff, ff); printf("display: fast-forward %s%c", ff > 1 ? "on" : "off", 10); fflush(stdout); }
 }
 int display_ff(void) { return g_ff; }
 void display_ff_key(int on) { g_ff_key = on != 0; ff_update(); }
 void display_ff_pad(int on) { g_ff_pad = on != 0; ff_update(); }
+void display_ff_auto(int on) { if (g_ff_auto != (on != 0)) { g_ff_auto = on != 0; ff_update(); } }      /* graphics.ini fast_menus (tomo.c) */
 static volatile LONG64 g_vsync_n;            /* refreshes passed (published after the event was signalled) */
 static volatile LONG64 g_vsync_signals, g_vsync_late;
 static SRWLOCK g_vsync_lock = SRWLOCK_INIT;

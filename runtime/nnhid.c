@@ -122,6 +122,7 @@ void input_mark(const char *what) {                       /* any thread: somethi
     LONG i = InterlockedIncrement(&g_mark_count) - 1;
     if (i < MARK_MAX) { strncpy(g_marks[i], what, sizeof g_marks[i] - 1); MemoryBarrier(); }
 }
+int nnhid_frame_draws(void) { return g_frame_draws_seen; }
 void input_frame_draws(int draws) { g_frame_draws_seen = draws; }       /* nvn_gl.c, once per presented frame */
 
 static int mark_seen(const char *what) {

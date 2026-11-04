@@ -14,5 +14,6 @@ PY="$REPO/deps/venv/bin/python"
 
 [ -x "$PY" ] || { echo "deps/venv is missing: run scripts/linux/install.sh <your dump folder> first" >&2; exit 1; }
 mkdir -p "$DATA"
+"$REPO/scripts/linux/update.sh" --daily >/dev/null 2>&1 &      # a notice when a new release is out, at most once a day
 "$PY" "$REPO/scripts/run.py" "$@" 2>&1 | tee "$DATA/last_run.log"
 exit "${PIPESTATUS[0]}"

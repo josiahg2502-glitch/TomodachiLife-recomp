@@ -39,6 +39,9 @@ int gfx_ff_speed(void) { gfx_options(); return g_gfx_ff; }
 void gfx_ff_set(int n) { gfx_options(); g_gfx_ff = n < 2 ? 2 : n > 4 ? 4 : n; }
 static int g_gfx_mouse;                             /* mouse = off 0 | on 1: the mouse steers the game's hand (nnhid.c mouse_poll); user 2026-10-30: off by default */
 int gfx_mouse(void) { gfx_options(); return g_gfx_mouse; }
+static int g_gfx_fast_menus;                        /* fast_menus = off 0 | on 1: the fast-forward clock at 2x on loading screens and in menus (tomo.c) */
+int gfx_fast_menus(void) { gfx_options(); return g_gfx_fast_menus; }
+void gfx_fast_menus_set(int on) { gfx_options(); g_gfx_fast_menus = on != 0; }
 void gfx_mouse_set(int on) { gfx_options(); g_gfx_mouse = on != 0; }
 static float g_gfx_wide;                                   /* widescreen = off 0 | auto -1 (user 2026-11-01: 16:9 by default; no fixed 21:9 / 32:9) */
 float gfx_widescreen(void) { gfx_options(); return g_gfx_wide; }
@@ -166,6 +169,9 @@ static const char *const k_default_ini =
 "; mouse = off | on\r\n"
 ";   on: the mouse moves the game's hand (left click = A, right click = B, the wheel = ZL / ZR). PC Settings can change it.\r\n"
 "mouse = off\r\n"
+"; fast_menus = off | on\r\n"
+";   on: loading screens, their wipes and menus run at twice the speed (not while a Mii speaks). PC Settings can change it.\r\n"
+"fast_menus = off\r\n"
 "\r\n"
 "; widescreen = off | auto\r\n"
 ";   off: 16:9. auto: as wide as an ultrawide monitor (up to 21:9; borderless and full screen), the 3D picture showing\r\n"
@@ -268,6 +274,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "present_api")) g_gfx_present_api = !_stricmp(val, "dxgi") ? 1 : !_stricmp(val, "opengl") ? 2 : 0;
         else if (!_stricmp(key, "fast_forward")) { int v = atoi(val); g_gfx_ff = v < 2 ? 2 : v > 4 ? 4 : v; }
         else if (!_stricmp(key, "mouse")) g_gfx_mouse = !_stricmp(val, "on") || !strcmp(val, "1");
+        else if (!_stricmp(key, "fast_menus")) g_gfx_fast_menus = !_stricmp(val, "on") || !strcmp(val, "1");
         else if (!_stricmp(key, "widescreen")) g_gfx_wide = !_stricmp(val, "auto") ? -1.0f : 0.0f;      /* (an old 21:9 / 32:9: 16:9) */
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */

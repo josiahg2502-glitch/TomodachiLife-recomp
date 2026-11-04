@@ -1623,7 +1623,7 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_FF, T_CTRL, T_MOUSE, T_QUIT, T_N };
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_FF, T_FASTM, T_CTRL, T_MOUSE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
@@ -1635,7 +1635,7 @@ static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
 static const char *const k_renderer_name[] = {"Vulkan", "OpenGL (NVIDIA cards)", "Automatic"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (hold Tab)", "Controls", "Mouse controls", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (hold Tab)", "Faster menus and loading", "Controls", "Mouse controls", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
@@ -1680,6 +1680,7 @@ static void t_value(int r, char *v, int n) {
     case T_LANG: snprintf(v, (size_t)n, "%s", S.lang ? k_lang_name[S.lang] : "Automatic"); break;
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
     case T_MOUSE: snprintf(v, (size_t)n, "%s", gfx_mouse() ? "On" : "Off"); break;
+    case T_FASTM: snprintf(v, (size_t)n, "%s", gfx_fast_menus() ? "On" : "Off"); break;
     case T_CTRL: snprintf(v, (size_t)n, "%s", tc_device_name()); break;
     default: v[0] = 0;
     }
@@ -1701,6 +1702,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_LANG: S.lang = (S.lang + dir + N(k_lang)) % N(k_lang); ini("language", k_lang[S.lang]); break;
     case T_FF: g_t_ff = 2 + (g_t_ff - 2 + dir + 3) % 3; snprintf(v, sizeof v, "%d", g_t_ff); ini("fast_forward", v); gfx_ff_set(g_t_ff); break;
     case T_MOUSE: gfx_mouse_set(!gfx_mouse()); ini("mouse", gfx_mouse() ? "on" : "off"); break;
+    case T_FASTM: gfx_fast_menus_set(!gfx_fast_menus()); ini("fast_menus", gfx_fast_menus() ? "on" : "off"); break;
     case T_CTRL: tc_open(); return;
     }
     char now[64]; t_value(r, now, sizeof now);

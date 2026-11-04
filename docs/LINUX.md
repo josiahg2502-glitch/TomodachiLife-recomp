@@ -36,6 +36,12 @@ last start is in `~/.local/share/tomodachi-recomp/last_run.log` (attach it to a 
 The controls and settings are the same as on Windows (README.md, "Controls"): any controller SDL knows, keyboard and
 mouse; PC Settings in the game's own menu.
 
+## Updates
+
+`play.sh` looks for a new release at most once a day and shows a notice when there is one. To install it, choose "Update to
+the newest release" on the game's application menu entry (right click), or run `scripts/linux/update.sh`: it moves this
+folder to the new release and builds what changed. Your dump, saves and settings stay.
+
 ## Steam Deck
 
 SteamOS is read-only, and its updates remove what is installed into it, so the build runs in a distrobox container

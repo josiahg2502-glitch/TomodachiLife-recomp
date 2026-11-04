@@ -27,7 +27,9 @@ float gfx_widescreen(void);               /* widescreen = off 0 | auto -1 (nvn_g
 int gfx_ff_speed(void);                   /* fast_forward = 2 | 3 | 4: the speed while the fast-forward key is held */
 void gfx_ff_set(int n);                   /* changed while running (PC Settings) */
 int gfx_mouse(void);                      /* mouse = off 0 | on 1 (nnhid.c: the mouse steers the hand) */
-void gfx_mouse_set(int on);               /* changed while running (PC Settings) */
+void gfx_mouse_set(int on);
+int gfx_fast_menus(void);
+void gfx_fast_menus_set(int on);               /* changed while running (PC Settings) */
 int gfx_stats_overlay(void);              /* stats_overlay = off 0 | on 1 (menu.cpp, F2) */
 int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game settings menu, F1) */
 int gfx_volume(void);                     /* volume = auto -1 | 0..100 (the copies a person plays; nnaudio.c) */
