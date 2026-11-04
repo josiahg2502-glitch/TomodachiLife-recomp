@@ -180,14 +180,9 @@ def check_vulkan():
 
 
 def check_codecs():
-    # Get-AppxPackage takes one name only, so list the names and filter here
-    ps = 'Get-AppxPackage | ForEach-Object { $_.Name }'
-    try:
-        r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], capture_output=True, text=True, errors='replace', timeout=30)
-        names = (r.stdout or '').lower() if not r.returncode else ''
-    except (OSError, subprocess.TimeoutExpired):
-        names = ''
-    if not names.strip():                    # PowerShell failed or printed nothing: say so, do not claim the codecs are missing
+    import fetch_media
+    names = ' '.join(fetch_media.store_packages() or [])
+    if not names.strip():                    # nothing could be read: say so, do not claim the codecs are missing
         return _r('warn', 'Video codecs', 'could not be checked; if the game movies stay black, install "VP9 Video Extensions" and "Web Media Extensions" '
                   'from the Microsoft Store (%s , %s)' % (STORE_VP9, STORE_WEB))
     miss = []

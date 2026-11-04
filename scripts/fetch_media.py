@@ -344,19 +344,28 @@ def fetch_ffmpeg(deps_dir=None, force=False, url=FFMPEG_URL, zip_sha256=FFMPEG_Z
 
 
 # ----------------------------------------------------------------------------------------------- check_codecs
+def store_packages():
+    """The lower-case full names of this user's Microsoft Store packages, from the registry (no PowerShell during an install);
+    None when they cannot be read."""
+    import winreg
+    names = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages') as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                names.append(winreg.EnumKey(k, i).lower())
+    except OSError:
+        return None
+    return names
+
+
 def check_codecs(verbose=True):
     """{package name: True/False/None} for the Store codec extensions (None: could not ask). Prints what to do if missing."""
     res = {}
     if os.name != 'nt':
         return res
+    names = store_packages()
     for pkg, title, web, store in CODECS:
-        try:
-            r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
-                                '(Get-AppxPackage -Name %s | Measure-Object).Count' % pkg],
-                               capture_output=True, text=True, errors='replace', timeout=60)
-            res[pkg] = int((r.stdout or '0').strip() or 0) > 0 if r.returncode == 0 else None
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            res[pkg] = None
+        res[pkg] = None if names is None else any(n.startswith(pkg.lower() + '_') for n in names)
     if verbose:
         for pkg, title, web, store in CODECS:
             st = res.get(pkg)

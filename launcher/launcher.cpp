@@ -226,6 +226,37 @@ bool packages(const fs::path& dl, const fs::path& py, const fs::path& exe) {    
     return true;
 }
 
+// --shortcut <folder, @desktop or @programs> <name.lnk> <target> <working folder> <description> <icon, or "">: scripts/shortcuts.py. By COM:
+// no PowerShell is started during an install (a hidden one is what antivirus programs look for, and it failed on some folder names).
+int make_shortcut(char** a) {
+    static const CLSID kShellLink = {0x00021401, 0, 0, {0xC0, 0, 0, 0, 0, 0, 0, 0x46}};
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    fs::path dir;
+    const std::string where = a[0];
+    if (where == "@desktop" || where == "@programs") {
+        wchar_t w[MAX_PATH];
+        if (FAILED(SHGetFolderPathW(nullptr, where == "@desktop" ? CSIDL_DESKTOPDIRECTORY : CSIDL_PROGRAMS, nullptr, 0, w))) { say("fail " + where + " (no folder)"); return 1; }
+        dir = w;
+    } else dir = fs::u8path(where);
+    std::error_code e;
+    fs::create_directories(dir, e);
+    const fs::path lnk = dir / fs::u8path(a[1]);
+    IShellLinkW* sl = nullptr;
+    HRESULT hr = CoCreateInstance(kShellLink, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IShellLinkW), (void**)&sl);
+    if (SUCCEEDED(hr)) {
+        sl->SetPath(fs::u8path(a[2]).wstring().c_str());
+        sl->SetWorkingDirectory(fs::u8path(a[3]).wstring().c_str());
+        sl->SetDescription(fs::u8path(a[4]).wstring().c_str());
+        if (a[5][0]) sl->SetIconLocation(fs::u8path(a[5]).wstring().c_str(), 0);
+        IPersistFile* pf = nullptr;
+        hr = sl->QueryInterface(__uuidof(IPersistFile), (void**)&pf);
+        if (SUCCEEDED(hr)) { hr = pf->Save(lnk.wstring().c_str(), TRUE); pf->Release(); }
+        sl->Release();
+    }
+    say((SUCCEEDED(hr) ? "created " : "fail ") + lnk.u8string());
+    return FAILED(hr);
+}
+
 int bootstrap() {
     const fs::path dl = g_build / "downloads", py = g_repo / "deps" / "python", exe = py / "python.exe";
     std::error_code e;
@@ -1677,6 +1708,7 @@ void set_icon(SDL_Window* win) {
 
 int main(int argc, char** argv) {
     if (argc > 1 && !strcmp(argv[1], "--bootstrap")) { paths_init(); return boot::bootstrap(); }      // the INSTALL screen's first step: no window
+    if (argc > 7 && !strcmp(argv[1], "--shortcut")) return boot::make_shortcut(argv + 2);
     const char* shot = nullptr;
     std::string shot_screen;
     const char* import_dir = nullptr;

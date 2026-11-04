@@ -5,14 +5,12 @@
 
 Creates "Tomodachi Life.lnk" (target: the launcher, build/work/TomodachiLauncher.exe of the install location) on the desktop
 and in the Start menu (Programs), and "Tomodachi Life - Installer.lnk" (the launcher too: its INSTALL) in the Start menu. Idempotent: a shortcut that
-already points at the right place is left alone; one that points elsewhere (the folder was moved) is rewritten.
+is written again, so one that pointed elsewhere (the folder was moved) points here afterwards.
 
-The python.org embeddable package has no pywin32, so the shortcuts are made through `powershell -NoProfile` with the
-WScript.Shell COM object (it ships with Windows). Environment override for tests: SSBU_SHORTCUT_DIRS=<dir>[;<dir>...]
+The launcher makes them (TomodachiLauncher.exe --shortcut, by COM): no PowerShell during an install. Environment override for tests: SSBU_SHORTCUT_DIRS=<dir>[;<dir>...]
 puts all three shortcuts into those folders instead of the real desktop and Start menu.
 Only the standard library is used. Nothing is written outside the folders named above.
 """
-import json
 import os
 import subprocess
 import sys
@@ -20,31 +18,6 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAY_NAME = 'Tomodachi Life.lnk'
 INSTALL_NAME = 'Tomodachi Life - Installer.lnk'
-
-_PS = r"""
-$ErrorActionPreference = 'Stop'
-$sh = New-Object -ComObject WScript.Shell
-foreach ($it in (ConvertFrom-Json $env:SSBU_LNK_JSON)) {
-  $dir = $it.dir
-  if ($dir -eq '@desktop') { $dir = [Environment]::GetFolderPath('Desktop') }
-  elseif ($dir -eq '@programs') { $dir = [Environment]::GetFolderPath('Programs') }
-  if (-not $dir) { Write-Output ('fail ' + $it.name + ' (no folder)'); continue }
-  if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-  $path = Join-Path $dir $it.name
-  if (Test-Path -LiteralPath $path) {
-    $old = $sh.CreateShortcut($path)
-    if ($old.TargetPath -ieq $it.target -and $old.WorkingDirectory -ieq $it.cwd) { Write-Output ('ok ' + $path); continue }
-  }
-  $l = $sh.CreateShortcut($path)
-  $l.TargetPath = $it.target
-  $l.WorkingDirectory = $it.cwd
-  $l.Description = $it.desc
-  if ($it.icon) { $l.IconLocation = $it.icon }
-  $l.Save()
-  Write-Output ('created ' + $path)
-}
-"""
-
 
 def plan(repo=REPO):
     """-> list of dict(dir, name, target, cwd, desc, icon); dir is a real folder or '@desktop' / '@programs'."""
@@ -56,7 +29,7 @@ def plan(repo=REPO):
     exe = next((p for p in (want, os.path.join(repo, 'build', 'work', 'TomodachiLauncher.exe')) if os.path.isfile(p)), want)
     # the logo's .ico, since the launcher's own icon cannot be written while it runs the install
     ico = os.path.join(os.path.dirname(exe), 'tomodachi.ico')
-    icon = ico if os.path.isfile(ico) else exe + ',0' if os.path.isfile(exe) else ''
+    icon = ico if os.path.isfile(ico) else exe if os.path.isfile(exe) else ''
     play = {'name': PLAY_NAME, 'target': exe, 'cwd': os.path.dirname(exe), 'desc': 'Tomodachi Life: Living the Dream, native PC build', 'icon': icon}
     inst = {'name': INSTALL_NAME, 'target': exe, 'cwd': os.path.dirname(exe), 'desc': 'Install, repair or update Tomodachi Life native (INSTALL)', 'icon': icon}
     over = [d for d in (os.environ.get('SSBU_SHORTCUT_DIRS') or '').split(os.pathsep) if d]
@@ -72,12 +45,14 @@ def create_all(repo=REPO, dry=False):
         return ['would create %s -> %s' % (os.path.join(it['dir'], it['name']), it['target']) for it in items]
     if os.name != 'nt':
         return ['fail shortcuts are only made on Windows']
-    env = dict(os.environ, SSBU_LNK_JSON=json.dumps(items))
-    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', _PS],      # (the execution policy is about script files, not -Command)
-                       capture_output=True, text=True, errors='replace', env=env, timeout=120)
-    out = [l.strip() for l in r.stdout.splitlines() if l.strip()]
-    if r.returncode:
-        out.append('fail powershell: ' + (r.stderr.strip().splitlines() or ['exit %d' % r.returncode])[-1])
+    out = []
+    for it in items:
+        if not os.path.isfile(it['target']):
+            out.append('fail %s (no launcher: %s)' % (it['name'], it['target']))
+            continue
+        r = subprocess.run([it['target'], '--shortcut', it['dir'], it['name'], it['target'], it['cwd'], it['desc'], it['icon']],
+                           capture_output=True, text=True, errors='replace', encoding='utf-8', timeout=120)
+        out += [l.strip() for l in r.stdout.splitlines() if l.strip()] or ['fail %s (launcher exit %d)' % (it['name'], r.returncode)]
     return out
 
 
