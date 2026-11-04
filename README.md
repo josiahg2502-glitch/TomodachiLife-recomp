@@ -5,7 +5,7 @@ own code is translated to C and compiled for your PC: no emulator runs underneat
 
 Also for **Linux and Steam Deck** ([docs/LINUX.md](docs/LINUX.md)) and **Android handhelds** ([docs/ANDROID.md](docs/ANDROID.md)).
 
-**Version 1.0.0.** You can play it from start to finish as far as we know; see [Known issues](#known-issues) for what is
+**Version 1.0.1.** You can play it from start to finish as far as we know; see [Known issues](#known-issues) for what is
 still open.
 
 **Nothing of the game is in this repository or in the release downloads.** You build it on your own PC from your own copy
@@ -22,7 +22,8 @@ of the game, dumped from your own Switch, with your own console keys. Not affili
 ## What you need
 
 - Windows 10 or 11, 64-bit; about 15 GB free on the drive you install to; 8 GB of RAM or more (16 GB recommended).
-- A GPU with OpenGL 4.5. Developed and tested on NVIDIA (RTX 3060); AMD and Intel GPUs run it but are less tested.
+- A GPU with Vulkan 1.3 or OpenGL 4.5. The game picks by itself: OpenGL on NVIDIA cards, Vulkan on AMD and Intel (PC Settings,
+  **Renderer**, changes it). Developed and tested on NVIDIA (RTX 3060, both renderers); AMD and Intel are less tested.
 - Your game files, dumped from your Switch:
   - **the base game** (`.nsp`, `.nsz` or `.xci`; title id `010051F0207B2000`), and optionally
   - **the update 1.0.4** (`.nsp` or `.nsz`; `010051F0207B2800`, version `v262144`). Without it you get version 1.0.0.
@@ -70,10 +71,13 @@ screen then shows "preparing shaders (once)" with a count, the time spent and th
 - **CONTROLS**: the controller it sees and the keyboard keys (`build\config\controllers.ini`).
 
 **In the game**, **PC Settings** opens with **F1**, the controller's **HOME** / Guide button, or by holding **-** and **+**
-together for a second (Steam Deck): screen, window size, resolution, widescreen, frame rate, vsync, volume, language and
-Quit to desktop, on a page in the game's own style and with its own fonts. Played like the game's menus (d-pad or arrow
-keys, A / Enter, B / Esc); the mouse works too. **Fast-forward:** hold **Tab**, or both stick buttons of a controller; the
-speed (2x, 3x, 4x) is on that page.
+together for a second (Steam Deck): screen, window size, resolution, widescreen, frame rate, vsync, renderer, volume,
+language and Quit to desktop, on a page in the game's own style and with its own fonts. Played like the game's menus (d-pad
+or arrow keys, A / Enter, B / Esc); the mouse works too. Also there:
+
+- **Save now** saves at once and the game goes on. (The game's own Save, in the X menu, takes you back to the title.)
+- **Fast-forward:** hold **Tab**, or both stick buttons of a controller; the speed (2x, 3x, 4x) is on that page.
+- **Faster menus and loading** (off by default): loading screens and menus run at twice the speed.
 
 Your save lives in `build\userdata` (or the install location you chose). **Playing 1.0.4 upgrades a 1.0.0 save; 1.0.0 cannot
 read it afterwards.** Back it up first (SAVE DATA) if you may go back.
@@ -135,14 +139,13 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 - Very large islands (30+ residents) run slowly on some PCs; we are working on it (issues #7, #18).
 - Now and then a Mii's line shows without its voice (seen once in Mii News); the session log now records every line and
   voice, so please send `build\work\play_*.log` with the time it happened.
-- Some sounds are louder or carry farther than on the Switch: shop and ride music without its fade in and out, street
-  lamps heard from far away (issue #8).
+- Street lamps were reported to be heard from far away (issue #8). The game's master limiter and smooth volume changes are
+  in since 1.0.1, and the shops' music fades with the distance here; if you still hear a difference, please tell us where.
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and
   send `build\work\play_*.log` of that session.
 - Local Play over the internet worked on a simulated link (lag and lost packets) but not yet between two real home routers;
   some routers will need UPnP on. Sending a Mii works; exchanging creations is not tested yet.
 - The launcher shows a plain background (the island picture of the dev builds is game art and is not shipped).
-- Windows only for now.
 
 When something goes wrong, the logs are in `build\logs` (install) and `build\work\play_*.log` (each game session).
 **Flicker:** press **F12** while it happens. The game saves the next 8 pictures in `build\work\flicker` and describes the
