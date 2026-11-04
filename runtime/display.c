@@ -643,8 +643,17 @@ int display_mouse(float *x, float *y, int *buttons) {
     *buttons = (b & SDL_BUTTON_LMASK ? 1 : 0) | (b & SDL_BUTTON_RMASK ? 2 : 0) | (b & SDL_BUTTON_MMASK ? 4 : 0);
     return 1;
 }
+#ifdef __ANDROID__
+/* Home, another app, the notification shade: Android takes the window away. nvn_vk_draw.c android_background_hold stands still until it is back. */
+static volatile LONG g_app_background;
+int display_app_background(void) { return g_app_background; }
+#endif
 static bool SDLCALL close_watch(void *user, SDL_Event *e) {
     (void)user;
+#ifdef __ANDROID__
+    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) InterlockedExchange(&g_app_background, 1);
+    if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) InterlockedExchange(&g_app_background, 0);
+#endif
     if (e->type == SDL_EVENT_MOUSE_WHEEL) {
         static float rest;
         rest += e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
@@ -697,6 +706,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     (void)arg;
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");      /* Back opens PC Settings (menu.cpp) instead of ending the game unsaved */
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) { printf("display: SDL video cannot start: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
     const GfxOptions *go = gfx_options();
     int cw = go->width, ch = go->height;

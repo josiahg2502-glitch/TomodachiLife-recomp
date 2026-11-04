@@ -4622,6 +4622,25 @@ static void prep_first_hold(LONG64 frame) {
     fflush(stdout);
 }
 static void vk_present(void *arg) { vk_present2(arg, 0); }
+#ifdef __ANDROID__
+/* The app in the background: its surface is dead. The render thread stands here, so the game's threads wait for it as for a long
+ * frame; when the app is back it draws to a new surface of the window Android gave it. */
+int display_app_background(void);
+static void android_background_hold(void) {
+    if (!display_app_background()) return;
+    printf("nvn_vk: the app is in the background at frame %lld: the game waits\n", (long long)nvn_front_frame_next()); fflush(stdout);
+    cmd_wait_all();
+    swapchain_destroy();
+    vkDestroySurfaceKHR(V.instance, V.surface, NULL);
+    V.surface = NULL;
+    for (;;) {
+        while (display_app_background()) { g_wd_beat = tk(); Sleep(50); }
+        if (SDL_Vulkan_CreateSurface((SDL_Window *)V.hwnd, V.instance, NULL, &V.surface)) break;
+        g_wd_beat = tk(); Sleep(100);                  /* its new window is not there yet */
+    }
+    printf("nvn_vk: the app is back\n"); fflush(stdout);
+}
+#endif
 static void vk_present2(void *arg, int progress) {
     PresentJob *j = arg;
     static int shot = -2, every, shot_from;
@@ -4735,6 +4754,9 @@ swap: ;
     present_flush();
     tp[2] = tk();                               /* session 14: a present still kept for its tick goes out before the next one is made */
     if (g_pend.recreate) { g_pend.recreate = 0; cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated); }
+#ifdef __ANDROID__
+    android_background_hold();
+#endif
     /* an extra present of a held loading screen: everything submitted so far is waited for first, so that the semaphore pair
      * taken below has no pending operation (validation run s11v2: VUID-vkAcquireNextImageKHR-semaphore-01779, three times,
      * all at such presents: with one submission a present the pair came round before its command buffer had been waited for) */

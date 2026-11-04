@@ -230,7 +230,7 @@ static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         int down = e->type == SDL_EVENT_KEY_DOWN;
-        if (down && e->key.scancode == SDL_SCANCODE_F1) { if (!e->key.repeat) menu_request_toggle(); return true; }
+        if (down && (e->key.scancode == SDL_SCANCODE_F1 || e->key.scancode == SDL_SCANCODE_AC_BACK)) { if (!e->key.repeat) menu_request_toggle(); return true; }      /* AC_BACK: Android's Back */
         if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
         if (!g_open || osk_active()) return true;
         int vk = sdl_vk(e->key.scancode);
@@ -1637,7 +1637,7 @@ static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
 static const char *const k_renderer_name[] = {"Vulkan", "OpenGL (NVIDIA cards)", "Automatic"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (hold Tab)", "Faster menus and loading", "Controls", "Mouse controls", "Save now", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (Tab or both sticks)", "Faster menus and loading", "Controls", "Mouse controls", "Save now", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);

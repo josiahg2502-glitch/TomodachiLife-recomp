@@ -218,6 +218,9 @@ static void swapchain_destroy(void) {
 static int swapchain_create(void) {
     VkSurfaceCapabilitiesKHR caps;
     VkResult r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.gpu, V.surface, &caps);
+#ifdef __ANDROID__
+    if (r != VK_SUCCESS) return 0;                       /* the app is going to the background: its window is gone (android_background_hold) */
+#endif
     if (r != VK_SUCCESS) vk_fatal("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", r);
     VkExtent2D ext = caps.currentExtent;
 #ifdef _WIN32
@@ -264,6 +267,9 @@ static int swapchain_create(void) {
     ci.presentMode = V.mode;
     ci.clipped = VK_TRUE;
     r = vkCreateSwapchainKHR(V.device, &ci, NULL, &V.swapchain);
+#ifdef __ANDROID__
+    if (r != VK_SUCCESS) { V.swapchain = NULL; return 0; }
+#endif
     if (r != VK_SUCCESS) vk_fatal("vkCreateSwapchainKHR", r);
     V.image_count = 16;
     r = vkGetSwapchainImagesKHR(V.device, V.swapchain, &V.image_count, V.images);

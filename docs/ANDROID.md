@@ -12,10 +12,13 @@ copied to the device once.
   (6 GB may be too little), about 8 GB of free storage (internal or SD card), and a controller (the built-in one of a
   handheld is fine). The game does not take touch input in this mode.
 - **The PC:** a finished Windows build of this project (`scripts/setup.py`, or the folder the Windows installer made),
-  Python 3, a Java JDK 17 or newer, and the Android SDK with the NDK r27 (Android Studio's SDK Manager installs both:
-  "NDK (Side by side)" 27.x and "Android SDK Build-Tools").
+  Python 3 (the installer's is `deps\python\python.exe`), a Java JDK 17 or newer, and the Android SDK. Android Studio's SDK
+  Manager installs what it needs: "NDK (Side by side)" 27.x, "CMake", "Android SDK Build-Tools", "Android SDK Platform 35".
+  Keep the SDK in a folder without spaces in its path.
 
 ## Build the app (on the PC)
+
+In the folder of your Windows build:
 
 ```bash
 python scripts/android/build_libs.py --abi arm64-v8a
@@ -25,8 +28,9 @@ python scripts/android/build_libs.py --abi arm64-v8a
 python scripts/android/build_apk.py --abi arm64-v8a --libs build-android/libs/arm64-v8a
 ```
 
-The first command compiles the game for Android (about 30 minutes); the second packs and signs
-`build-android/TomodachiLife-arm64-v8a.apk`. For the Android emulator or an x86 Chromebook, use `--abi x86_64` in both.
+The first command downloads SDL's source, builds it and the shader compiler for Android, and compiles the game (about 30
+minutes); the second packs and signs `build-android/TomodachiLife-arm64-v8a.apk`. For the Android emulator or an x86
+Chromebook, use `--abi x86_64` in both.
 
 ## Copy the game's files to the device
 
@@ -56,8 +60,10 @@ the app is removed.
 
 The first start prepares the game's shaders for your GPU and takes longer; later starts are quick.
 
-File mods go in `TomodachiLife/mods/<mod name>/romfs/...` ([MODDING.md](MODDING.md)). **PC Settings** opens by holding **-** and
-**+** together for a second; **Save now** is there too.
+File mods go in `TomodachiLife/mods/<mod name>/romfs/...` ([MODDING.md](MODDING.md)). **PC Settings** opens with the device's
+**Back** button or by holding **-** and **+** together for a second; **Save now** and **Quit to desktop** are there too. When
+you leave the app (Home, another app) the game waits; it goes on when you come back, unless Android has closed it to free
+memory, so save first if you leave for long.
 
 To update: build the app again from the new release on the PC (the two commands above) and install it over the old one.
 Saves stay.
