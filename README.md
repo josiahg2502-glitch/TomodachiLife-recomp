@@ -121,7 +121,8 @@ Put each mod in its own folder in `build\mods` (made at the first start). Mods m
 (LayeredFS) work as they are: the game uses the first `romfs` folder inside each mod, for example
 `build\mods\MyMod\romfs\...` or `build\mods\MyMod\atmosphere\contents\010051F0207B2000\romfs\...`. When two mods change the
 same file, the one whose folder name comes first wins. To turn a mod off, move its folder out. `exefs` code patches cannot
-work here: the game's code is translated ahead of time.
+work here (the game's code is translated ahead of time), but a mod can bring a plugin that replaces any of the game's
+functions: see [docs/MODDING.md](docs/MODDING.md).
 
 ## Local Play (Mii exchange)
 

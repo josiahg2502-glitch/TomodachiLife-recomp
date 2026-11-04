@@ -2159,10 +2159,66 @@ static const ImportDef tomo_overrides[] = {
     {"_ZN2nn4time13IsInitializedEv", ret1},
     {"_ZN2nn2os26GetThreadAvailableCoreMaskEv", ret7},
 };
+/* Code mods (docs/MODDING.md): plugin.dll / plugin.so in a mod's folder, loaded in name order before the game starts. */
+#include <stdarg.h>
+#include <stddef.h>
+#include "tomo_mod.h"
+typedef char tomo_ctx_prefix_is_ctx[offsetof(TomoCtx, tpidr) == offsetof(Ctx, tpidr) ? 1 : -1];
+static int mod_hook(uint64_t addr, void (*repl)(TomoCtx *, void *), void *user, TomoGuestFn *orig) {
+    return hook_install(addr, (void (*)(Ctx *, void *))repl, user, (ImportFn *)orig) != 0;
+}
+static void mod_call(TomoCtx *c, uint64_t addr) { call_indirect((Ctx *)c, addr); }
+static void mod_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    printf("mod: ");
+    vprintf(fmt, ap);
+    printf("%c", 10);
+    va_end(ap);
+    fflush(stdout);
+}
+static int mod_name_cmp(const void *a, const void *b) { return _stricmp((const char *)a, (const char *)b); }
+static void mods_load_code(void) {
+#ifndef __ANDROID__
+    const char *env = getenv("TOMO_MODS");
+    char root[MAX_PATH], pat[MAX_PATH + 4];
+    static char names[64][MAX_PATH], dirs[64][MAX_PATH];
+    int n = 0;
+    WIN32_FIND_DATAA fd;
+    snprintf(root, sizeof root, "%s", env && env[0] ? env : "..\\mods");
+    snprintf(pat, sizeof pat, "%s\\*", root);
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.' && n < 64) snprintf(names[n++], MAX_PATH, "%s", fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    qsort(names, (size_t)n, sizeof names[0], mod_name_cmp);
+#ifdef _WIN32
+    static const char file[] = "plugin.dll";
+#else
+    static const char file[] = "plugin.so";
+#endif
+    for (int i = 0; i < n; i++) {
+        char path[MAX_PATH * 2];
+        snprintf(dirs[i], MAX_PATH, "%s\\%s", root, names[i]);
+        snprintf(path, sizeof path, "%s\\%s", dirs[i], file);
+        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) continue;
+        HMODULE m = LoadLibraryA(path);
+        int (*init)(const TomoModApi *) = m ? (int (*)(const TomoModApi *))(void *)GetProcAddress(m, "tomo_mod_init") : NULL;
+        if (!init) { printf("mods: %s: %s (no tomo_mod_init)%c", path, m ? "not a plugin" : "cannot be loaded", 10); continue; }
+        static TomoModApi api[64];
+        api[i].version = TOMO_MOD_API_VERSION; api[i].game_text_size = (uint32_t)g_main.text_size; api[i].hook = mod_hook; api[i].call = mod_call; api[i].log = mod_log; api[i].mod_dir = dirs[i];
+        printf("mods: code mod %s: tomo_mod_init returned %d%c", names[i], init(&api[i]), 10);
+        fflush(stdout);
+    }
+#endif
+}
 void register_tomo_imports(void) {
     persp_install();
     rate_install();
     pointer_install();
+    mods_load_code();
     audio_volume_selftest();                     /* SSBU_AUDIO_VOLUME_SELFTEST=<expected startup percent>, -1 for no device */
     for (size_t i = 0; i < sizeof tomo_imports / sizeof tomo_imports[0]; i++)
         if (!import_lookup(tomo_imports[i].name)) register_imports(&tomo_imports[i], 1);
