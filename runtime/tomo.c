@@ -1789,9 +1789,42 @@ static void fast_menus_update(int mode, int up) {
     const int draws = nnhid_frame_draws();
     display_ff_auto(!g_speech_live && ((draws > 0 && draws <= 64) || (up && mode == 3)));
 }
+/* "Save now" (PC Settings; the quality bar's save anywhere). The game asks "Would you like to save?" only on its way back to the
+ * title, and saves by itself now and then. Its save manager (the pointer at 0x710396d0f0, 1.0.4 0x710390f1a0) has a request
+ * flag, +0x55, and a reason, +0x58 (set by [1.0.4 0x7101d25098]), that its update (once a frame, [1.0.4 0x71005822a4]) turns
+ * into the save, on the file thread, with the scene going on (state +0x94c: 0 idle, 1 asked, 2 writing); +0x53 forbids it, +0x50
+ * and +0x51 must be set. tomo_save_state: 0 nothing asked, 1 asked here, 2 with the game, 3 saved, 4 the game cannot now. */
+static volatile LONG g_save_st;
+void tomo_save_now(void) { LONG s = g_save_st; if (s != 1 && s != 2) InterlockedExchange(&g_save_st, 1); }
+int tomo_save_state(void) { return (int)g_save_st; }
+static void save_now_step(void) {
+    static int waited;
+    const LONG st = g_save_st;
+    {   static long long at = -2; long long nnhid_seq_polls(void);      /* TEST: TOMO_SAVE_TEST=<poll> */
+        if (at == -2) at = getenv("TOMO_SAVE_TEST") ? atoll(getenv("TOMO_SAVE_TEST")) : -1;
+        if (at >= 0 && nnhid_seq_polls() >= at) { at = -1; tomo_save_now(); printf("save: asked by TOMO_SAVE_TEST%c", 10); } }
+    if (st != 1 && st != 2) return;
+    const uint64_t at = g_main.text_size == 0x25ce6a0 ? 0x710396d0f0ull : g_main.text_size == 0x256d250 ? 0x710390f1a0ull : 0;
+    const uint64_t m = at ? rd64(at) : 0;
+    if (!m) { InterlockedExchange(&g_save_st, 4); return; }
+    if (st == 1) {
+        if (rd8(m + 0x50) && rd8(m + 0x51) && !rd8(m + 0x53) && !rd32(m + 0x94c)) {
+            wr8(m + 0x55, 1); wr32(m + 0x58, 1);
+            InterlockedExchange(&g_save_st, 2); waited = 0;
+            printf("save: asked the game's save manager%c", 10); fflush(stdout);
+        } else if (++waited > 300) { waited = 0; InterlockedExchange(&g_save_st, 4); printf("save: the game cannot save now (%d %d %d, state %d)%c", rd8(m + 0x50), rd8(m + 0x51), rd8(m + 0x53), (int)rd32(m + 0x94c), 10); fflush(stdout); }
+        return;
+    }
+    if (!rd8(m + 0x55) && !rd32(m + 0x94c)) { waited = 0; InterlockedExchange(&g_save_st, 3); printf("save: done%c", 10); fflush(stdout); }
+    else if (++waited > 1800) {                    /* (the scene does not let it: not to come as a surprise later) */
+        waited = 0; if (rd8(m + 0x55) && !rd32(m + 0x94c)) wr8(m + 0x55, 0);
+        InterlockedExchange(&g_save_st, 4); printf("save: the game did not take the request%c", 10); fflush(stdout);
+    }
+}
 static void pointer_hook(Ctx *c, void *user) {
     prompts_publish();
     dialog_mouse(c);
+    save_now_step();
     fast_menus_update(*(const int *)(uintptr_t)(A0 + 0x1a0), *(const uint16_t *)(uintptr_t)(A0 + 0x14) & 1);
     int nnhid_mouse(float xy[2]); void display_mouse_hand(void);
     float xy[2];

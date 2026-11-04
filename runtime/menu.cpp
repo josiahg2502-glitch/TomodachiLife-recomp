@@ -1623,7 +1623,9 @@ static void draw_menu(int cw, int ch) {
  * wavy stripes, navy text in the game's Seurat font, the B / Back footer). Played like the game's menus: the d-pad or the
  * arrow keys move, left / right change a value, A / Enter changes or chooses, B / Esc / Backspace goes back; the mouse
  * points and clicks, the wheel moves. SSBU_MENU_CLASSIC=1 (and the old SSBU_MENU_TEST): the Dear ImGui pages instead. */
-enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_FF, T_FASTM, T_CTRL, T_MOUSE, T_QUIT, T_N };
+extern "C" void tomo_save_now(void);
+extern "C" int tomo_save_state(void);
+enum { T_SCREEN, T_SIZE, T_RES, T_WIDE, T_FPS, T_VSYNC, T_RENDER, T_VOLUME, T_LANG, T_FF, T_FASTM, T_CTRL, T_MOUSE, T_SAVE, T_QUIT, T_N };
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK };
 static int g_t_sel, g_t_dlg, g_t_dlg_sel, g_t_opened, g_t_wide = -1, g_t_wide0, g_t_fps, g_t_fps0;
 static double g_t_open_t;
@@ -1635,7 +1637,7 @@ static const int k_vsync_order[] = {5, 4, 0, 1, 2};      /* auto, display, clock
 static const char *const k_vsync_name[] = {"Steady clock", "On", "Off (may tear)", "Mailbox", "Follow the monitor", "Automatic"};
 static const char *const k_window_name[] = {"Window", "Borderless", "Full screen"};
 static const char *const k_renderer_name[] = {"Vulkan", "OpenGL (NVIDIA cards)", "Automatic"};
-static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (hold Tab)", "Faster menus and loading", "Controls", "Mouse controls", "Quit to desktop"};
+static const char *const k_tlabel[T_N] = {"Screen", "Window size", "Resolution", "Widescreen", "Frame rate", "Vsync", "Renderer", "Volume", "Language", "Fast-forward (hold Tab)", "Faster menus and loading", "Controls", "Mouse controls", "Save now", "Quit to desktop"};
 static int g_t_ff;
 static int g_t_page;                           /* 0 PC Settings, 1 Controls (tc_*) */
 static void tc_open(void);
@@ -1681,6 +1683,7 @@ static void t_value(int r, char *v, int n) {
     case T_FF: snprintf(v, (size_t)n, "%dx", g_t_ff); break;
     case T_MOUSE: snprintf(v, (size_t)n, "%s", gfx_mouse() ? "On" : "Off"); break;
     case T_FASTM: snprintf(v, (size_t)n, "%s", gfx_fast_menus() ? "On" : "Off"); break;
+    case T_SAVE: { static const char *const st[5] = {"", "Saving...", "Saving...", "Saved", "Not possible here"}; const int k = tomo_save_state(); snprintf(v, (size_t)n, "%s", st[k >= 0 && k < 5 ? k : 0]); break; }
     case T_CTRL: snprintf(v, (size_t)n, "%s", tc_device_name()); break;
     default: v[0] = 0;
     }
@@ -1703,6 +1706,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
     case T_FF: g_t_ff = 2 + (g_t_ff - 2 + dir + 3) % 3; snprintf(v, sizeof v, "%d", g_t_ff); ini("fast_forward", v); gfx_ff_set(g_t_ff); break;
     case T_MOUSE: gfx_mouse_set(!gfx_mouse()); ini("mouse", gfx_mouse() ? "on" : "off"); break;
     case T_FASTM: gfx_fast_menus_set(!gfx_fast_menus()); ini("fast_menus", gfx_fast_menus() ? "on" : "off"); break;
+    case T_SAVE: if (dir > 0) tomo_save_now(); break;
     case T_CTRL: tc_open(); return;
     }
     char now[64]; t_value(r, now, sizeof now);
@@ -1719,7 +1723,7 @@ static void t_act(int a) {
     switch (a) {
     case A_UP: g_t_sel = (g_t_sel + T_N - 1) % T_N; break;
     case A_DOWN: g_t_sel = (g_t_sel + 1) % T_N; break;
-    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
+    case A_LEFT: case A_RIGHT: if (g_t_sel != T_QUIT && g_t_sel != T_CTRL && g_t_sel != T_SAVE) t_change(g_t_sel, a == A_LEFT ? -1 : 1); break;
     case A_OK: if (g_t_sel == T_QUIT) { g_t_dlg = 1; g_t_dlg_sel = 1; }
         else if (g_t_sel == T_VOLUME && (S.volume < 0 || S.volume >= 100)) { S.volume = 0; t_change(T_VOLUME, 0); }
         else t_change(g_t_sel, 1);
