@@ -19,7 +19,7 @@ A file `plugin.dll` (Windows) or `plugin.so` (Linux) in a mod's folder is loaded
 exports one function:
 
 ```c
-#include "tomo_mod.h"   // runtime/tomo_mod.h in the source; beside this file in a release
+#include "tomo_mod.h"   // runtime/tomo_mod.h in the folder you installed to
 
 static TomoGuestFn g_orig;
 static const TomoModApi *g_api;

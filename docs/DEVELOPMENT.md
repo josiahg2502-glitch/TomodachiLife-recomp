@@ -169,9 +169,14 @@ picks this up:
   frame before the replay of this one has finished, so the replay's length is the frame time.
 - **Write watch:** one scan per batch; chunks nothing asked about for ~1000 scans leave it (`ww_chunk_sweep`). A kept range or
   texture is trusted only when the scan applied last asked for its chunks (`ww_chunk_trusted`).
+- **No write watch** (Android, Linux before 6.7; `SSBU_NO_WRITEWATCH=1` simulates it anywhere): `nvn_front_tex_changed` looks at
+  a texture that never changed less and less often (`cold_n`), and at a large linear one in parts, uploading only the rows that
+  changed (`tex_stripes_changed`; the font's 16 MB glyph atlas was nearly all of the hashing).
 - **Measuring:** other programs on the same PC change the numbers by 30 %. Compare inside one run: a switch with a value 2
-  flips every 300 frames (`SSBU_VK_IMGPOOL=2`, `SSBU_VK_RINGKEEP=2`, `SSBU_VK_FASTDRAW=2`), then join the `nvn_vk_perf` and
-  `nvn_vk: frames` lines by window.
+  flips every 300 frames (`SSBU_VK_IMGPOOL=2`, `SSBU_VK_RINGKEEP=2`, `SSBU_VK_FASTDRAW=2`, `SSBU_VK_RESMEMO=2`), then join the
+  `nvn_vk_perf` and `nvn_vk: frames` lines by window.
+- **The Android emulator** runs the game at 3-10 fps however fast the PC is (every Vulkan call goes through gfxstream): it
+  shows that things work, not how fast. `debuggerd -b <pid>` over adb, a few times, shows what the threads do.
 - **Test sequences:** `SSBU_SEQ="600:Z @untilmark:island:Z/200 <polls>"` reaches the island; `TOMO_ISLE_GOTO="<poll>:x,z ..."` glides
   its camera (the hand must be up: `150:l/2` steps keep it up); `TOMO_MOUSE_TEST`, `TOMO_SAVE_TEST=<poll>`, `TOMO_MENU_TEST=<frame>`.
 - **Audio:** `TOMO_AUDIOLOG=5` logs every voice's gain ten times a second and the first samples of each sound (searching those
