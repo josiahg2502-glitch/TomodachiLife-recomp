@@ -381,7 +381,8 @@ static int json_path(const char *q, char *out, size_t size, int *lossy) {
     if (*p != '"') return 0;
     *o = 0;
     *lossy = 0;
-    if (!MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, MAX_PATH) || !WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)size, NULL, &lost)) return 0;
+    /* (with UTF-8 as this process's code page, the exe's manifest, nothing can be lost and the call refuses the pointer) */
+    if (!MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, MAX_PATH) || !WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)size, NULL, GetACP() == CP_UTF8 ? NULL : &lost)) return 0;
     if (lost) {
         DWORD n = GetShortPathNameW(w, sw, MAX_PATH);
         BOOL lost2 = FALSE;

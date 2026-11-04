@@ -168,10 +168,7 @@ extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     case WM_MBUTTONDOWN: case WM_MBUTTONUP: q_push(EV_BTN, 2, m == WM_MBUTTONDOWN); return 1;
     case WM_MOUSEWHEEL: q_push(EV_WHEEL, GET_WHEEL_DELTA_WPARAM(w), 0); return 1;
     case WM_KEYDOWN: case WM_KEYUP: q_push(EV_KEY, (int)w, m == WM_KEYDOWN); return 1;
-    case WM_CHAR: {                                   /* the window is an ANSI one: a character of the system code page */
-        char a = (char)w; wchar_t u = 0;
-        if (w < 0x80 || MultiByteToWideChar(CP_ACP, 0, &a, 1, &u, 1) != 1) u = (wchar_t)w;
-        q_push(EV_CHAR, (int)u, 0); return 1; }
+    case WM_CHAR: q_push(EV_CHAR, (int)w, 0); return 1;      /* the window is a Unicode one: UTF-16 */
     }
     return 0;
 }

@@ -148,6 +148,8 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 - The launcher shows a plain background (the island picture of the dev builds is game art and is not shipped).
 
 When something goes wrong, the logs are in `build\logs` (install) and `build\work\play_*.log` (each game session).
+If the launcher says **the game closed with an error**, the line under it says why. `0x00000004` is a crash: please send that
+session's log and `build\work\tomodachi_play_crash.txt`. `0x00000001`: it could not start, or something ended it from outside.
 **Flicker:** press **F12** while it happens. The game saves the next 8 pictures in `build\work\flicker` and describes the
 frames after them in the session log (the game pauses a few seconds for that); send both.
 

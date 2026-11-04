@@ -527,18 +527,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
     {   int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);      /* U1 (menu.cpp): F1 opens / closes; the menu takes the mouse and keys while open */
         if (menu_wndproc(h, m, (uintptr_t)w, (intptr_t)l)) return 0; }
-    {   /* the on-screen keyboard (osk.c) takes the PC keyboard while it is open; this window is an ANSI one: its WM_CHAR
-         * carries a character of the system code page, made UTF-16 here */
+    {   /* the on-screen keyboard (osk.c) takes the PC keyboard while it is open; this window is a Unicode one: WM_CHAR is UTF-16 */
         int osk_key(UINT msg, WPARAM w);
-        if (m == WM_CHAR) {
-            char a = (char)w;
-            wchar_t u = 0;
-            if (w < 0x80 || MultiByteToWideChar(CP_ACP, 0, &a, 1, &u, 1) != 1) u = (wchar_t)w;
-            if (osk_key(WM_CHAR, (WPARAM)u)) return 0;
-        } else if (m == WM_KEYDOWN && osk_key(WM_KEYDOWN, w)) return 0;
+        if ((m == WM_CHAR || m == WM_KEYDOWN) && osk_key(m, w)) return 0;
     }
     if (m == WM_MOUSEWHEEL) { static int rest; rest += (short)HIWORD(w); InterlockedExchangeAdd(&g_mouse_wheel, rest / WHEEL_DELTA); rest %= WHEEL_DELTA; return 0; }      /* (nnhid.c mouse_poll) */
-    return DefWindowProcA(h, m, w, l);
+    return DefWindowProcW(h, m, w, l);
 }
 
 static char g_title[96];
@@ -551,11 +545,11 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         SetCtx set = (SetCtx)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
         if (!set || !set((HANDLE)-4 /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */)) SetProcessDPIAware();
     }
-    WNDCLASSA wc;
+    WNDCLASSW wc;
     memset(&wc, 0, sizeof wc);
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "ssbu_native_window";
+    wc.lpszClassName = L"ssbu_native_window";
     wc.style = CS_OWNDC;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     {   /* the project's logo (media/opensmash.ico, copied beside the exe by scripts/setup.py): the window's and taskbar's icon */
@@ -568,7 +562,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
             g_icon_big = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
         }
     }
-    RegisterClassA(&wc);
+    RegisterClassW(&wc);
     /* Track O: window mode and size from config\graphics.ini (gfx_options.c). borderless / fullscreen: a frameless window
      * over the primary monitor (fullscreen: also topmost). */
     const GfxOptions *go = gfx_options();
@@ -595,13 +589,15 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
     int visible = show ? atoi(show) != 0 : (!_stricmp(base, "tomodachi_native.exe") || !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
     snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "Tomodachi Life: Living the Dream (native)");
+    wchar_t wtitle[96];
+    MultiByteToWideChar(CP_ACP, 0, g_title, -1, wtitle, 96);
     if (visible) {
-        g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
+        g_hwnd = CreateWindowExW(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, wtitle, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         if (g_hwnd && g_icon_small) SendMessageA(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icon_small);
         if (g_hwnd && g_icon_big) SendMessageA(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_icon_big);      /* the 256 px image: the taskbar / Alt+Tab scale it down sharp (the class icon is only 32 px: blurry on a high-DPI screen) */
     } else {
-        g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
+        g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, wtitle, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
@@ -610,7 +606,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     SetTimer(g_hwnd, 0x7A11, 500, NULL);                         /* the idle pointer (wndproc) */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
-    while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return 0;
 }
 

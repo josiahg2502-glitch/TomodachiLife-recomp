@@ -355,6 +355,28 @@ def compile_host(job):
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
 
+# The exe's *A calls, argv and fopen take UTF-8 (Windows 10 1903 and later): an install folder with letters outside the PC's code
+# page works. It ended with exit code 1 before: "cannot open C:\\Users\\x\\T???\\build\\binaries\\1.0.4\\main.elf".
+EXE_MANIFEST = (b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">'
+                b'<application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">'
+                b'UTF-8</activeCodePage></windowsSettings></application></assembly>\n')
+
+
+def stamp_manifest(exe):
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.BeginUpdateResourceW.restype = wintypes.HANDLE
+    k32.BeginUpdateResourceW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL]
+    k32.UpdateResourceW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, wintypes.WORD, ctypes.c_char_p, wintypes.DWORD]
+    k32.EndUpdateResourceW.argtypes = [wintypes.HANDLE, wintypes.BOOL]
+    h = k32.BeginUpdateResourceW(exe, False)
+    ok = bool(h) and bool(k32.UpdateResourceW(h, 24, 1, 0, EXE_MANIFEST, len(EXE_MANIFEST)))      # RT_MANIFEST, id 1
+    ok = bool(h) and bool(k32.EndUpdateResourceW(h, not ok)) and ok
+    if not ok:
+        raise SystemExit('the manifest could not be written into %s (error %d)' % (exe, ctypes.get_last_error()))
+
+
 def cmd_link(host_only=False):
     if not host_only and build_game_dll():
         return 1
@@ -417,6 +439,8 @@ def cmd_link(host_only=False):
                 raise
     print((r.stdout + r.stderr)[-4000:])                 # link.exe reports its errors on stdout
     if r.returncode == 0:
+        if not TARGET_POSIX:
+            stamp_manifest(out)
         print('linked %s: %.1f MB in %.1fs (%d host files recompiled)' % (out, os.path.getsize(out) / 1048576.0, time.time() - t0, len(jobs)))
     return r.returncode
 
