@@ -72,7 +72,7 @@ def compile_one(name):
     # the dozen largest files hold functions clang 8 cannot optimise in reasonable time: keep them at -O0
     opt = '-O0' if name in SLOW_FILES else OPT
     flags = [opt if f == '-O1' else f for f in CFLAGS] + NOCRT_FLAGS
-    r = subprocess.run([CLANG] + flags + [src, '-o', obj], capture_output=True, text=True)
+    r = subprocess.run([CLANG] + flags + [src, '-o', obj], capture_output=True, text=True, errors='replace')
     return name, r.returncode, r.stderr[-2000:], time.time() - t
 
 
@@ -212,7 +212,7 @@ elif TARGET_POSIX:
     _sdl = os.environ.get('SDL3_PREFIX')
     def pkg(*args):
         out = subprocess.run(['pkg-config'] + list(args) + (['sdl3'] if not _sdl else []) + ['libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'],
-                             capture_output=True, text=True, check=True).stdout.split()
+                             capture_output=True, text=True, errors='replace', check=True).stdout.split()
         return (['-I', os.path.join(_sdl, 'include')] if '--cflags' in args else ['-L', os.path.join(_sdl, 'lib'), '-lSDL3']) + out if _sdl else out
     _sdl_inc = HOST_FLAGS.index('-I', HOST_FLAGS.index('-Ddyn_sym_count=(*game_dyn_sym_count_p)'))      # the SDL3 VC package: the system's SDL3 instead
     HOST_FLAGS = HOST_FLAGS[:_sdl_inc] + HOST_FLAGS[_sdl_inc + 2:] + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
@@ -351,7 +351,7 @@ def compile_host(job):
     flags = CXX_FLAGS if src.endswith('.cpp') else HOST_FLAGS
     if TARGET_ANDROID and os.path.basename(src) == 'boot.c':
         flags = flags + ['-Dmain=tomo_main']        # android_main.c's SDL_main calls it
-    r = subprocess.run([CLANG, '-c'] + flags + [src, '-o', obj], capture_output=True, text=True)
+    r = subprocess.run([CLANG, '-c'] + flags + [src, '-o', obj], capture_output=True, text=True, errors='replace')
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
 

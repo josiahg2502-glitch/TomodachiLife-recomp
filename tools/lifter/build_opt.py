@@ -109,7 +109,7 @@ def ram_bytes():
     """This machine's RAM in bytes (Linux: /proc/meminfo, macOS: hw.memsize), or 0 when unknown."""
     try:
         if sys.platform == 'darwin':
-            return int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True).stdout.strip())
+            return int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True, errors='replace').stdout.strip())
         with open('/proc/meminfo') as f:
             return next(int(l.split()[1]) for l in f if l.startswith('MemTotal:')) << 10
     except (OSError, StopIteration, ValueError):
@@ -337,7 +337,7 @@ def compile_file(src, obj, base_flags, time_limit=None, extra=None):
     if want:
         mem_acquire(want)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
     finally:
         if want:
             mem_release(want)

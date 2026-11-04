@@ -183,7 +183,7 @@ def check_codecs():
     # Get-AppxPackage takes one name only, so list the names and filter here
     ps = 'Get-AppxPackage | ForEach-Object { $_.Name }'
     try:
-        r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], capture_output=True, text=True, errors='replace', timeout=30)
         names = (r.stdout or '').lower() if not r.returncode else ''
     except (OSError, subprocess.TimeoutExpired):
         names = ''
@@ -208,7 +208,7 @@ def check_msvc(need):
     if os.path.exists(vsw):
         try:
             found = subprocess.run([vsw, '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-                                    '-property', 'installationPath'], capture_output=True, text=True, timeout=60).stdout.strip()
+                                    '-property', 'installationPath'], capture_output=True, text=True, errors='replace', timeout=60).stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
     if found:

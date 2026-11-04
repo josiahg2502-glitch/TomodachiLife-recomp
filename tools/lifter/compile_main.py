@@ -26,7 +26,7 @@ def compile_one(gen, obj_dir, name):
     for level in ('-O1', '-O0'):
         cmd = [CLANG, '-c', level, '-w', '-fno-strict-aliasing', '-I', RUNTIME, '-I', gen, src, '-o', obj]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT if level == '-O1' else None)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', timeout=TIMEOUT if level == '-O1' else None)
         except subprocess.TimeoutExpired:
             continue
         return name, level, r.returncode, r.stderr[-3000:], time.time() - t

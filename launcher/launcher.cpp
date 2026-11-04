@@ -1221,6 +1221,7 @@ private:
         quit_armed_ = false;
         SetEnvironmentVariableA("PYTHONIOENCODING", "utf-8");      // find_inputs.py prints file names such as "Tomodachi Life(TM)_ ..."
         SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
+        SetEnvironmentVariableA("PYTHONUTF8", "1");                // text files in UTF-8, not the code page: a path with letters outside it stopped the install
         // issue #22: a python.exe whose pip or packages are damaged stopped every install at "pip could not install": bootstrap repairs it
         if (python().empty() || !boot::python_ok(python())) start_bootstrap();
         else start_scan();

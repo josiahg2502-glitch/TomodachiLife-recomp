@@ -73,7 +73,7 @@ def _in_slot(job):
 def run_clang(job):
     args, label = job
     t = time.time()
-    r = subprocess.run([CLANG] + args, capture_output=True, text=True)
+    r = subprocess.run([CLANG] + args, capture_output=True, text=True, errors='replace')
     return label, r.returncode, (r.stdout + r.stderr)[-3000:], time.time() - t
 
 
@@ -95,7 +95,7 @@ def build_module(e, jobs, relift, opt):
     deps = [nro, LIFTER, os.path.join(RO, 'nro_eh.py')] + ([extra] if os.path.exists(extra) else [])
     if relift or not os.path.exists(stamp) or os.path.getmtime(stamp) < max(os.path.getmtime(p) for p in deps):
         with _lift_slots:
-            r = subprocess.run([sys.executable, LIFTER, 'full', nro, gen, str(min(LIFT_JOBS or jobs, 16)), e['base']], capture_output=True, text=True)
+            r = subprocess.run([sys.executable, LIFTER, 'full', nro, gen, str(min(LIFT_JOBS or jobs, 16)), e['base']], capture_output=True, text=True, errors='replace')
         tail = [l for l in r.stdout.splitlines() if l.startswith('functions:')]
         if r.returncode or not tail:
             print('%s: LIFT FAILED\n%s\n%s' % (name, r.stdout[-3000:], r.stderr[-3000:]))

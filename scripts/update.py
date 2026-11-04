@@ -112,7 +112,7 @@ def remote_sha(repo, branch):
     if shutil.which('git'):
         try:                                     # no prompt for a password (it would hang), no endless wait
             r = subprocess.run(['git', 'ls-remote', 'https://github.com/%s.git' % repo, 'refs/heads/' + branch], capture_output=True,
-                               text=True, timeout=60, stdin=subprocess.DEVNULL, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+                               text=True, errors='replace', timeout=60, stdin=subprocess.DEVNULL, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
         except (OSError, subprocess.TimeoutExpired):
             return None
         m = re.match(r'([0-9a-f]{40})\s', r.stdout or '')

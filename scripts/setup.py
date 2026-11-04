@@ -409,7 +409,7 @@ def step_deps(cx):
         if d in (a.llvm, os.environ.get('LLVM_ROOT')):
             return True
         try:
-            v = subprocess.run([os.path.join(d, 'bin', 'clang.exe'), '--version'], capture_output=True, text=True).stdout
+            v = subprocess.run([os.path.join(d, 'bin', 'clang.exe'), '--version'], capture_output=True, text=True, errors='replace').stdout
         except OSError:
             return False
         return 'version 9.' in v or 'version 8.' in v
@@ -417,7 +417,7 @@ def step_deps(cx):
     if not llvm:
         raise Fail('LLVM/clang 9.0.0 not found (--llvm <folder with bin\\clang.exe>)')
     clang = os.path.join(llvm, 'bin', 'clang.exe')
-    ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
+    ver = subprocess.run([clang, '--version'], capture_output=True, text=True, errors='replace').stdout.splitlines()[0]
     say('  clang: %s   [%s]' % (ver, clang))
     if 'version 9.' not in ver and 'version 8.' not in ver:
         say('  WARNING: the lifted code was only ever compiled with clang 8 and 9; %s is untested' % ver)
@@ -523,7 +523,7 @@ def deps_linux(cx):
     clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else os.environ.get('RECOMP_CLANG') or shutil.which('clang')
     if not clang or not os.path.exists(clang):
         raise Fail('clang not found (install clang, or --llvm <folder with bin/clang>)' + LINUX_HINT)
-    ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
+    ver = subprocess.run([clang, '--version'], capture_output=True, text=True, errors='replace').stdout.splitlines()[0]
     say('  clang: %s   [%s]' % (ver, clang))
     cx.tools['clang'] = clang
     if not shutil.which('pkg-config'):
@@ -532,7 +532,7 @@ def deps_linux(cx):
     if local:
         say('  %-13s %s' % ('sdl3', local))
     for pc, name in pkgs:
-        r = subprocess.run(['pkg-config', '--modversion', pc], capture_output=True, text=True)
+        r = subprocess.run(['pkg-config', '--modversion', pc], capture_output=True, text=True, errors='replace')
         if r.returncode:
             raise Fail('development files of %s (%s) not found by pkg-config%s' % (name, pc, LINUX_HINT))
         say('  %-13s %s' % (pc, r.stdout.strip()))
@@ -548,19 +548,19 @@ def deps_linux(cx):
                 'int main(void) {\n'
                 '    printf("%d %p %p %p\\n", SDL_GetVersion(), (void *)glslang_initialize_process, (void *)glGetString, (void *)avcodec_find_decoder);\n'
                 '    puts("ok");\n    return 0;\n}\n')
-    flags = subprocess.run(['pkg-config', '--cflags', '--libs'] + [p for p, _ in pkgs], capture_output=True, text=True).stdout.split()
+    flags = subprocess.run(['pkg-config', '--cflags', '--libs'] + [p for p, _ in pkgs], capture_output=True, text=True, errors='replace').stdout.split()
     if local:
         flags = ['-I', os.path.join(local, 'include'), '-L', os.path.join(local, 'lib'), '-lSDL3', '-Wl,-rpath,' + os.path.join(local, 'lib')] + flags
     err = ''
     for libs in GLSLANG_LIBS:
-        r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p')] + flags + libs + ['-lGL', '-lm'], capture_output=True, text=True)
+        r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p')] + flags + libs + ['-lGL', '-lm'], capture_output=True, text=True, errors='replace')
         if not r.returncode:
             cx.tools['glslang_libs'] = libs
             break
         err = r.stderr
     else:
         raise Fail('a test program using SDL3, FFmpeg, glslang and OpenGL does not build:\n%s%s' % (err[-1200:], LINUX_HINT))
-    out = subprocess.run([os.path.join(probe, 'p')], capture_output=True, text=True).stdout.strip().splitlines()
+    out = subprocess.run([os.path.join(probe, 'p')], capture_output=True, text=True, errors='replace').stdout.strip().splitlines()
     if not out or out[-1] != 'ok':
         raise Fail('the test program built against the libraries does not run (output %r)' % out)
     say('  test program with SDL3, FFmpeg, glslang, OpenGL: builds and runs')
@@ -593,8 +593,8 @@ def probe_msvc(clang, probe):
     """True when clang can build a Windows program with the MSVC linker and the Windows SDK."""
     with open(os.path.join(probe, 'p.c'), 'w') as f:
         f.write('#include <windows.h>\n#include <stdio.h>\nint main(void){puts("ok");return 0;}\n')
-    r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p.exe'), '-luser32'], capture_output=True, text=True)
-    return not r.returncode and subprocess.run([os.path.join(probe, 'p.exe')], capture_output=True, text=True).stdout.strip() == 'ok'
+    r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p.exe'), '-luser32'], capture_output=True, text=True, errors='replace')
+    return not r.returncode and subprocess.run([os.path.join(probe, 'p.exe')], capture_output=True, text=True, errors='replace').stdout.strip() == 'ok'
 
 
 def probe_nocrt(clang, probe):
@@ -609,17 +609,17 @@ def probe_nocrt(clang, probe):
                 '__declspec(dllexport) double probe(double *d, const double *s, float x) { char big[8192]; memset(big, 1, sizeof big);'
                 ' memcpy(d, s, 8); return sqrt(*d) + fmaf(x, x, x) + trunc(*d) + big[(int)x & 8191]; }\n')
     obj, dll = os.path.join(probe, 'nocrt_probe.obj'), os.path.join(probe, 'nocrt_probe.dll')
-    r = subprocess.run([clang, '-c', '-O1', '-nostdlibinc', '-isystem', nocrt, '-DGAME_NOCRT', src, '-o', obj], capture_output=True, text=True)
+    r = subprocess.run([clang, '-c', '-O1', '-nostdlibinc', '-isystem', nocrt, '-DGAME_NOCRT', src, '-o', obj], capture_output=True, text=True, errors='replace')
     if r.returncode:
         raise Fail('clang cannot compile with the headers of runtime/nocrt:\n' + (r.stdout + r.stderr)[-800:])
     libs = []
     for n in ('ucrtbase_min', 'ntdll_min'):
         lib = os.path.join(probe, n + '.lib')
-        r = subprocess.run([lld, '/machine:x64', '/def:' + os.path.join(nocrt, n + '.def'), '/out:' + lib], capture_output=True, text=True)
+        r = subprocess.run([lld, '/machine:x64', '/def:' + os.path.join(nocrt, n + '.def'), '/out:' + lib], capture_output=True, text=True, errors='replace')
         if r.returncode:
             raise Fail('lld-link cannot make an import library from %s.def:\n%s' % (n, (r.stdout + r.stderr)[-800:]))
         libs.append(lib)
-    r = subprocess.run([lld, '/dll', '/noentry', '/nodefaultlib', '/machine:x64', obj, '/out:' + dll] + libs, capture_output=True, text=True)
+    r = subprocess.run([lld, '/dll', '/noentry', '/nodefaultlib', '/machine:x64', obj, '/out:' + dll] + libs, capture_output=True, text=True, errors='replace')
     if r.returncode:
         raise Fail('lld-link cannot link a DLL without the C runtime:\n' + (r.stdout + r.stderr)[-800:])
 

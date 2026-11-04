@@ -427,7 +427,7 @@ def cmd_check():
     from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UcError
     from unicorn import arm64_const as A
     tests = json.load(open('difftest_tests.json'))
-    out = subprocess.run([HOST_EXE], capture_output=True, text=True).stdout.split('\n')
+    out = subprocess.run([HOST_EXE], capture_output=True, text=True, errors='replace').stdout.split('\n')
     host = {}
     for line in out:
         p = line.split()
@@ -522,7 +522,7 @@ def cmd_show(idx):
         ref['v%d' % i] = uc.reg_read(r)
     ref['nzcv'] = (uc.reg_read(A.UC_ARM64_REG_NZCV) >> 28) & 0xf
     host = {}
-    for line in subprocess.run([HOST_EXE, str(idx)], capture_output=True, text=True).stdout.split('\n'):
+    for line in subprocess.run([HOST_EXE, str(idx)], capture_output=True, text=True, errors='replace').stdout.split('\n'):
         p = line.split()
         if len(p) == 2:
             host[p[0]] = int(p[1], 16)

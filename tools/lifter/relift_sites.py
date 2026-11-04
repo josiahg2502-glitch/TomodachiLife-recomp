@@ -912,7 +912,7 @@ def main():
     else:
         compiles = ((os.path.join(gen, 'sky_sites.c'), sites_obj, []),)
     for src, o, extra in compiles:
-        r = subprocess.run([comp.clang] + flags + extra + [src, '-o', o], capture_output=True, text=True)
+        r = subprocess.run([comp.clang] + flags + extra + [src, '-o', o], capture_output=True, text=True, errors='replace')
         if r.returncode:
             log('could not compile %s:\n%s' % (src, (r.stdout + r.stderr)[-2000:]))
             return 1

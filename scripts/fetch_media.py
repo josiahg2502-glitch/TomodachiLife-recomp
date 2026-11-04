@@ -353,7 +353,7 @@ def check_codecs(verbose=True):
         try:
             r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
                                 '(Get-AppxPackage -Name %s | Measure-Object).Count' % pkg],
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, errors='replace', timeout=60)
             res[pkg] = int((r.stdout or '0').strip() or 0) > 0 if r.returncode == 0 else None
         except (OSError, ValueError, subprocess.TimeoutExpired):
             res[pkg] = None

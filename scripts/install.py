@@ -192,7 +192,7 @@ def stream(cmd, env=None, cwd=None, on_line=None, hb=None, prefix=''):
     e = dict(os.environ if env is None else env)
     e.setdefault('PYTHONUNBUFFERED', '1')
     e.setdefault('PYTHONIOENCODING', 'utf-8')
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e, cwd=cwd, text=True, encoding='utf-8',
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e, cwd=cwd, text=True, errors='replace', encoding='utf-8',
                          errors='replace', bufsize=1)
     q = queue.Queue()
 
@@ -767,7 +767,7 @@ def probe_runtime(dump, runtime, extra):
 def msvc_found():
     vsw = os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft Visual Studio', 'Installer', 'vswhere.exe')
     return bool(os.path.exists(vsw) and subprocess.run([vsw, '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-                                                        '-property', 'installationPath'], capture_output=True, text=True).stdout.strip())
+                                                        '-property', 'installationPath'], capture_output=True, text=True, errors='replace').stdout.strip())
 
 
 def msvc_stop(why):

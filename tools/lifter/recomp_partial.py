@@ -115,7 +115,7 @@ def main():
     with open(rsp, 'w') as f:
         f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
     shim = os.path.join(HERE, os.environ.get('RECOMP_SHIM', 'game_shim_eh.c'))
-    r = subprocess.run([build_opt.build.CLANG, '-shared', '-O1', '-w', '-I', HERE, '-I', src_gen, shim, '@' + rsp, '-o', dll], capture_output=True, text=True)
+    r = subprocess.run([build_opt.build.CLANG, '-shared', '-O1', '-w', '-I', HERE, '-I', src_gen, shim, '@' + rsp, '-o', dll], capture_output=True, text=True, errors='replace')
     print((r.stdout + r.stderr)[-3000:])
     print('link %s: exit %d, %d objects (%d of them re-compiled), %.0f MB, %.0fs' % (os.path.basename(dll), r.returncode, len(objs), len(mine), os.path.getsize(dll) / 1048576.0 if os.path.exists(dll) else 0, time.time() - t2))
     print('total %.0fs' % (time.time() - t0))
