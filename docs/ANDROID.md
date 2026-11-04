@@ -56,6 +56,12 @@ the app is removed.
 
 The first start prepares the game's shaders for your GPU and takes longer; later starts are quick.
 
+File mods go in `TomodachiLife/mods/<mod name>/romfs/...` ([MODDING.md](MODDING.md)). **PC Settings** opens by holding **-** and
+**+** together for a second; **Save now** is there too.
+
+To update: build the app again from the new release on the PC (the two commands above) and install it over the old one.
+Saves stay.
+
 ## Troubleshooting
 
 - The log of the last start is `Android/data/org.tomodachirecomp.game/files/last_run.log` on the device's storage:

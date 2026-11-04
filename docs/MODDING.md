@@ -54,4 +54,5 @@ clang -shared -fPIC -O2 -Iruntime -o plugin.so plugin.c
 ```
 
 A plugin runs with the game's rights and on its threads: only install plugins you trust. The Android version does not load
-plugins (Android does not allow code from a writable folder); its file mods work as above, in the app's `files/mods` folder.
+plugins (Android does not allow code from a writable folder); its file mods work as above, in the `mods` folder beside
+`game` (`TomodachiLife/mods`).

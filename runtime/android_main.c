@@ -144,6 +144,7 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char *argv[]) {
     snprintf(p, sizeof p, "%s/game/romfs", base); setenv("SSBU_ROMFS", p, 1);
     snprintf(p, sizeof p, "%s/fonts", base); setenv("SSBU_FONTS", p, 1);
     snprintf(p, sizeof p, "%s/userdata", base); mkdir(p, 0755); setenv("SSBU_USERDATA", p, 1);
+    snprintf(p, sizeof p, "%s/mods", base); mkdir(p, 0755); setenv("TOMO_MODS", p, 0);      /* (where a player can put them) */
     setenv("SSBU_RENDERER", "vk", 1);                 /* (the OpenGL renderer is Windows only) */
     setenv("SSBU_OS_CONSOLE_CORES", "1", 0);
     snprintf(p, sizeof p, "%s/cache", in); mkdir(p, 0755);
