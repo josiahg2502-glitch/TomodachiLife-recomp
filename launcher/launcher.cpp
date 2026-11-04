@@ -148,7 +148,7 @@ bool fetch(const wchar_t* url, const fs::path& file, const char* sha) {      // 
     return true;
 }
 
-int run(const std::wstring& cmd) {                         // a program writing into this process's output (the install log); its exit code
+int run(const std::wstring& cmd, const fs::path& dir = g_repo) {      // a program writing into this process's output (the install log); its exit code
     STARTUPINFOW si{};
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -157,7 +157,7 @@ int run(const std::wstring& cmd) {                         // a program writing 
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi{};
     std::wstring c = cmd;
-    if (!CreateProcessW(nullptr, c.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g_repo.wstring().c_str(), &si, &pi)) return -1;
+    if (!CreateProcessW(nullptr, c.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, dir.wstring().c_str(), &si, &pi)) return -1;
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -166,10 +166,17 @@ int run(const std::wstring& cmd) {                         // a program writing 
     return (int)code;
 }
 
-bool unzip(const fs::path& zip, const fs::path& dir) {     // Windows 10 1803 and later have tar.exe, which reads zips
+// Windows 10 1803 and later have tar.exe, which reads zips. It takes its path arguments through the code page, and a folder name
+// outside it failed: it gets no path, only dir as its working directory.
+bool unzip(const fs::path& zip, const fs::path& dir) {
     wchar_t sys[MAX_PATH];
     GetSystemDirectoryW(sys, MAX_PATH);
-    const int code = run(quote(fs::path(sys) / "tar.exe") + L" -xf " + quote(zip) + L" -C " + quote(dir));
+    std::error_code e;
+    const fs::path here = dir / "tomodachi_unpack.zip";
+    fs::copy_file(zip, here, fs::copy_options::overwrite_existing, e);
+    if (e) { say("Could not copy " + zip.filename().u8string() + " into " + dir.u8string() + ": " + e.message()); return false; }
+    const int code = run(quote(fs::path(sys) / "tar.exe") + L" -xf tomodachi_unpack.zip", dir);
+    fs::remove(here, e);
     if (code) say("Unpacking " + zip.filename().u8string() + " failed (tar.exe exit " + std::to_string(code) + "): this needs Windows 10 (1803 or later) or 11.");
     return code == 0;
 }

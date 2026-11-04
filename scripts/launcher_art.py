@@ -19,7 +19,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 
 import zstandard
 
@@ -142,15 +141,18 @@ def main():
         sys.exit('no %s: give the game folder (exefs/ and romfs/)' % path)
     with open(path, 'rb') as f:
         blob = zstandard.ZstdDecompressor().decompress(f.read(), max_output_size=1 << 30)
+    ui_fonts(game)
     bntx = sarc_file(blob, 'timg/__Combined.bntx')
     if not bntx:
         sys.exit('%s has no timg/__Combined.bntx' % path)
-    with tempfile.TemporaryDirectory() as tmp:
-        p = os.path.join(tmp, 'title.bntx')
-        with open(p, 'wb') as f:
-            f.write(bntx)
-        subprocess.run([bntx_png(), p, LOGO, os.path.join(WORK, 'title-logo.png')], check=True)
-    ui_fonts(game)
+    # (no paths on its command line: it reads them through the code page, and a folder name outside it failed)
+    tmp = os.path.join(WORK, 'title_logo_tmp.bntx')
+    with open(tmp, 'wb') as f:
+        f.write(bntx)
+    try:
+        subprocess.run([bntx_png(), os.path.basename(tmp), LOGO, 'title-logo.png'], check=True, cwd=WORK)
+    finally:
+        os.remove(tmp)
     try:
         make_icon(WORK)
     except ImportError:

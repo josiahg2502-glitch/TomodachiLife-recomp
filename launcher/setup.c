@@ -86,12 +86,12 @@ static int ask(const wchar_t *target) {
     return r == IDYES ? 1 : r == IDNO ? 2 : 0;
 }
 
-static int run_wait(wchar_t *cmd, DWORD *code) {
+static int run_wait(wchar_t *cmd, const wchar_t *dir, DWORD *code) {
     STARTUPINFOW si = {sizeof si};
     PROCESS_INFORMATION pi;
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return 0;
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, dir, &si, &pi)) return 0;
     WaitForSingleObject(pi.hProcess, INFINITE);
     GetExitCodeProcess(pi.hProcess, code);
     CloseHandle(pi.hThread);
@@ -99,32 +99,32 @@ static int run_wait(wchar_t *cmd, DWORD *code) {
     return 1;
 }
 
-/* the PAYLOAD resource into a temporary zip, unpacked into target by Windows' tar.exe (the zip's top folder dropped) */
+/* the PAYLOAD resource into a zip in target, unpacked by Windows' tar.exe (the zip's top folder dropped). tar.exe takes its path arguments
+ * through the code page, and a folder name outside it failed: it gets no path, only target as its working directory. */
 static int unpack(const wchar_t *target, wchar_t *err, size_t errn) {
     HRSRC r = FindResourceW(NULL, L"PAYLOAD", MAKEINTRESOURCEW(10) /* RT_RCDATA */);
     HGLOBAL g = r ? LoadResource(NULL, r) : NULL;
     const void *data = g ? LockResource(g) : NULL;
     const DWORD size = r ? SizeofResource(NULL, r) : 0;
     if (!data || !size) { swprintf(err, errn, L"This setup holds no files (it was not built completely)."); return 0; }
-    wchar_t tmp[MAX_PATH], zip[MAX_PATH], tar[MAX_PATH], cmd[3 * MAX_PATH + 64];
-    GetTempPathW(MAX_PATH, tmp);
-    swprintf(zip, MAX_PATH, L"%sTomodachiLifeSetup_%lu.zip", tmp, GetCurrentProcessId());
+    wchar_t name[64], zip[MAX_PATH + 64], tar[MAX_PATH], cmd[2 * MAX_PATH];
+    const int made = SHCreateDirectoryExW(NULL, target, NULL);
+    if (made != ERROR_SUCCESS && made != ERROR_ALREADY_EXISTS && made != ERROR_FILE_EXISTS) {
+        swprintf(err, errn, L"Could not make the folder %s (error %d). Choose another one.", target, made);
+        return 0;
+    }
+    swprintf(name, 64, L"TomodachiLifeSetup_%lu.zip", GetCurrentProcessId());
+    swprintf(zip, MAX_PATH + 64, L"%s\\%s", target, name);
     HANDLE f = CreateFileW(zip, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
     DWORD wrote = 0;
     const BOOL ok = f != INVALID_HANDLE_VALUE && WriteFile(f, data, size, &wrote, NULL) && wrote == size;
     if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
-    if (!ok) { swprintf(err, errn, L"Could not write %s (is the drive full?).", zip); DeleteFileW(zip); return 0; }
-    const int made = SHCreateDirectoryExW(NULL, target, NULL);
-    if (made != ERROR_SUCCESS && made != ERROR_ALREADY_EXISTS && made != ERROR_FILE_EXISTS) {
-        swprintf(err, errn, L"Could not make the folder %s (error %d). Choose another one.", target, made);
-        DeleteFileW(zip);
-        return 0;
-    }
+    if (!ok) { swprintf(err, errn, L"Could not write %s (is the folder writable and the drive not full?).", zip); DeleteFileW(zip); return 0; }
     GetSystemDirectoryW(tar, MAX_PATH);
     wcscat(tar, L"\\tar.exe");
-    swprintf(cmd, 3 * MAX_PATH + 64, L"\"%s\" -xf \"%s\" -C \"%s\" --strip-components=1", tar, zip, target);
+    swprintf(cmd, 2 * MAX_PATH, L"\"%s\" -xf %s --strip-components=1", tar, name);
     DWORD code = 1;
-    const int ran = run_wait(cmd, &code);
+    const int ran = run_wait(cmd, target, &code);
     DeleteFileW(zip);
     if (!ran) { swprintf(err, errn, L"Windows' tar.exe could not be started: this needs Windows 10 (1803 or later) or Windows 11."); return 0; }
     if (code) { swprintf(err, errn, L"Unpacking into %s failed (tar.exe exit %lu): is the folder writable and the drive not full?", target, code); return 0; }
