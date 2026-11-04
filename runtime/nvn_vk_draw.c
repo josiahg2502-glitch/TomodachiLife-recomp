@@ -270,7 +270,7 @@ static struct {
     VkCommandBuffer cmd;
     /* stream ring */
     VkBuffer ring; VMem ring_mem; uint64_t ring_pos, ring_size; uint32_t gen;
-    struct { uint64_t addr, size, off; uint32_t gen; } acache[8192];
+    struct { uint64_t addr, size, off, stamp; LONG64 wraps; uint32_t gen, kgen; } acache[8192];      /* stamp 0: this batch only */
     VkBuffer zero; VMem zero_mem;
     /* pass */
     int in_pass, pass_w, pass_h;
@@ -478,21 +478,46 @@ static uint64_t c2_ring(int s) {
 }
 static int g_dprof;                                /* SSBU_VK_DRAWPROF (draw_prepare): also the stream ring's part of it */
 static LONG64 g_dprof_snap, g_dprof_copy, g_dprof_bytes, g_dprof_hits, g_dprof_puts;
+/* Kept across batches, as OpenGL's arena_put keeps them: a range stays in the ring, until it wraps, while write watch says no
+ * page of it was written since it was copied (the scan at each submission stamps what the game wrote, nvn_front_ww_note what
+ * this thread wrote). Without it every batch copied every range: ~20 MB a frame on the 70-Mii title. Memory that is not
+ * write-watched (Linux before 6.7, Android) is copied once per batch, as before. SSBU_VK_RINGKEEP=0 (2: in-run A/B, off in
+ * the odd 300-frame windows): per batch only. */
+uint64_t nvn_front_range_keep(uint64_t addr, uint64_t size);
+uint64_t nvn_front_ww_stamp(void);
+void nvn_front_ww_note(uint64_t addr, uint64_t size);
+static uint32_t g_ring_kgen;                       /* raised when this thread wrote guest memory somewhere it cannot name */
+static LONG64 g_dprof_kept;
 static uint64_t ring_put(uint64_t addr, uint64_t size) {
-    unsigned h = (unsigned)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 2654435761u) >> 19;
+    static int mode = -1;
+    if (mode < 0) mode = getenv("SSBU_VK_RINGKEEP") ? atoi(getenv("SSBU_VK_RINGKEEP")) : 1;
+    const unsigned h = (unsigned)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 2654435761u) >> 19;
+    unsigned pick = 8192, found = 8192;
     if (g_dprof > 0) g_dprof_puts++;
     for (int probe = 0; probe < 8; probe++) {
-        unsigned i = (h + (unsigned)probe) & 8191;
-        if (R.acache[i].gen == R.gen && R.acache[i].addr == addr && R.acache[i].size == size) { if (g_dprof > 0) g_dprof_hits++; return R.acache[i].off; }
-        if (R.acache[i].gen != R.gen) { h = i; break; }
+        const unsigned i = (h + (unsigned)probe) & 8191;
+        if (R.acache[i].addr == addr && R.acache[i].size == size) {
+            if (R.acache[i].gen == R.gen) { if (g_dprof > 0) g_dprof_hits++; return R.acache[i].off; }
+            found = i;
+            break;
+        }
+        if (pick == 8192 && R.acache[i].gen != R.gen && (!R.acache[i].stamp || R.acache[i].wraps != R.ring_wraps || R.acache[i].kgen != g_ring_kgen)) pick = i;
     }
     LONG64 t0 = g_dprof > 0 ? tk() : 0;
     const uint8_t *cp = nvn_front_snap_copy(addr, size);      /* the game rewrote it after the submission: what it held then */
+    const uint64_t now = !cp && (mode == 1 || (mode == 2 && !((nvn_front_frame_next() / 300) & 1))) ? nvn_front_range_keep(addr, size) : 0;
     LONG64 t1 = g_dprof > 0 ? tk() : 0;
+    if (found < 8192 && now && R.acache[found].stamp && now <= R.acache[found].stamp && R.acache[found].wraps == R.ring_wraps && R.acache[found].kgen == g_ring_kgen) {
+        R.acache[found].gen = R.gen;
+        if (g_dprof > 0) { g_dprof_kept++; g_dprof_snap += t1 - t0; }
+        return R.acache[found].off;
+    }
+    const unsigned to = found < 8192 ? found : pick < 8192 ? pick : h & 8191;
+    const uint64_t stamp = now ? nvn_front_ww_stamp() : 0;      /* before it is read: a write after this gets a larger stamp */
     uint64_t off = ring_raw(cp ? cp : P(addr), size);
     if (g_dprof > 0) { g_dprof_snap += t1 - t0; g_dprof_copy += tk() - t1; g_dprof_bytes += (LONG64)size; }
-    h &= 8191;
-    R.acache[h].addr = addr; R.acache[h].size = size; R.acache[h].off = off; R.acache[h].gen = R.gen;
+    R.acache[to].addr = addr; R.acache[to].size = size; R.acache[to].off = off; R.acache[to].gen = R.gen;
+    R.acache[to].stamp = stamp; R.acache[to].wraps = R.ring_wraps; R.acache[to].kgen = g_ring_kgen;
     return off;
 }
 
@@ -2456,6 +2481,7 @@ static void cb_keep_back(CB *c, const uint8_t *src) {      /* src: the bytes in 
 #ifdef R1_MARK
     { void r1_wrote(uint64_t, uint64_t); r1_wrote(c->addr, c->size); }      /* R1 (r1_state.c): compute results written back into guest memory are marked */
 #endif
+    nvn_front_ww_note(c->addr, c->size);
     if (!c->snap) memcpy(P(c->addr), src ? src : (const uint8_t *)c->mem.map, (size_t)c->size);
     else if (src) {
         uint64_t *g = P(c->addr);
@@ -2515,7 +2541,7 @@ static void cb_land(int midbatch) {                /* the GPU has finished every
         if (g_cb_keep <= 0 && c->dirty) { void r1_wrote(uint64_t, uint64_t); r1_wrote(c->addr, c->size); }      /* R1 (r1_state.c): the copy-back below is marked */
 #endif
         if (g_cb_keep > 0) { cg_unguard(i); cb_keep_back(c, c->mid_stg ? (const uint8_t *)c->stg_mem.map : NULL); c->stale = 0; }      /* mid_stg: cb_sync had the GPU copy it into ordinary memory (V 2026-10-21) */
-        else if (c->dirty && !c->snap) { memcpy(P(c->addr), c->mem.map, (size_t)c->size); R.cb_bytes += (LONG64)c->size; }
+        else if (c->dirty && !c->snap) { nvn_front_ww_note(c->addr, c->size); memcpy(P(c->addr), c->mem.map, (size_t)c->size); R.cb_bytes += (LONG64)c->size; }
         else if (c->dirty) {
             /* Session 5: the copy-back is DEFERRED (up to the next batch), so the guest may have written into the range since
              * the CB was filled. Only what compute changed goes back: a word the guest changed meanwhile (guest != snapshot)
@@ -3184,9 +3210,9 @@ static void dprof_draw_done(void) {
     for (int i = 0; i < 7; i++) all += (double)g_dprof_t[i] * us;
     printf("nvn_vk_drawprof: us per draw over %lld draws: stages %.2f, textures %.2f, buffers %.2f, pass+pipeline %.2f, vertex input %.2f, descriptors %.2f, push constants %.2f; all %.2f\n",
            (long long)g_dprof_n, g_dprof_t[0] * us, g_dprof_t[1] * us, g_dprof_t[2] * us, g_dprof_t[3] * us, g_dprof_t[4] * us, g_dprof_t[5] * us, g_dprof_t[6] * us, all);
-    printf("nvn_vk_drawprof:   stream ring per draw: %.1f ranges (%.1f found in this batch's cache), %.0f bytes copied; snapshot look-ups %.2f us, copies %.2f us (with any ring-wrap wait)\n",
-           (double)g_dprof_puts / (double)g_dprof_n, (double)g_dprof_hits / (double)g_dprof_n, (double)g_dprof_bytes / (double)g_dprof_n, g_dprof_snap * us, g_dprof_copy * us);
-    memset(g_dprof_t, 0, sizeof g_dprof_t); g_dprof_n = 0; g_dprof_snap = g_dprof_copy = g_dprof_bytes = g_dprof_hits = g_dprof_puts = 0;
+    printf("nvn_vk_drawprof:   stream ring per draw: %.1f ranges (%.1f found in this batch's cache, %.2f kept from an earlier batch), %.0f bytes copied; look-ups %.2f us, copies %.2f us (with any ring-wrap wait)\n",
+           (double)g_dprof_puts / (double)g_dprof_n, (double)g_dprof_hits / (double)g_dprof_n, (double)g_dprof_kept / (double)g_dprof_n, (double)g_dprof_bytes / (double)g_dprof_n, g_dprof_snap * us, g_dprof_copy * us);
+    memset(g_dprof_t, 0, sizeof g_dprof_t); g_dprof_n = 0; g_dprof_snap = g_dprof_copy = g_dprof_bytes = g_dprof_hits = g_dprof_puts = g_dprof_kept = 0;
 }
 /* At exit (vk_shutdown_at_exit): draws still queued are left out. On lavapipe a batch of new pipelines held the render
  * thread for minutes and the shutdown job behind it was never reached (every WSL run killed by its timeout, 2026-11-03). */
@@ -3970,9 +3996,9 @@ static void exec(const Cmd *m, int depth) {
     case OP_IMAGESTRIDE: R.image_stride = (int64_t)a[0]; break;
     case OP_BARRIER: if (a[0] & 0x10) nvn_front_barrier_texmem(); break;      /* ordering bits: every draw is recorded in order; feedback is handled at the draw */
     case OP_DISPATCH: { LONG64 t0 = tk(); compute_dispatch((uint32_t)a[0], (uint32_t)a[1], (uint32_t)a[2]); g_tm[2] += tk() - t0; break; }
-    case OP_COPY_BUF_BUF: if (cb_touches(a[0], a[2]) || cb_touches(a[1], a[2])) { CB_WHY(CBW_GCMD, a[0], a[2]); cb_sync(); } if (g_cb_nkept) { cb_kept_range(a[0], a[2], 3); cb_kept_range(a[1], a[2], 3); } if (a[0] && a[1]) memmove(P(a[1]), P(a[0]), (size_t)a[2]); R.gen++; break;      /* guest memory is read / written: what compute wrote must be there (as OpenGL's compute_flush) */
-    case OP_UPDATE_UBO: if (cb_touches(a[0] + a[2], a[3])) { CB_WHY(CBW_GCMD, a[0] + a[2], a[3]); cb_sync(); }      /* only over what compute writes (OpenGL lands only overlapping ranges too): 2 waits for the GPU a frame on the island, 5 ms */ if (g_cb_nkept) cb_kept_range(a[0] + a[2], a[3], 3); if (a[0]) memcpy((uint8_t *)P(a[0]) + a[2], blob, (size_t)a[3]); R.gen++; break;
-    case OP_CLEAR_BUF: if (cb_touches(a[0], a[1])) { CB_WHY(CBW_GCMD, a[0], a[1]); cb_sync(); } if (g_cb_nkept) cb_kept_range(a[0], a[1], 3); if (a[0]) { uint32_t v = (uint32_t)a[2]; for (uint64_t i = 0; i + 4 <= a[1]; i += 4) memcpy((uint8_t *)P(a[0]) + i, &v, 4); } R.gen++; break;
+    case OP_COPY_BUF_BUF: if (cb_touches(a[0], a[2]) || cb_touches(a[1], a[2])) { CB_WHY(CBW_GCMD, a[0], a[2]); cb_sync(); } if (g_cb_nkept) { cb_kept_range(a[0], a[2], 3); cb_kept_range(a[1], a[2], 3); } if (a[0] && a[1]) { memmove(P(a[1]), P(a[0]), (size_t)a[2]); nvn_front_ww_note(a[1], a[2]); } R.gen++; break;      /* guest memory is read / written: what compute wrote must be there (as OpenGL's compute_flush) */
+    case OP_UPDATE_UBO: if (cb_touches(a[0] + a[2], a[3])) { CB_WHY(CBW_GCMD, a[0] + a[2], a[3]); cb_sync(); }      /* only over what compute writes (OpenGL lands only overlapping ranges too): 2 waits for the GPU a frame on the island, 5 ms */ if (g_cb_nkept) cb_kept_range(a[0] + a[2], a[3], 3); if (a[0]) { memcpy((uint8_t *)P(a[0]) + a[2], blob, (size_t)a[3]); nvn_front_ww_note(a[0] + a[2], a[3]); } R.gen++; break;
+    case OP_CLEAR_BUF: if (cb_touches(a[0], a[1])) { CB_WHY(CBW_GCMD, a[0], a[1]); cb_sync(); } if (g_cb_nkept) cb_kept_range(a[0], a[1], 3); if (a[0]) { uint32_t v = (uint32_t)a[2]; for (uint64_t i = 0; i + 4 <= a[1]; i += 4) memcpy((uint8_t *)P(a[0]) + i, &v, 4); nvn_front_ww_note(a[0], a[1]); } R.gen++; break;
     case OP_CLEARCOLOR: {
         unsigned i = (unsigned)a[0] & 7, mask = (unsigned)a[2] & 15;
         if (!R.have_targets || R.render_off || (int)i >= R.ncol || !R.col[i].tex) break;
@@ -4053,7 +4079,7 @@ static void exec(const Cmd *m, int depth) {
         CB_WHY(CBW_TEX, a[3], 0); cb_sync();
         if (g_cb_nkept) cb_kept_all(3);
         read_region(t, &v, r, P(a[3]), (int64_t)a[5], (int64_t)a[6]);     /* PR #14 (xtlg511): the strides of its own command buffer */
-        R.gen++;                                  /* guest memory changed: ranges are streamed again */
+        R.gen++; g_ring_kgen++;                   /* guest memory changed: ranges are streamed again */
         break;
     }
     case OP_COPY_TEX_TEX: {

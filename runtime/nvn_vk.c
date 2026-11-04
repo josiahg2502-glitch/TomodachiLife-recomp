@@ -170,11 +170,12 @@ static int vk_ok(const char *what, VkResult r) {
     return 0;
 }
 
-/* An NVN operation this back end does not implement yet: named, and the game stops (exit code 7). */
+/* An NVN operation this back end does not implement: named once and left out; a wrong picture beats a game that closes on the
+ * player, and Vulkan is every non-NVIDIA card's renderer (2026-11-03). SSBU_VK_MISSING=stop (tests): the game stops (exit code 7). */
 void nvn_vk_missing(const char *what) {
     static const char *seen[64];
     static int nseen;
-    if (g_vk_missing_warn < 0) { const char *e = getenv("SSBU_VK_MISSING"); g_vk_missing_warn = e && !strcmp(e, "warn"); }
+    if (g_vk_missing_warn < 0) { const char *e = getenv("SSBU_VK_MISSING"); g_vk_missing_warn = !(e && !strcmp(e, "stop")); }
     InterlockedIncrement64(&g_vk_missing_calls);
     if (!g_vk_missing_warn) {
         printf("nvn_vk: NOT IMPLEMENTED in the Vulkan back end: %s. The game stops here (plan\\phases\\V1_vulkan.md; SSBU_RENDERER=gl is the working renderer).\n", what);
