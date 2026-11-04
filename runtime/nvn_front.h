@@ -63,6 +63,9 @@ typedef struct Tex {
     long long frz_2d, frz_lead2d, frz_rf;     /* frozen_scene: last frame with a 2D draw before its 3D ones; last 3D frame that began with 2D; last restore */
     uint32_t dec_gen; int dec_pending;     /* nvn_gl.c dec_*: bumped by each software-decoded upload; its levels still with the decoder thread */
     uint8_t cpu_read, game_inval;          /* nvn_gl.c tex_copy_back: in memory the CPU reads (not COMPRESSIBLE); the game invalidates it itself */
+    uint8_t cold_n, cold_skip;             /* nvn_front_tex_changed without write watch: checks it stayed the same (255: it changes in place), checks still to skip */
+    uint64_t *stripes; uint8_t stripe_k;   /* tex_stripes_changed: a large linear texture, the hash of each part of its rows; the part to look at next */
+    int up_y, up_h;                        /* ... the rows to upload (up_h 0: all of it) */
 } Tex;
 Tex *nvn_front_tex_first(void);            /* the newest texture record; ->all_next = the one made before it (records are never freed) */
 typedef struct { Tex *tex; View view; } TexPoolEnt;

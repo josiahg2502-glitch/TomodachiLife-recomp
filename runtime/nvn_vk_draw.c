@@ -941,7 +941,7 @@ static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void
     free(tmp);
     pass_end(); cmd_begin();
     if (vt->rs) {                                  /* track O: the texture's own memory holds the game's size */
-        if (!vt->is3d && (uint32_t)layer < (uint32_t)vt->layers) rs_upload(vt, level, layer, off, row_stride && vt->bpb ? (uint32_t)(row_stride / vt->bpb) : 0, 0, 0, 0, w, h);
+        if (!vt->is3d && (uint32_t)layer < (uint32_t)vt->layers) rs_upload(vt, level, layer, off, row_stride && vt->bpb ? (uint32_t)(row_stride / vt->bpb) : 0, 0, 0, t->up_y, w, h);
         R.upload_bytes += (LONG64)size;
         return;
     }
@@ -951,6 +951,7 @@ static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void
     c.bufferOffset = off;
     if (row_stride && vt->bpb) c.bufferRowLength = (uint32_t)(row_stride / vt->bpb);
     c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; c.imageSubresource.mipLevel = (uint32_t)level; c.imageSubresource.baseArrayLayer = vt->is3d ? 0 : (uint32_t)layer; c.imageSubresource.layerCount = 1;
+    c.imageOffset.y = t->up_y;
     c.imageExtent.width = (uint32_t)w; c.imageExtent.height = (uint32_t)h; c.imageExtent.depth = (uint32_t)(vt->is3d ? d : 1);
     if (!vt->is3d && (uint32_t)layer >= (uint32_t)vt->layers) return;
     CKPT_OP("upload (image, level, layer, w)", vt->img, level, layer, w);

@@ -10135,6 +10135,35 @@ int nvn_front_tex_levels(const Tex *t) {
     while ((maxdim >> maxl) > 0) maxl++;
     return b->samples > 1 ? 1 : levels > maxl ? maxl : levels;
 }
+/* A large linear texture the CPU writes (the font's 16 MB glyph atlas, 4096x4096 R8, looked at twice a frame): its rows in parts
+ * with a hash each. Without write watch one part is hashed per look (hashing it all was nearly all of the 33 MB a frame on
+ * Android): a change is seen at most TEX_STRIPES looks (4 frames) later. Then only the rows that changed go up, not 16 MB.
+ * -1: not such a texture; 0: nothing to upload; 1: upload (t->up_y, t->up_h). */
+#define TEX_STRIPES 8
+static int tex_stripes_changed(Tex *t, const uint8_t *src, const Fmt *f, int watched) {
+    const TexBuilder *b = &t->b;
+    size_t stride = b->stride ? (size_t)b->stride : (size_t)b->width * (size_t)f->bpb, rows = (size_t)b->height / TEX_STRIPES, part = rows * stride, all = stride * (size_t)b->height;
+    if (!(b->flags & 0x10) || t->data_size < (1u << 20) || !rows || f->kind == 4 || all > t->data_size) return -1;
+    if (!t->stripes && !(t->stripes = calloc(TEX_STRIPES, sizeof t->stripes[0]))) return -1;
+    int whole = !t->uploaded, lo = TEX_STRIPES, hi = -1;
+    if (!whole && !watched && !t->dirty) {
+        int k = t->stripe_k++ % TEX_STRIPES;
+        size_t n = k == TEX_STRIPES - 1 ? all - k * part : part;
+        g_pf_hash_bytes += (LONG64)n;
+        if (mem_hash(src + k * part, n, 1) == t->stripes[k]) return 0;
+    }
+    for (int k = 0; k < TEX_STRIPES; k++) {
+        size_t n = k == TEX_STRIPES - 1 ? all - k * part : part;
+        uint64_t h = mem_hash(src + k * part, n, 1);
+        if (h != t->stripes[k]) { t->stripes[k] = h; if (k < lo) lo = k; hi = k; }
+    }
+    g_pf_hash_bytes += (LONG64)all;
+    t->ww_hashed = watched; t->dirty = 0;
+    if (whole) { t->uploaded = 1; t->up_y = t->up_h = 0; return 1; }
+    if (hi < 0) return 0;
+    t->up_y = lo * (int)rows; t->up_h = hi == TEX_STRIPES - 1 ? b->height - t->up_y : (hi - lo + 1) * (int)rows;
+    return 1;
+}
 /* The decision of tex_sync without its OpenGL calls (the same rule, the same fields of Tex). */
 int nvn_front_tex_changed(Tex *t) {
     Fmt f;
@@ -10150,12 +10179,22 @@ int nvn_front_tex_changed(Tex *t) {
         if (t->uploaded && !t->dirty && t->ww_hashed && newest <= t->ww_seen) { g_ww_clean++; pf_add(PF_TEXHASH, pf0); return 0; }
         t->ww_seen = newest;
         g_ww_dirty++;
-    } else g_ww_unwatched++;
+    } else {
+        g_ww_unwatched++;
+        /* No write watch (Android, Linux before 6.7): every texture of every batch was hashed, 37 MB a frame at the title. One that
+         * never changed is looked at less and less often, up to every 9th time: its first change shows that much later at worst.
+         * One that did change (a glyph atlas, say) is looked at every time from then on. */
+        if (t->uploaded && !t->dirty && t->cold_skip) { t->cold_skip--; pf_add(PF_TEXHASH, pf0); return 0; }
+    }
+    int st = tex_stripes_changed(t, src, &f, newest != 0);
+    if (st >= 0) { pf_add(PF_TEXHASH, pf0); if (st) g_st.tex_uploads++; return st; }
     uint64_t h = mem_hash(src, t->data_size, newest != 0 || (t->b.flags & 0x10) != 0);
     int same = t->uploaded && !t->dirty && h == t->hash && (!newest || t->ww_hashed);
     t->ww_hashed = newest != 0;
     pf_add(PF_TEXHASH, pf0); g_pf_hash_bytes += (LONG64)t->data_size;
-    if (same) return 0;
+    if (same) { if (t->cold_n < 8) t->cold_n++; t->cold_skip = t->cold_n == 255 ? 0 : t->cold_n; return 0; }
+    if (t->uploaded) t->cold_n = 255;
+    t->cold_skip = 0;
     t->hash = h; t->uploaded = 1; t->dirty = 0;
     g_st.tex_uploads++;
     return 1;
@@ -10171,8 +10210,11 @@ int nvn_front_tex_read(Tex *t, int decode, nvn_front_put_fn *put) {
     if (b->flags & 0x10) {                         /* linear: plain rows with a stride */
         int64_t stride = b->stride ? b->stride : (int64_t)b->width * f.bpb;
         if (f.kind == 4) return 0;
-        put(t, 0, 0, b->width, b->height, 1, src, (size_t)stride * (size_t)b->height, 0, stride);
-        g_st.tex_bytes += stride * b->height;
+        int y = t->up_h ? t->up_y : 0, h = t->up_h ? t->up_h : b->height;
+        t->up_y = y;                               /* (vt_put: where the rows go) */
+        put(t, 0, 0, b->width, h, 1, src + stride * y, (size_t)stride * (size_t)h, 0, stride);
+        t->up_y = t->up_h = 0;
+        g_st.tex_bytes += stride * h;
         tex_release_packaged(t);
         return 1;
     }
