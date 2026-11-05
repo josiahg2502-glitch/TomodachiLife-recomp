@@ -1428,7 +1428,8 @@ static void tex_sync_a(Tex *t, int async) {
     if (t->checked == g_serial) return;
     t->checked = g_serial;
     const uint8_t *src = tex_source(t);
-    if (t->gpu_written || !src || t->b.samples > 1 || !fmt_get(t->b.format, &f) || (f.kind >= 1 && f.kind <= 3)) return;
+    if ((t->gpu_written && !t->cb_landed) || !src || t->b.samples > 1 || !fmt_get(t->b.format, &f) || (f.kind >= 1 && f.kind <= 3)) return;
+    if (t->gpu_written && f.kind != 4) return;     /* (compressed, so no render target: after a copy into it only the CPU changes it. Done in the face paint editor encodes the new paint into its BC1 copy from the CPU, issue #36) */
     if (!t->b.packaged && t->limit && src + t->data_size > t->limit) return;
     if (t->b.packaged && t->uploaded) return;      /* packaged data is consumed once at creation */
     LONG64 pf0 = pf_now();
@@ -1439,7 +1440,7 @@ static void tex_sync_a(Tex *t, int async) {
         t->ww_seen = newest;
         g_ww_dirty++;
     } else g_ww_unwatched++;
-    int full = newest != 0 || (t->b.flags & 0x10) != 0;
+    int full = newest != 0 || (t->b.flags & 0x10) != 0 || t->cb_landed;
     uint64_t h = mem_hash(src, t->data_size, full);
     int same = t->uploaded && !t->dirty && h == t->hash && (!newest || t->ww_hashed);
     t->ww_hashed = newest != 0;                    /* t->hash is the hash of every word (needed to compare the next time) */
@@ -2177,7 +2178,7 @@ static void rb_land_at(int wait, int line) {        /* land the read-backs the G
             TexLayout L;
             tex_lay(&q->tex->b, &L);
             tex_swizzle_level(&L, q->level, g_rbs[q->slot].map, P(q->addr));
-            q->tex->hash = mem_hash(q->tex->mem, q->tex->data_size, q->tex->ww_hashed || (q->tex->b.flags & 0x10) != 0);
+            q->tex->hash = mem_hash(q->tex->mem, q->tex->data_size, 1); q->tex->ww_hashed = 1; q->tex->cb_landed = 1;
         } else if (q->size) gpu_merge(P(q->addr), g_rbs[q->slot].map, q->snap, (size_t)q->size);
         ww_note(q->addr, q->size);
         free(q->snap); q->snap = NULL;
@@ -6085,7 +6086,7 @@ static void rs_get(Tex *t, int level, int x, int y, int w, int h, GLenum fo, GLe
 static void blit_tex(Tex *src, const View *sv, const int *sr, Tex *dst, const View *dv, const int *dr, int linear) {
     if (rtlog_match(dst)) printf("rtlog: frame %lld copy into gl %u mem %p from %dx%d format 0x%x gl %u mem %p\n", (long long)g_st.frames + 1, dst->o.gl, (void *)dst->mem, src->b.width, src->b.height, src->b.format, src->o.gl, (void *)src->mem);
     tex_sync(src); tex_sync(dst);
-    dst->gpu_written = 1; dst->rt_gen++;              /* view copies of it are refreshed (view_copies_refresh) */
+    dst->gpu_written = 1; dst->cb_landed = 0; dst->rt_gen++;      /* view copies of it are refreshed (view_copies_refresh) */
     int s2[6], d2[6];
     if (src->rw || dst->rw) {                         /* resolution scale: the game's rectangles on the storage of each */
         memcpy(s2, sr, sizeof s2); memcpy(d2, dr, sizeof d2);
@@ -6787,7 +6788,7 @@ static void exec(const Cmd *m, int depth) {
         else if (t->b.target != 2) layer += r[2];
         tex_put(t, &f, level, layer, r[0], r[1], r[2], r[3], r[4], r[5] > 0 ? r[5] : 1, P(a[0]));
         glPixelStorei(GL_UNPACK_ROW_LENGTH_, 0); glPixelStorei(0x806E, 0);
-        t->gpu_written = 1; t->uploaded = 1; t->rt_gen++;
+        t->gpu_written = 1; t->cb_landed = 0; t->uploaded = 1; t->rt_gen++;
         g_st.copies++;
         break;
     }
@@ -8884,6 +8885,27 @@ static void tex_raw_storage_class(Ctx *c) { NvnSdkTexBuilder r; uint32_t v = 0; 
 static void tex_get_storage_size(Ctx *c) { NvnSdkTexBuilder r; uint32_t v = 0; if (OWN_LAYOUT) { Tex *t = hobj(A0, K_TEX); RET(t ? own_size(&t->b) : 0); return; } if (tex_sdk(c, &r, "nvnTextureGetStorageSize")) nvn_sdk_tex_storage_size(c, &r, &v); RET(v); }
 static void tex_sparse_layout(Ctx *c) { uint64_t out = A1; uint32_t v[4] = {0, 0, 0, 0}; NvnSdkTexBuilder r; if (OWN_LAYOUT) { if (out) memset(P(out), 0, 16); return; } if (tex_sdk(c, &r, "nvnTextureGetSparseTileLayout")) nvn_sdk_tex_sparse_layout(c, &r, v); if (out) memcpy(P(out), v, 16); }
 
+/* nvnTextureWriteTexels stores into the texture's memory on the console, and the game reads it from there: it paints a face
+ * paint's canvas on the CPU and saves it from that memory, which stayed empty (or the old paint) here, so a paint could not
+ * be edited again (issue #36). Memory the CPU reads only (Tex.cpu_read); the texels still go to the GPU as before. */
+static void tex_write_memory(Tex *t, const WriteJob *j) {
+    TexLayout L;
+    if (!t->cpu_read || !t->mem || t->b.packaged || t->b.samples > 1 || (t->b.flags & 0x10) || t->b.target == 2) return;
+    tex_lay(&t->b, &L);
+    const int *r = j->region;
+    int level = j->has_view && (j->view.set & 0x81) == 0x81 ? j->view.lvl0 : 0, layer = j->has_view && (j->view.set & 0x82) == 0x82 ? j->view.lay0 : 0;
+    if (t->b.target == 4 || t->b.target == 9 || t->b.target == 8) layer += r[2];
+    if (level < 0 || level >= L.levels || layer < 0 || layer >= L.layers || r[0] < 0 || r[1] < 0) return;
+    int bx = r[0] / L.bw, by = r[1] / L.bh, bw = (r[3] + L.bw - 1) / L.bw, bh = (r[4] + L.bh - 1) / L.bh, row = bw * L.bpb;
+    if (bx + bw > L.lvl_wb[level] || by + bh > L.lvl_hb[level]) return;
+    uint8_t *dst = (uint8_t *)(uintptr_t)tex_level_ptr(&L, t->mem, level, layer), *lin = malloc(L.lvl_linear_size[level]);
+    if (lin && !(t->limit && dst + L.lvl_size[level] > t->limit)) {
+        if (bw < L.lvl_wb[level] || bh < L.lvl_hb[level]) tex_deswizzle_level(&L, level, dst, lin);
+        for (int y = 0; y < bh; y++) memcpy(lin + (size_t)(by + y) * L.lvl_wb[level] * L.bpb + (size_t)bx * L.bpb, (const uint8_t *)j->data + (size_t)y * (j->row_stride ? j->row_stride : row), (size_t)row);
+        tex_swizzle_level(&L, level, lin, dst);
+    }
+    free(lin);
+}
 static void tex_write_texels(Ctx *c) {                 /* (texture, view, region, data) [, rowStride, imageStride] */
     Tex *t = hobj(A0, K_TEX);
     WriteJob j;
@@ -8893,6 +8915,7 @@ static void tex_write_texels(Ctx *c) {                 /* (texture, view, region
     if (A1) { memcpy(&j.view, P(A1), sizeof j.view); j.has_view = 1; }
     memcpy(j.region, P(A2), 24);
     if (strstr(hostfn_current_name(), "Strided")) j.row_stride = (int64_t)A4;
+    tex_write_memory(t, &j);
     gl_run(g_rb->write_texels, &j);
 }
 static void tex_flush_texels(Ctx *c) { Tex *t = hobj(A0, K_TEX); if (t) t->dirty = 1; }
@@ -10213,7 +10236,8 @@ int nvn_front_tex_changed(Tex *t) {
     if (t->checked == g_serial) return 0;
     t->checked = g_serial;
     const uint8_t *src = tex_source(t);
-    if (t->gpu_written || !src || t->b.samples > 1 || !fmt_get(t->b.format, &f) || (f.kind >= 1 && f.kind <= 3)) return 0;
+    if ((t->gpu_written && !t->cb_landed) || !src || t->b.samples > 1 || !fmt_get(t->b.format, &f) || (f.kind >= 1 && f.kind <= 3)) return 0;
+    if (t->gpu_written && f.kind != 4) return 0;
     if (!t->b.packaged && t->limit && src + t->data_size > t->limit) return 0;
     if (t->b.packaged && t->uploaded) return 0;
     LONG64 pf0 = pf_now();
@@ -10231,7 +10255,7 @@ int nvn_front_tex_changed(Tex *t) {
     }
     int st = tex_stripes_changed(t, src, &f, newest != 0);
     if (st >= 0) { pf_add(PF_TEXHASH, pf0); if (st) g_st.tex_uploads++; return st; }
-    uint64_t h = mem_hash(src, t->data_size, newest != 0 || (t->b.flags & 0x10) != 0);
+    uint64_t h = mem_hash(src, t->data_size, newest != 0 || (t->b.flags & 0x10) != 0 || t->cb_landed);
     int same = t->uploaded && !t->dirty && h == t->hash && (!newest || t->ww_hashed);
     t->ww_hashed = newest != 0;
     pf_add(PF_TEXHASH, pf0); g_pf_hash_bytes += (LONG64)t->data_size;
@@ -10305,7 +10329,7 @@ size_t nvn_front_tex_land(Tex *t, int level, int layer, const void *lin) {
     uint8_t *dst = (uint8_t *)tex_level_ptr(&L, t->mem, level, layer);
     if (t->limit && dst + L.lvl_size[level] > t->limit) return 0;
     tex_swizzle_level(&L, level, lin, dst);
-    t->hash = mem_hash(t->mem, t->data_size, t->ww_hashed || (t->b.flags & 0x10) != 0);
+    t->hash = mem_hash(t->mem, t->data_size, 1); t->ww_hashed = 1; t->cb_landed = 1;
     return L.lvl_linear_size[level];
 }
 int nvn_front_rt_cpu_format(int f) { return rt_cpu_format(f); }

@@ -138,6 +138,8 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 - Very large islands (30+ residents) run slowly on some PCs; we are working on it (issues #7, #18).
 - On some PCs the soft shadows under Miis and glowing things (face paint, street lamps) flicker in a three-frame cycle (issues #29,
   #34). It does not happen on our test PC yet: an F12 sample (below) from a PC where it does would help most.
+- Face paints made before 1.0.2 did not save their canvas: the face looks right, but the editor opens with an empty or older canvas, and
+  pressing Done there replaces the face with it (Quit keeps the face). Paints made from 1.0.2 on save it (issue #36).
 - Now and then a Mii's line shows without its voice (seen once in Mii News); the session log now records every line and
   voice, so please send `build\logs\play_*.log` with the time it happened.
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and
@@ -149,8 +151,8 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 When something goes wrong, the logs are in `build\logs` (**MORE > OPEN LOGS FOLDER**): the install's, and `play_*.log` for each
 game session. If the launcher says **the game closed with an error**, the line under it says why. `0x00000004` is a crash: please
 send that session's log and `tomodachi_play_crash.txt` from the same folder. `0x00000001`: it could not start, or something ended it from outside.
-**Flicker:** press **F12** while it happens. The game saves the next 8 pictures in `build\work\flicker` and describes the
-frames after them in the session log (the game pauses for that, 20 seconds at most); send both.
+**Flicker:** press **F12** while it happens (OpenGL renderer). The game saves the next 8 pictures in `build\work\flicker` and describes
+the frames after them in the session log (the game pauses for that, 20 seconds at most); send both.
 
 ## Building by hand
 

@@ -3709,6 +3709,7 @@ static void write_region(Tex *t, const View *vp, const int *r, const void *data,
     memset(&v, 0, sizeof v);
     if (vp) v = *vp;
     VTex *vt = vt_get2(t, 0);
+    t->cb_landed = 0;
     if (vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT || vt->decode || vt->expand) { nvn_vk_missing("CopyBufferToTexture / WriteTexels into a depth, ASTC-decoded or 3-component texture"); return; }
     int level = (v.set & 0x81) == 0x81 ? v.lvl0 : 0, layer = (v.set & 0x82) == 0x82 ? v.lay0 : 0, depth = r[5] > 0 ? r[5] : 1;
     if (t->b.target != 2 && t->b.target != 4 && t->b.target != 9 && t->b.target != 8) layer = 0; else if (t->b.target != 2) layer += r[2];
@@ -3875,7 +3876,7 @@ static void blit_tex(Tex *s, const View *sv, const int *sr, Tex *d, const View *
     if (s->alias_from) { vt_get(s); alias_refresh_vk(s, 0); }
     VTex *vs = vt_get(s), *vd = vt_get(d);
     VkImageBlit b;
-    d->gpu_written = 1;
+    d->gpu_written = 1; d->cb_landed = 0;
     const int same = vs == vd;                     /* a copy inside one texture (another level or layer): both ends in the GENERAL layout */
     const VkImageLayout sl = same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dl = same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     pass_end(); cmd_begin();

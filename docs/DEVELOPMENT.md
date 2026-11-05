@@ -164,6 +164,13 @@ picks this up:
   (driver 621.01) on either renderer, at midday, close up, with 8 and 70 residents. No discards in that scene; the frozen-scene "wrong" counter is 0 there too.
 - **Open: the busiest views (issue #7).** 7,300 draws a frame take the replay and the driver's thread about 15 ms each, and the view changing
   makes hundreds of new framebuffers. Freezes of 0.4-0.75 s came with 20-58 thousand page faults while the render thread waited in the driver.
+- **Open: compute programs with BAR.** 16 of the programs that run when the paint editor opens (`UpscaleMgr`, about 140,000 dispatches) use the
+  barrier instruction, which `mx_translate.c` does not translate, so they are skipped (`machine code not translated: instruction BAR`). The editor
+  still works; what they should add to its pictures is not known.
+- **The face paint editor (issue #36).** The game paints the canvas on the CPU and stores it with `nvnTextureWriteTexels`, then saves `*.canvas.zs` from
+  that texture's memory, so WriteTexels has to reach guest memory too (`tex_write_memory`, memory the CPU reads only). On Done it encodes the BC1 face on
+  the CPU into a texture a GPU copy may have written when Edit Mii opened: `cb_landed` lets a compressed texture take CPU writes again once that copy has
+  landed. Test: the recipe in "A lit face" from Residents, Edit face, `V`, 9x `d`, `Z`, `r`, `Z`, then `TOMO_MOUSE_TEST` strokes, `!` (Done).
 
 - **Renderer choice:** `gfx_options.renderer` (`auto` | `always_vulkan` | `opengl`), `nvn_renderer_is_vk`. `--renderer` prints
   the choice; `SSBU_GPU_VENDOR=other` simulates a non-NVIDIA card. AMD's OpenGL driver crashes or runs at 1 fps on this game.
