@@ -4903,6 +4903,16 @@ static void bind_handle_table(int s, GLenum target, GLuint index, int skip) {
 static LONG64 g_prev_frame_draws, g_drawlog_frame = -1, g_disp_frames, g_frame_dispatch;
 static int g_drawlog_mindisp_n;     /* with SSBU_DRAWLOG_MIN=<n>: the first frame from <frame> on that follows a frame of at least n draws */
 static LONG64 g_dl_force[2] = {-1, -1};      /* TOMO_FLICKER_PERIOD: the frames predicted to flicker, and the one before */
+/* F12's draw log is a light one (2026-11-05): the full log read the GPU back several times a draw (the samples-passed query,
+ * the centre texels), walked every texture record for overlaps and wrote ~25 KB a draw through the unbuffered stdout; at
+ * ~3300 draws a frame that was 75..195 ms a draw, the two frames ~8..20 minutes, and the game looked frozen (the user's two
+ * F12 sessions, both closed by hand in frame 1 of 2). Light: the draws' state only, stdout buffered meanwhile, and the log
+ * cut short after DL_LIGHT_BUDGET_MS. TOMO_FLICKER_FULL=1: the full log, as before. */
+#define DL_LIGHT_BUDGET_MS 20000
+static int g_dl_light, g_dl_buffered;
+static ULONGLONG g_dl_t0;                    /* the first draw of the light log */
+static LONG64 g_dl_draws;
+static int dl_light_now(void) { return g_dl_light && g_dl_force[0] >= 0 && (g_st.frames == g_dl_force[0] || g_st.frames == g_dl_force[1]); }
 static int g_dlrt_n;                        /* draws logged by SSBU_DRAWLOG_RT */
 /* SSBU_DRAWLOG_RT=<w>x<h>: the draws into a colour target of that size, in any frame (at most SSBU_DRAWLOG_RT_MAX, 300);
  * SSBU_DRAWLOG_RT_SHOT=1: also the target after each of them (dlrt_<n>.bmp and its alpha, dlrt_<n>_a.bmp) */
@@ -4915,7 +4925,13 @@ static int dlrt_match(void) {
 }
 static int drawlog_now(void) {
     static int drawlog = -2, mindraws, mindisp;
-    if (g_dl_force[0] >= 0 && (g_st.frames == g_dl_force[0] || g_st.frames == g_dl_force[1])) return 1;
+    if (g_dl_force[0] >= 0 && (g_st.frames == g_dl_force[0] || g_st.frames == g_dl_force[1])) {
+        if (!g_dl_light) return 1;
+        if (!g_dl_t0) g_dl_t0 = GetTickCount64();
+        if (GetTickCount64() - g_dl_t0 < DL_LIGHT_BUDGET_MS) return 1;
+        printf("flicker sample: draw log cut short after %lld draws in %d s (frame %lld)%c", (long long)g_dl_draws, DL_LIGHT_BUDGET_MS / 1000, (long long)g_st.frames, 10);
+        g_dl_force[0] = g_dl_force[1] = -1;    /* (no query is open: the light log takes none, drawlog_begin) */
+    }
     if (drawlog == -2) {
         drawlog = getenv("SSBU_DRAWLOG") ? atoi(getenv("SSBU_DRAWLOG")) : -1; mindraws = getenv("SSBU_DRAWLOG_MIN") ? atoi(getenv("SSBU_DRAWLOG_MIN")) : 0;
         mindisp = getenv("SSBU_DRAWLOG_MINDISP") ? atoi(getenv("SSBU_DRAWLOG_MINDISP")) : 0;
@@ -4947,10 +4963,10 @@ static int tsrep(uint64_t addr, long long frame, int insert) {      /* 1: report
     }
     return 0;
 }
-static void drawlog_begin(void) { if (!drawlog_now() || g_counter[1].active) return; if (!g_dbg_query) glGenQueries(1, &g_dbg_query); glBeginQuery(0x8914, g_dbg_query); }
+static void drawlog_begin(void) { if (dl_light_now() || !drawlog_now() || g_counter[1].active) return; if (!g_dbg_query) glGenQueries(1, &g_dbg_query); glBeginQuery(0x8914, g_dbg_query); }      /* (the light log: no query, its result waits for the GPU) */
 static void drawlog_end(void) {
     GLuint n = 0;
-    if (!drawlog_now() || g_counter[1].active) return;
+    if (dl_light_now() || !drawlog_now() || g_counter[1].active) return;
     glEndQuery(0x8914);
     glGetQueryObjectuiv(g_dbg_query, 0x8866, &n);
     printf("  -> %u samples passed\n", n);
@@ -5400,8 +5416,10 @@ static int draw_prepare(void) {
         GLfloat vp[4];
         GLint sc[4], dfunc = 0;
         GLboolean cm[4];
+        const int light = dl_light_now();   /* F12: no read-backs, no walks of every texture, a sampled texture once a stage */
         glGetFloatv(GL_VIEWPORT, vp); glGetIntegerv(GL_SCISSOR_BOX, sc); glGetBooleanv(GL_COLOR_WRITEMASK, cm); glGetIntegerv(GL_DEPTH_FUNC, &dfunc);
         g_dlrt_n++;
+        g_dl_draws += light;
         printf("draw: fbo %u (%dx%d) viewport %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d vs #%d fs #%d tag %08x depth %d(func %x) stencil %d blend %d cull %d alpha %d mask %d%d%d%d\n", S.fbo, S.fbo_w, S.fbo_h,
                vp[0], vp[1], vp[2], vp[3], sc[0], sc[1], sc[2], sc[3], S.prog[0] ? S.prog[0]->serial : -1, S.prog[1] ? S.prog[1]->serial : -1, S.prog[1] ? code_tag(&S.prog[1]->st[1]) : 0, glIsEnabled(GL_DEPTH_TEST), dfunc,
                glIsEnabled(GL_STENCIL_TEST), glIsEnabled(GL_BLEND), glIsEnabled(GL_CULL_FACE), S.alpha_func, cm[0], cm[1], cm[2], cm[3]);
@@ -5481,9 +5499,10 @@ static int draw_prepare(void) {
                 Tex *t = S.tpool && tid && tid < (uint32_t)S.tpool->count ? S.tpool->e[tid].tex : NULL;
                 static uint8_t seen[0x4000];
                 if (!t) continue;
+                if (light) { int dup = 0; for (int m = 0; m < n && !dup; m++) dup = S.nvn_tex[s][m] == S.nvn_tex[s][n]; if (dup) continue; }      /* (the "textures:" line lists every slot) */
                 printf("    texture %d: id 0x%x target %d format 0x%x %dx%dx%d levels %d flags 0x%x gl %u mem %p uploaded %d rendered %d view set 0x%x format 0x%x\n", n, tid, t->b.target, t->b.format, t->b.width,
                        t->b.height, t->b.depth, t->b.levels, t->b.flags, t->o.gl, (void *)t->mem, t->uploaded, t->gpu_written, S.tpool->e[tid].view.set, S.tpool->e[tid].view.format);
-                if (!t->uploaded && !t->rt_tick && t->mem) {     /* never drawn into itself: what else covers its memory */
+                if (!light && !t->uploaded && !t->rt_tick && t->mem) {     /* never drawn into itself: what else covers its memory */
                     uint64_t b0 = (uint64_t)(uintptr_t)t->mem, e0 = b0 + t->storage;
                     AcquireSRWLockShared(&g_tex_range_lock);
                     for (size_t i = 0; i < g_tex_range_count && g_tex_ranges[i].begin < e0; i++) {
@@ -5502,7 +5521,7 @@ static int draw_prepare(void) {
                         printf("      no sampler: handle %llx sampler id 0x%x, pool of %d, used %d\n", (unsigned long long)S.nvn_tex[s][n], sid2, S.spool ? S.spool->count : -1,
                                S.spool && sid2 < (uint32_t)S.spool->count ? S.spool->used[sid2] : -1);
                 }
-                if (t->b.target == 1 && t->gpu_written && t->o.gl && t->b.width >= 64) {     /* the centre texel through the texture and through the view sampled */
+                if (!light && t->b.target == 1 && t->gpu_written && t->o.gl && t->b.width >= 64) {     /* the centre texel through the texture and through the view sampled */
                     TexObj *vo = tex_view_obj(t, &S.tpool->e[tid].view);
                     float a[4] = {-1, -1, -1, -1}, b[4] = {-1, -1, -1, -1};
                     glGetTextureSubImage(t->o.gl, 0, t->b.width / 2, t->b.height / 2, 0, 1, 1, 1, GL_RGBA, GL_FLOAT, sizeof a, a);
@@ -5533,7 +5552,7 @@ static int draw_prepare(void) {
                 }
                 printf("      swizzle: view %d %d %d %d, texture %d %d %d %d\n", S.tpool->e[tid].view.swz[0], S.tpool->e[tid].view.swz[1], S.tpool->e[tid].view.swz[2], S.tpool->e[tid].view.swz[3],
                        t->b.swz[0], t->b.swz[1], t->b.swz[2], t->b.swz[3]);
-                if (t->mem && t->storage >= 65536)     /* other live textures over the same memory (a target written under another object) */
+                if (!light && t->mem && t->storage >= 65536)     /* other live textures over the same memory (a target written under another object) */
                     for (Tex *o = g_all_tex; o; o = o->all_next)
                         if (o != t && !o->dead && o->mem && o->mem < t->mem + t->storage && o->mem + o->storage > t->mem)
                             printf("      overlaps gl %u mem %+lld %dx%dx%d format 0x%x target %d levels %d rendered %d\n", o->o.gl, (long long)(o->mem - t->mem), o->b.width, o->b.height,
@@ -5567,7 +5586,7 @@ static int draw_prepare(void) {
             if (!(a & 0xff)) continue;
             printf("  attr %d: format 0x%x stream %d offset %u stride %u buffer %llx+%llu", i, a & 0xff, stream, a >> 14, S.vstream[stream].stride, (unsigned long long)S.vbuf[stream].addr, (unsigned long long)S.vbuf[stream].size);
             if (S.vbuf[stream].addr && S.vbuf[stream].size >= (a >> 14) + 16) { const float *f = (const float *)((const uint8_t *)P(S.vbuf[stream].addr) + (a >> 14)); printf("  first: %g %g %g %g", f[0], f[1], f[2], f[3]); }
-            if (i == 0 && (a & 0xff) == 0x22 && S.vstream[stream].stride >= 12 && S.vbuf[stream].addr) {     /* three floats: the box of all the buffer's vertices */
+            if (!light && i == 0 && (a & 0xff) == 0x22 && S.vstream[stream].stride >= 12 && S.vbuf[stream].addr) {     /* three floats: the box of all the buffer's vertices */
                 float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
                 const uint8_t *b0 = (const uint8_t *)P(S.vbuf[stream].addr) + (a >> 14);
                 for (uint64_t o = 0; o + 12 <= S.vbuf[stream].size - (a >> 14); o += S.vstream[stream].stride) {
@@ -7863,9 +7882,16 @@ static void job_present(void *arg) {
         {   static int left; static long long at = -2;
             if (at == -2) at = getenv("TOMO_FLICKER_SAMPLE_AT") ? atoll(getenv("TOMO_FLICKER_SAMPLE_AT")) : -1;      /* TEST: as if F12 were pressed there */
             if (frame == at) InterlockedExchange(&g_flk_req, 1);
-            if (InterlockedExchange(&g_flk_req, 0) && !left) {
+            if (g_dl_buffered && !left && (g_dl_force[0] < 0 || g_st.frames > g_dl_force[1])) {      /* the light draw log is over (or was cut short) */
+                if (g_dl_force[0] >= 0) printf("flicker sample: draw log done, %lld draws in %.1f s%c", (long long)g_dl_draws, g_dl_t0 ? (double)(GetTickCount64() - g_dl_t0) / 1000.0 : 0.0, 10);
+                fflush(stdout); setvbuf(stdout, NULL, _IONBF, 0);
+                g_dl_buffered = 0; g_dl_light = 0;
+            }
+            if (InterlockedExchange(&g_flk_req, 0) && !left && !g_dl_buffered) {      /* (not while the last sample's draw log runs) */
                 left = 8;
                 CreateDirectoryA("flicker", NULL);
+                g_dl_light = !getenv("TOMO_FLICKER_FULL"); g_dl_t0 = 0; g_dl_draws = 0;
+                if (g_dl_light) { fflush(stdout); setvbuf(stdout, NULL, _IOFBF, 1 << 20); g_dl_buffered = 1; }      /* ~1000 writes a draw otherwise (stdout is unbuffered, boot.c) */
                 printf("flicker sample: pictures of frames %lld..%lld in the folder flicker, then the draw log of frames %lld and %lld below (the game pauses a few seconds)%c", frame, frame + 7, frame + 9, frame + 10, 10);
             }
             if (left > 0) {

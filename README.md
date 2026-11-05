@@ -150,7 +150,7 @@ When something goes wrong, the logs are in `build\logs` (**MORE > OPEN LOGS FOLD
 game session. If the launcher says **the game closed with an error**, the line under it says why. `0x00000004` is a crash: please
 send that session's log and `tomodachi_play_crash.txt` from the same folder. `0x00000001`: it could not start, or something ended it from outside.
 **Flicker:** press **F12** while it happens. The game saves the next 8 pictures in `build\work\flicker` and describes the
-frames after them in the session log (the game pauses a few seconds for that); send both.
+frames after them in the session log (the game pauses for that, 20 seconds at most); send both.
 
 ## Building by hand
 
