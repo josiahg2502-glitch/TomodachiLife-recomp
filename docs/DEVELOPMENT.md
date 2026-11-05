@@ -195,6 +195,10 @@ picks this up:
   `TOMO_AUDIO_WAV=<file>` records the mix.
 - **One frame in three:** the game rotates its transient targets through three sets, strictly (each conditional-clear slot is armed
   in frames of one residue mod 3; `TOMO_CONDLOG`). A fault in one set shows as one frame in three, whatever the frame rate.
+- **A lit face for glow tests (issue #29, on a copy of a save):** Illuminate paint, in `SSBU_SEQ` keys. A Mii's Edit screen from the
+  island: `300:C 200:d/2 200:Z 300 200:r/2 200:r/2 200:r/2 200:Z`. The paint panel: `200:u/2 200:l/2 200:Z 400`, `100:l/2` five times,
+  `100:d/2` nine times, `200:Z 200:r/2 200:Z 500 200:Z 300`. Illuminate on and up: `100:Z 200 100:d/2 200:r/70 200`. Out and saved:
+  `200:X 200 200:! 500 200:! 600`. `TOMO_SAVE_TEST=<poll>` needs the hand up on the island (`150:l/2 150:r/2` steps), no menu open.
 - **Save:** the save manager's request flag: `tomo.c` `save_now_step`. Its autosave counts at +0x948.
 - **Code mods:** `runtime/tomo_mod.h`, [MODDING.md](MODDING.md).
 - **The install runs no pip and no PowerShell:** both failed on players' PCs. `launcher.cpp` downloads the wheels itself
