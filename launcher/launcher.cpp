@@ -285,8 +285,8 @@ struct Ini {
     std::vector<std::string> lines;
     void load(const fs::path& p) {
         path = p;
-        lines.clear();
         if (FILE* f = _wfopen(p.wstring().c_str(), L"rb")) {
+            lines.clear();
             char buf[1024];
             while (fgets(buf, sizeof buf, f)) {
                 std::string s = buf;
@@ -316,6 +316,7 @@ struct Ini {
         return a == std::string::npos ? std::string() : v.substr(a, b - a + 1);
     }
     void set(const std::string& key, const std::string& val) {
+        load(path);                                    // the game's F1 menu writes graphics.ini too: never put an old copy back
         const std::string line = key + " = " + val;
         if (int i = find(key); i >= 0) lines[i] = line;
         else lines.push_back(line);
@@ -578,6 +579,7 @@ const std::vector<Option>& options() {
                                           {"de", "Deutsch"}, {"es-419", "Espanol (Latinoamerica)"}, {"es", "Espanol (Espana)"}, {"it", "Italiano"}, {"nl", "Nederlands"},
                                           {"ja", "Japanese"}, {"ko", "Korean"}, {"zh-Hans", "Chinese (Simplified)"}, {"zh-Hant", "Chinese (Traditional)"}}},
         {"IN-GAME MENU (F1)", "menu", "on", {{"on", "On"}, {"off", "Off"}}},
+        {"MOUSE CONTROLS", "mouse", "off", {{"off", "Off"}, {"on", "On"}}},
         {"FRAME-TIME COUNTER", "frame_time_overlay", "off", {{"off", "Off"}, {"on", "On"}}},
         // Local Play (the game's Mii and creation exchange) over a network instead of the console's radio (net_relay.c)
         {"LOCAL PLAY ONLINE", "online_mode", "off", {{"off", "Off"}, {"lan", "Same network"}, {"host", "Host: share a room code"}, {"join", "Join a friend's code"}}},
@@ -585,8 +587,8 @@ const std::vector<Option>& options() {
     return o;
 }
 const char* const k_keys[][2] = {                         // nnpad_sdl.c g_kb_default
-    {"A / confirm", "Z"}, {"B / back", "X"}, {"X / menu", "C"}, {"Y / residents", "V"}, {"Left stick", "Arrow keys"}, {"Camera", "T F G H"},
-    {"D-pad", "I J K L"}, {"L / R", "Q / E"}, {"ZL / ZR", "A / S"}, {"+ / -", "Enter / Backspace"}, {"Fullscreen", "F11"}, {"Settings", "F1"}};
+    {"A / confirm", "Enter / Space"}, {"B / back", "Esc / Backspace / B"}, {"X / menu", "X / M"}, {"Y / residents", "Y / R"}, {"Left stick", "W A S D / Arrows"}, {"Camera", "I J K L"},
+    {"D-pad", "Number pad 4 8 6 2"}, {"L / R", "Q / E"}, {"ZL / ZR", "Z / C"}, {"+ / -", "= / -"}, {"Fullscreen", "F11"}, {"Settings", "F1"}};
 
 /* ------------------------------------------------------------------ the launcher */
 enum class Screen { kMain, kSettings, kSaves, kControls, kMore, kMii, kInstall };
@@ -899,6 +901,7 @@ private:
     }
 
     void build_items() {
+        gfx_.load(g_ini);                              // what the game's F1 menu changed shows here
         list_.clear();
         switch (screen_) {
         case Screen::kMain:
@@ -1063,7 +1066,7 @@ private:
             else back();
             break;
         case Screen::kMore:
-            if (i == 0) open_path(g_work);
+            if (i == 0) { std::error_code e; fs::create_directories(g_build / "logs", e); open_path(g_build / "logs"); }
             else if (i == 1) edit_file(g_ini);
             else if (i == 2) {
                 if (armed_ != 2) { armed_ = 2; build_items(); break; }
@@ -1402,8 +1405,12 @@ private:
         localtime_s(&lt, &now);
         char name[64];
         strftime(name, sizeof name, "play_%Y%m%d_%H%M%S", &lt);
-        SetEnvironmentVariableW(L"SSBU_REC", (g_work / (std::string(name) + ".rec")).wstring().c_str());      // player 1's input, for replaying a bug
-        log_ = g_work / (std::string(name) + ".log");
+        const fs::path logs = g_build / "logs";
+        std::error_code mk;
+        fs::create_directories(logs, mk);
+        SetEnvironmentVariableW(L"SSBU_REC", (logs / (std::string(name) + ".rec")).wstring().c_str());      // player 1's input, for replaying a bug
+        SetEnvironmentVariableW(L"SSBU_REPORT_DIR", logs.wstring().c_str());       // the crash and freeze reports, beside the session's log
+        log_ = logs / (std::string(name) + ".log");
         SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
         HANDLE log = CreateFileW(log_.wstring().c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         STARTUPINFOW si{};
@@ -1520,7 +1527,7 @@ private:
             }
             if (screen_ == Screen::kControls) {
                 if (line.empty()) line = pad_name_.empty() ? "Plug in a controller at any time." : "Controller ready.";
-                detail = "The keyboard always works for player 1.";
+                detail = "Change any button or key in the game: F1, then Controls.";
             }
             if (screen_ == Screen::kMore) detail = (g_repo / "build").string();
             if (screen_ == Screen::kMii) {

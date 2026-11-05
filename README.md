@@ -59,7 +59,8 @@ The installer downloads only what it needs, each file checked against a fixed SH
 
 The shaders are ready when the installer finishes, so the game starts in seconds. After a graphics driver update, or
 when you change the widescreen or resolution-scale setting, the game prepares them once more at its start: the loading
-screen then shows "preparing shaders (once)" with a count, the time spent and the time left.
+screen then shows "preparing shaders (once)" with a count, the time spent and the time left. The first time you reach a new
+place or event it can still stutter for a moment while its pictures are prepared; they are kept, so it is smooth from then on.
 
 ## The launcher
 
@@ -140,18 +141,16 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
 
 - Very large islands (30+ residents) run slowly on some PCs; we are working on it (issues #7, #18).
 - Now and then a Mii's line shows without its voice (seen once in Mii News); the session log now records every line and
-  voice, so please send `build\work\play_*.log` with the time it happened.
-- Street lamps were reported to be heard from far away (issue #8). The game's master limiter and smooth volume changes are
-  in since 1.0.1, and the shops' music fades with the distance here; if you still hear a difference, please tell us where.
+  voice, so please send `build\logs\play_*.log` with the time it happened.
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and
-  send `build\work\play_*.log` of that session.
+  send `build\logs\play_*.log` of that session.
 - Local Play over the internet worked on a simulated link (lag and lost packets) but not yet between two real home routers;
   some routers will need UPnP on. Sending a Mii works; exchanging creations is not tested yet.
 - The launcher shows a plain background (the island picture of the dev builds is game art and is not shipped).
 
-When something goes wrong, the logs are in `build\logs` (install) and `build\work\play_*.log` (each game session).
-If the launcher says **the game closed with an error**, the line under it says why. `0x00000004` is a crash: please send that
-session's log and `build\work\tomodachi_play_crash.txt`. `0x00000001`: it could not start, or something ended it from outside.
+When something goes wrong, the logs are in `build\logs` (**MORE > OPEN LOGS FOLDER**): the install's, and `play_*.log` for each
+game session. If the launcher says **the game closed with an error**, the line under it says why. `0x00000004` is a crash: please
+send that session's log and `tomodachi_play_crash.txt` from the same folder. `0x00000001`: it could not start, or something ended it from outside.
 **Flicker:** press **F12** while it happens. The game saves the next 8 pictures in `build\work\flicker` and describes the
 frames after them in the session log (the game pauses a few seconds for that); send both.
 
