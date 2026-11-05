@@ -696,7 +696,8 @@ static void time_CalculateSpanBetween(Ctx *c) {           /* (TimeSpan *out, con
     int64_t seconds;
     if (memcmp((void *)(uintptr_t)(a + 0x98), (void *)(uintptr_t)(b + 0x98), 16) == 0) seconds = (int64_t)rd64(b + 0x90) - (int64_t)rd64(a + 0x90);
     else if (rd64(a + 0x48) && rd64(b + 0x48)) seconds = (int64_t)rd64(b + 0x48) - (int64_t)rd64(a + 0x48);      /* different steady clock sources: the network clocks */
-    else { RET(0); return; }
+    else seconds = 0;      /* a save from a console or an emulator (issues #27, #32) and no network clock to compare: no answer here makes the game charge its
+                            * clock penalty (shops stuck for a day, BootCheckPenalty) at every such save's first start, with the PC's clock right */
     wr64(out, (uint64_t)(seconds * 1000000000LL));
     RET(1);
 }

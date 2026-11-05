@@ -58,9 +58,12 @@ void nntime_location(char out[0x24]); void nntime_local_calendar(int64_t posix, 
 #define posix_now nntime_now
 static void time_user_clock_now(Ctx *c) { wr64(A0, (uint64_t)posix_now()); RET(0); }
 static void time_location_name(Ctx *c) { nntime_location((char *)(uintptr_t)A0); }
-/* ClockSnapshot (0xd0 bytes in SDK 20, opaque to the game): our own layout, read only by the accessors below */
+/* ClockSnapshot (0xd0 bytes in SDK 20, opaque to the game): our own layout, read only by the accessors below. The game keeps
+ * snapshots in its save, and one from a console or an emulator has the SDK's layout (nntime.c): user time at +0x40, its
+ * calendar at +0x50. Ours leaves those zero. */
 #define SNAP_TIME 0x00
 #define SNAP_CAL 0x08                                    /* CalendarTime: year (16), month, day, hour, minute, second (8 each) */
+#define SNAP_F(s, ours, sdk) ((s) + (rd64((s) + 0x40) ? (sdk) : (ours)))
 static void time_snapshot_create(Ctx *c) {
     int64_t t = posix_now();
     uint64_t s = A0;
@@ -69,12 +72,12 @@ static void time_snapshot_create(Ctx *c) {
     nntime_local_calendar(t, s + SNAP_CAL);
     RET(0);
 }
-static void snap_posix(Ctx *c) { RET(rd64(A0 + SNAP_TIME)); }
-static void snap_calendar(Ctx *c) { RET(rd64(A0 + SNAP_CAL)); }     /* CalendarTime fits in x0 (8 bytes) */
+static void snap_posix(Ctx *c) { RET(rd64(SNAP_F(A0, SNAP_TIME, 0x40))); }
+static void snap_calendar(Ctx *c) { RET(rd64(SNAP_F(A0, SNAP_CAL, 0x50))); }     /* CalendarTime fits in x0 (8 bytes) */
 static void snap_context(Ctx *c) {                       /* SystemClockContext (0x20) returned through x8 */
-    uint64_t out = c->x[8];
+    uint64_t out = c->x[8], t = rd64(SNAP_F(A0, SNAP_TIME, 0x40));
     memset((void *)(uintptr_t)out, 0, 0x20);
-    wr64(out, rd64(A0 + SNAP_TIME));
+    wr64(out, t);
 }
 static void snap_location(Ctx *c) {                      /* LocationName (0x24) through x8 */
     uint64_t out = c->x[8];
