@@ -11,6 +11,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [ $# -ge 1 ] && [ -d "$1" ] || { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 DUMP="$(cd "$1" && pwd)"
 shift
+# SteamOS (Steam Deck): the build runs in a distrobox container (install_deps.sh says why). It is made here and the install goes
+# on inside it: a list of commands to paste lost its last line to `distrobox enter`, which starts a shell (issue #39).
+. /etc/os-release
+if [ "${ID:-}" = steamos ] && [[ " $* " != *" --steamos-host "* ]] && [[ " $* " != *" --no-system "* ]]; then
+    command -v distrobox >/dev/null || { echo "This SteamOS has no distrobox (SteamOS 3.5 and newer include it): docs/LINUX.md, Steam Deck" >&2; exit 1; }
+    distrobox list | grep -w tomodachi >/dev/null || distrobox create --yes --no-entry --name tomodachi --image docker.io/library/archlinux:latest
+    cd "$REPO"
+    exec distrobox enter tomodachi -- "$REPO/scripts/linux/install.sh" "$DUMP" "$@"
+fi
 "$REPO/scripts/linux/install_deps.sh" "$@"
 "$REPO/deps/venv/bin/python" "$REPO/scripts/setup.py" --target linux --dump "$DUMP"
 "$REPO/scripts/linux/install_desktop.sh"

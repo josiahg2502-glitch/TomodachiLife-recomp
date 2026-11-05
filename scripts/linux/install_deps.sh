@@ -37,11 +37,9 @@ if [ "$SYSTEM" = 1 ]; then
     # updates; the game runs from it with the Deck's GPU and sound.
     if [ "${ID:-}" = "steamos" ] && [ "$STEAMOS_HOST" = 0 ]; then
         say "SteamOS (Steam Deck): build inside a distrobox container"
-        echo "  In Desktop Mode, open Konsole and run, from this folder:"
+        echo "  In Desktop Mode, open Konsole and run, from this folder (it makes the container and builds inside it):"
         echo
-        echo "    distrobox create --name tomodachi --image docker.io/library/archlinux:latest"
-        echo "    distrobox enter tomodachi"
-        echo "    scripts/linux/install.sh <your dump folder>"
+        echo "    scripts/linux/install.sh \"<your dump folder>\""
         echo
         echo "  Keep this folder in your home folder (the container sees your home folder). The application menu entry the"
         echo "  install makes starts the game in the container."
