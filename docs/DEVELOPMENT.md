@@ -154,10 +154,16 @@ python compile_main.py ..\..\build\gen_eh ..\..\build\obj 12
 
 The keys must cover key generation 0x0f or newer, since this game is newer than the keys in some emulator folders.
 
-## State at 1.0.1
+## State at 1.0.2
 
 Windows (OpenGL on NVIDIA, Vulkan on other cards), Linux and Android (Vulkan). What was learned in the last round, for whoever
 picks this up:
+
+- **Open: the three-frame flicker (issues #29, #34).** On a player's RTX 5080 laptop (driver 617.42, OpenGL) the soft shadow under each
+  Mii has exactly three levels, one per frame of a three-frame cycle, and glow goes off in one frame of three. It never showed on an RTX 3060
+  (driver 621.01) on either renderer, at midday, close up, with 8 and 70 residents. No discards in that scene; the frozen-scene "wrong" counter is 0 there too.
+- **Open: the busiest views (issue #7).** 7,300 draws a frame take the replay and the driver's thread about 15 ms each, and the view changing
+  makes hundreds of new framebuffers. Freezes of 0.4-0.75 s came with 20-58 thousand page faults while the render thread waited in the driver.
 
 - **Renderer choice:** `gfx_options.renderer` (`auto` | `always_vulkan` | `opengl`), `nvn_renderer_is_vk`. `--renderer` prints
   the choice; `SSBU_GPU_VENDOR=other` simulates a non-NVIDIA card. AMD's OpenGL driver crashes or runs at 1 fps on this game.
