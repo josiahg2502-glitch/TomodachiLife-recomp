@@ -110,7 +110,7 @@ TOOLS = {   # checked 2026-10-19: SDL3 equals GitHub's own asset digest; LLVM's 
 # other installer downloads (MIRROR), not on the game's release page: unpacked there by hand it passed for the game.
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = (MIRROR + 'tomodachi-runtime-875577eadd.zip', 'a39754263385f94152bcfdf7b6ffa21252aa9658cc1b9cad325996afee8a0238')
+RUNTIME_RELEASE = (MIRROR + 'tomodachi-runtime-b682e21a6a.zip', '41e0027cbf8d0aed553052a1dbb1661f8421997be91dfdd7475beba144b080b1')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'tables', 'lift', 'sdk', 'compile', 'link', 'prepare']
 # expected seconds, measured 2026-10-28 on a PC with 9 jobs, 16 GB (compile scales with 12 / jobs)
