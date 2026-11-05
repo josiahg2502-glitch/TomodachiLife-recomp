@@ -1446,7 +1446,7 @@ int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportF
 static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
     static const uint64_t v262144[][2] = {{0x71008ce838ull, 0x7100897d48ull}, {0x71006ec3c0ull, 0x71006ce020ull},
         {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull},
-        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}};
+        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}, {0x7101bc8588ull, 0x7101b6ee28ull}};
     uint64_t at = 0;
     if (g_main.text_size == 0x25ce6a0) at = a;
     else if (g_main.text_size == 0x256d250)
@@ -1625,7 +1625,7 @@ static void persp_install(void) {
  * (a position put in is none), hence nnhid.c's nudge while the mouse moves. The hand is shown while bit 0 of the halfword
  * at +0x14 is set. Found 2026-10-28 with TOMO_MEMSCAN and write watchpoints. TOMO_MOUSE=0 off. */
 static ImportFn g_pointer_update;
-static volatile LONG g_centred_tick, g_seen_buttons, g_pen_tick;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
+static volatile LONG g_centred_tick, g_seen_buttons;                      /* when the hand was last up in the middle of the screen (mode 1: the island) */
 /* THE MOUSE IN MENUS AND DIALOGS (2026-10-31). The X menu, Settings, the yes / no questions... move a hand from button to
  * button with the stick: the pointer object is then in mode 3 (+0x1a0) and follows the element its FOCUS HOLDER names
  * (0x7100241508: [[hand global]] + 0x40 -> its vtable slot 0 (type id) -> + 0x28 = holder; holder + 0x58 the focused element,
@@ -1863,9 +1863,22 @@ static void pointer_hook(Ctx *c, void *user) {
         if (have && (fabsf(xy[0] - 640.0f) > 2.0f || fabsf(xy[1] - 360.0f) > 2.0f)) centred = fabsf(pp[0] - 640.0f) < 0.5f && fabsf(pp[1] - 360.0f) < 0.5f;
         if (!have) centred = 1;
         if (centred) InterlockedExchange(&g_centred_tick, (LONG)GetTickCount());
-        else InterlockedExchange(&g_pen_tick, (LONG)GetTickCount());      /* (the Windows pointer stays: the pen follows the mouse's moves, not its place) */
+        else if (have) display_mouse_hand();                 /* (the pen is on the mouse: pen_place_hook) */
     } else if (have && mode != 3) display_mouse_hand();      /* (the hand is on the mouse: no second pointer; in menus it jumps between buttons, so the
                                                                 * Windows pointer stays to show where the mouse is) */
+}
+/* The Palette House pen. Its object keeps the position at +8 (1280 x 720 screen, x and y as floats). The stick moves it, then
+ * [0x7101bc8588] (1.0.4 0x7101b6ee28; this, the input) clamps it to the screen and hands it to the hand pointer. The mouse's
+ * position goes in just before that, so the pen is where the mouse is, at any zoom and frame rate. Until 2026-11-05 the pen was
+ * pushed with the stick after the mouse's moves; what a fast move left over was dropped, and the pen stayed off by that for the
+ * rest of the session (issue #35). */
+static ImportFn g_pen_place;
+static void pen_place_hook(Ctx *c, void *user) {
+    int nnhid_mouse(float xy[2]);
+    float xy[2];
+    (void)user;
+    if (nnhid_mouse(xy)) { wrf(A0 + 8, xy[0]); wrf(A0 + 12, xy[1]); }
+    g_pen_place(c);
 }
 /* THE MOUSE ON THE ISLAND (2026-10-31). There the hand stays in the middle of the screen (the pointer's mode 1) and the left
  * stick moves the camera: [0x710044c828] (1.0.4 0x710044b8b0; a camera controller's update: this, the target point) adds
@@ -1884,7 +1897,6 @@ int tomo_island(void) { return GetTickCount() - (DWORD)g_isle_tick < 250; }
 static DWORD tomo_island_ms(void) { return g_isle_since ? GetTickCount() - (DWORD)g_isle_since : 0; }
 int tomo_play_started(void) { return tomo_island_ms() >= 5000; }      /* display.c: the start-up's loads are over */
 int tomo_centred(void) { return GetTickCount() - (DWORD)g_centred_tick < 250; }      /* the hand held in the middle (the island, the Island Builder) */
-int tomo_pen(void) { return GetTickCount() - (DWORD)g_pen_tick < 250; }      /* a cursor that keeps the mouse's position (the Palette House canvas's pen) */
 static volatile LONG g_isle_busy;                 /* a drag or a glide: nnhid.c pushes the stick a little (it lets go of a Mii the camera follows) */
 static volatile LONG g_carry;                     /* a Mii grabbed with the mouse: while it is carried (another camera; the island's is idle) the
                                                    * cursor's offset from the middle steers as the stick does, a click drops it (nnhid.c) */
@@ -1994,6 +2006,7 @@ static void rate_install(void) {
 static void pointer_install(void) {
     if (getenv("TOMO_MOUSE") && getenv("TOMO_MOUSE")[0] == '0') return;
     if (!tomo_hook(0x710022dce0ull, pointer_hook, &g_pointer_update)) printf("mouse: the hand pointer hook is not installed (the mouse cannot move the hand)%c", 10);
+    if (!tomo_hook(0x7101bc8588ull, pen_place_hook, &g_pen_place)) printf("mouse: the pen hook is not installed (the mouse cannot paint)%c", 10);
     if (!tomo_hook(0x710044d090ull, isle_input_hook, &g_isle_input)) printf("mouse: the island camera hook is not installed (the mouse cannot move the island)%c", 10);
     if (!tomo_hook(0x710026dca0ull, pane_draw_hook, &g_pane_draw)) printf("mouse: the pane draw hook is not installed (button prompts cannot be clicked)%c", 10);
 }
