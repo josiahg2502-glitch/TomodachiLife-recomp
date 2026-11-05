@@ -188,6 +188,13 @@ picks this up:
 - **Audio:** `TOMO_AUDIOLOG=5` logs every voice's gain ten times a second and the first samples of each sound (searching those
   in the `.bars` archives and streams names the sound). The game's sound engine is `alto`: attenuation curves in
   `Sound/Attenuation`, leak-out of buildings in `SoundLeakOutParam`. Passed through: the compressor (only the `Voice_Speaker` bus).
+  A splitter info is exactly `0x1c + 4 * destinations` bytes and its 12 unused bytes hold old data, an old magic word too: only the
+  size tells where the next entry is (`amix_parse` reports what it did not find). All gains zero is the game silencing a voice (a far
+  lamp, a shop's music across the island), so it stays silent: the direct stereo path is only for no mix graph at all. Before 1.0.2
+  such voices played at full volume (22 % of the voice updates of a test run, `BGM_Market_Night_Mono` at gain 0 among them).
+  `TOMO_AUDIO_WAV=<file>` records the mix.
+- **One frame in three:** the game rotates its transient targets through three sets, strictly (each conditional-clear slot is armed
+  in frames of one residue mod 3; `TOMO_CONDLOG`). A fault in one set shows as one frame in three, whatever the frame rate.
 - **Save:** the save manager's request flag: `tomo.c` `save_now_step`. Its autosave counts at +0x948.
 - **Code mods:** `runtime/tomo_mod.h`, [MODDING.md](MODDING.md).
 - **The install runs no pip and no PowerShell:** both failed on players' PCs. `launcher.cpp` downloads the wheels itself
@@ -196,7 +203,7 @@ picks this up:
   page (`stamp_manifest`, `tools/lifter/build.py`), the window is Unicode, the installer's Python runs with `PYTHONUTF8=1`, and
   tar is given a working folder and a relative name, because Windows' tar takes its arguments through the code page.
 - **Why the game closed:** `exit_reason` in `launcher.cpp` turns the exit code into a sentence. 4 is the crash filter (report in
-  `build/work/tomodachi_play_crash.txt`), 1 a failed start or something ending the process from outside. A crash inside a graphics
+  `build/logs/tomodachi_play_crash.txt`, beside the session's log), 1 a failed start or something ending the process from outside. A crash inside a graphics
   driver in the first frames moves `renderer = auto` to the other renderer (`nvn_crash_in_driver`). Tests:
   `LAUNCHER_TEST_EXIT=<code>:<log>` with `--shot`; `SSBU_CRASH_TEST` with `TOMO_CRASH_MODULE=<module>`.
 - **The POSIX layer:** `runtime/plat/windows.h` and `plat_posix.c` stand in for the Windows calls of the shared files. A new Windows

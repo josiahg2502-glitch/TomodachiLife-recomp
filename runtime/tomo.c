@@ -598,26 +598,30 @@ static void amix_parse(uint64_t in, uint64_t isp, uint64_t imx) {
                 printf("\n");
             }
         }
+        uint32_t lost = 0;
         for (uint32_t i = 0; i < ninfo && off + 0x10 <= ssz; i++) {
             uint64_t h = isp + off;
-            if (rd32(h) != 0x49444e53u) break;          /* 'SNDI' {id, sample rate, destination count, destination ids} */
+            if (rd32(h) != 0x49444e53u) { lost = ninfo - i; break; }   /* 'SNDI' {id, sample rate, destination count, destination ids, 12 unused bytes} */
             int id = (int)rd32(h + 4); uint32_t dc = rd32(h + 0xc);
             if (id >= 0 && id < ASPL_MAX) {
                 g_aspl[id].ndest = dc < 32 ? (int)dc : 32;
                 for (int k = 0; k < g_aspl[id].ndest; k++) g_aspl[id].dest[k] = (int)rd32(h + 0x10 + (uint64_t)k * 4);
             }
-            off += (0x10 + dc * 4 + 15) & ~15u;           /* an info is padded to 16 bytes (seen: one destination = 0x20) */
+            off += 0x1c + dc * 4;                         /* the unused bytes hold old data, an old magic word too: only the size says where the next entry is */
         }
         uint32_t stride = ndst ? (ssz - off) / ndst : 0;
         stride = stride >= 0xa8 ? 0xa8 : stride >= 0x90 ? 0x90 : 0x70;   /* the section may end in padding: the largest format that fits */
         uint32_t use_at = stride == 0x70 ? 0x6c : stride == 0x90 ? 0x84 : 0x9c;
         for (uint32_t i = 0; i < ndst && off + stride <= ssz; i++, off += stride) {
             uint64_t d = isp + off;
-            if (rd32(d) != 0x44444e53u) continue;       /* 'SNDD' {id, 24 volumes, mix id, ...} */
+            if (rd32(d) != 0x44444e53u) { lost++; continue; }     /* 'SNDD' {id, 24 volumes, mix id, ...} */
             int id = (int)rd32(d + 4);
             if (id < 0 || id >= ADST_MAX) continue;
             for (int k = 0; k < 24; k++) g_adst[id].vol[k] = rdf(d + 8 + (uint64_t)k * 4);
             g_adst[id].mix = (int)rd32(d + 0x68); g_adst[id].in_use = rd8(d + use_at);
+        }
+        {   static int dl = -1, dn; if (dl < 0) dl = getenv("TOMO_AUDIOLOG") != NULL;
+            if (dl && lost && dn++ < 20) printf("audio: splitter update: %u entries of %u infos, %u destinations not found in %u bytes\n", lost, ninfo, ndst, ssz);
         }
     }
     uint32_t count = msz / 0x930, dirty = msz % 0x930 == 0x20;
@@ -1106,13 +1110,21 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                     gl[ch] *= vol; gr[ch] *= vol;
                 }
             }
-            int routed = graph && (tn[0] || (cc > 1 && tn[1]));   /* no destination known for this voice: the direct stereo path */
+            int routed = graph;                          /* all gains zero is the game silencing it (a far lamp, a muted layer of a stream), not "no destination": only with no graph at all the direct stereo path */
             /* A gain goes from its last value to the new one over the update's 240 samples, as the DSP's mix ramps do: a step at
-             * every update clicks while a sound fades. tg0 + k * td: a route new this update starts at its gain. */
+             * every update clicks while a sound fades. tg0 + k * td: a new voice starts at its gain, and on a playing one a route
+             * comes up from nothing and one the game just silenced goes down to it. */
             float tg0[6][48], td[6][48];
+            int fading = 0;
             if (routed) for (uint32_t ch = 0; ch < cc && ch < 6; ch++) {
+                for (int q = 0; q < s->pn[ch] && tn[ch] < 48; q++) {
+                    int t = 0;
+                    while (t < tn[ch] && tb[ch][t] != s->pb[ch][q]) t++;
+                    if (t == tn[ch] && s->pg[ch][q] != 0.0f) { tb[ch][t] = s->pb[ch][q]; tg[ch][t] = 0.0f; tn[ch]++; }
+                }
+                fading |= tn[ch];
                 for (int t = 0; t < tn[ch]; t++) {
-                    float g0 = tg[ch][t];
+                    float g0 = s->played ? 0.0f : tg[ch][t];
                     if (t < s->pn[ch] && s->pb[ch][t] == tb[ch][t]) g0 = s->pg[ch][t];
                     else for (int q = 0; q < s->pn[ch]; q++) if (s->pb[ch][q] == tb[ch][t]) { g0 = s->pg[ch][q]; break; }
                     tg0[ch][t] = g0; td[ch][t] = (tg[ch][t] - g0) / 240.0f;
@@ -1147,7 +1159,7 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                 if (bqn) s->filt = 1;
                 if (!avail) s->dry = 1; else if (s->dry) { s->dry = 0; if (s->played) s->gaps++; }
             }
-            int mix = mixing && ((fmt >= 1 && fmt <= 5) || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f);   /* (only 16-bit and ADPCM were mixed: other voices were silent) */
+            int mix = mixing && ((fmt >= 1 && fmt <= 5) || (fmt == 6 && coef > 0x10000)) && (vol > 0.0f || fading);   /* (only 16-bit and ADPCM were mixed: other voices were silent) */
             if (mixing && fmt == 6 && coef <= 0x10000) {       /* an ADPCM voice without coefficients where they were looked for: the layout */
                 static int said_v;
                 if (said_v++ < 2) {
@@ -1177,9 +1189,9 @@ static uint32_t audren_core(uint64_t in, uint64_t out, uint64_t cap, uint64_t fr
                             nxt = (int32_t)(idx + 1) < end ? pcm_at(data, idx + 1, cc, ch, fmt) : smp;
                         } else if (ch == 0) {
                             int32_t f = (int32_t)(idx / 14);
-                            if (s->af == -1) {                       /* a new buffer: its context, else the history carried on */
-                                uint64_t ctx = rd64(b + 0x28);
-                                if (ctx > 0x10000) { s->yn1 = (int16_t)rd16(ctx + 2); s->yn2 = (int16_t)rd16(ctx + 4); }      /* not a pointer: no context */
+                            if (s->af == -1) {                       /* a new buffer, or a loop's next round: its context ({header, yn1, yn2}, +0x28 its size), else the history carried on */
+                                uint64_t ctx = rd64(b + 0x20);
+                                if (ctx > 0x10000 && rd64(b + 0x28) >= 6) { s->yn1 = (int16_t)rd16(ctx + 2); s->yn2 = (int16_t)rd16(ctx + 4); }
                                 adpcm_frame(s, data, f, coef);
                             } else if (f < s->af) adpcm_frame(s, data, f, coef);
                             else while (s->af < f) adpcm_frame(s, data, s->af + 1, coef);
