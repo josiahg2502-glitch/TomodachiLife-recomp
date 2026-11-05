@@ -24,6 +24,7 @@ const GfxOptions *gfx_options(void);      /* any thread; read once (the file is 
 int gfx_latency(void);                    /* latency = normal 0 | low 1 | lowest 2 */
 int gfx_runahead(void);                   /* runahead = off 0 | on 1 */
 int gfx_frame_rate(void);                 /* frame_rate = 30 | 60 (display.c: the present interval, halved and adaptive at 60) */
+int gfx_frame_rate_auto(void);            /* frame_rate = auto: 60, and 30 for a while when the PC cannot hold it */
 int gfx_present_api(void);               /* present_api = auto 0 | dxgi 1 | opengl 2 (nvn_gl_dxgi.c: how the picture reaches the screen) */
 float gfx_widescreen(void);               /* widescreen = off 0 | auto -1 (nvn_gl.c wide_k, display.c) */
 int gfx_ff_speed(void);                   /* fast_forward = 2 | 3 | 4: the speed while the fast-forward key is held */

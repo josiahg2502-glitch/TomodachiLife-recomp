@@ -1680,7 +1680,7 @@ static int classic(void) {
 static void t_init(void) {
     float w = gfx_widescreen();
     g_t_wide0 = g_t_wide = w < 0 ? 1 : 0;
-    g_t_fps0 = g_t_fps = gfx_frame_rate();
+    g_t_fps0 = g_t_fps = gfx_frame_rate_auto() ? 0 : gfx_frame_rate();      /* (0: auto) */
     g_t_ff = gfx_ff_speed();
 }
 static int t_res_idx(void) { int b = 0; for (int i = 1; i < N(k_res); i++) if (fabsf(k_res[i] - S.scale) < fabsf(k_res[b] - S.scale)) b = i; return b; }
@@ -1702,7 +1702,7 @@ static void t_value(int r, char *v, int n) {
     case T_SIZE: snprintf(v, (size_t)n, "%s", S.size < 0 ? "Custom" : k_size_name[S.size]); break;
     case T_RES: snprintf(v, (size_t)n, "%s", k_res_name[t_res_idx()]); break;
     case T_WIDE: snprintf(v, (size_t)n, "%s", k_wide_name[g_t_wide]); break;
-    case T_FPS: snprintf(v, (size_t)n, "%d fps", g_t_fps); break;
+    case T_FPS: snprintf(v, (size_t)n, "%s", !g_t_fps ? "Auto (60 or 30)" : g_t_fps == 60 ? "60 fps" : "30 fps"); break;
     case T_VSYNC: snprintf(v, (size_t)n, "%s", k_vsync_name[S.vsync]); break;
     case T_RENDER: snprintf(v, (size_t)n, "%s", k_renderer_name[S.renderer]); break;
     case T_VOLUME: snprintf(v, (size_t)n, "%d", S.volume < 0 ? 100 : S.volume); break;
@@ -1723,7 +1723,7 @@ static void t_change(int r, int dir) {         /* dir -1 / +1: left / right; A c
         snprintf(v, sizeof v, "%d", k_sizes[S.size][0]); ini("width", v); snprintf(v, sizeof v, "%d", k_sizes[S.size][1]); ini("height", v); break;
     case T_RES: S.scale = k_res[(t_res_idx() + dir + N(k_res)) % N(k_res)]; snprintf(v, sizeof v, S.scale == (float)(int)S.scale ? "%.1f" : "%.4g", S.scale); ini("resolution_scale", v); break;
     case T_WIDE: g_t_wide = (g_t_wide + dir + N(k_wide)) % N(k_wide); ini("widescreen", k_wide[g_t_wide]); break;
-    case T_FPS: g_t_fps = g_t_fps == 60 ? 30 : 60; snprintf(v, sizeof v, "%d", g_t_fps); ini("frame_rate", v); break;
+    case T_FPS: g_t_fps = g_t_fps == 60 ? (dir > 0 ? 0 : 30) : g_t_fps == 30 ? (dir > 0 ? 60 : 0) : (dir > 0 ? 30 : 60); ini("frame_rate", !g_t_fps ? "auto" : g_t_fps == 60 ? "60" : "30"); break;
     case T_VSYNC: { int k = 0; for (int i = 0; i < N(k_vsync_order); i++) if (k_vsync_order[i] == S.vsync) k = i;
         S.vsync = k_vsync_order[(k + dir + N(k_vsync_order)) % N(k_vsync_order)]; ini("vsync", k_vsync[S.vsync]); break; }
     case T_RENDER: S.renderer = (S.renderer + dir + N(k_renderer)) % N(k_renderer); ini("renderer", k_renderer[S.renderer]); break;

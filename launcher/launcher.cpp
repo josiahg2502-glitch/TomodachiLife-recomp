@@ -41,6 +41,7 @@
 #include "mii_ltd.h"
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#include "../runtime/nnpad_default_ini.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -571,7 +572,7 @@ const std::vector<Option>& options() {
         {"RESOLUTION", "resolution_scale", "1.0", {{"0.5", "540p"}, {"0.6667", "720p"}, {"1.0", "1080p"}, {"1.5", "1620p"}, {"2.0", "4K"}, {"3.0", "3240p"}}},
         // as the game's PC Settings (menu.cpp) since 2026-11-01: 16:9 by default, no fixed 21:9 / 32:9 (the game reads them as 16:9)
         {"WIDESCREEN", "widescreen", "off", {{"off", "Off (16:9)"}, {"auto", "Fit the screen (up to 21:9)"}}},
-        {"FRAME RATE", "frame_rate", "60", {{"60", "60 fps (drops to 30 when needed)"}, {"30", "30 fps (as on the console)"}}},
+        {"FRAME RATE", "frame_rate", "60", {{"60", "60 fps"}, {"auto", "60 fps, 30 when the PC falls behind"}, {"30", "30 fps (as on the console)"}}},
         {"VSYNC", "vsync", "auto", {{"auto", "Automatic"}, {"display", "Follow the display"}, {"clock", "Own 60 Hz clock"}, {"off", "Off"}}},
         {"VOLUME", "volume", "auto", {{"auto", "System"}, {"0", "0 %"}, {"10", "10 %"}, {"20", "20 %"}, {"30", "30 %"}, {"40", "40 %"}, {"50", "50 %"}, {"60", "60 %"}, {"70", "70 %"}, {"80", "80 %"}, {"90", "90 %"}, {"100", "100 %"}}},
         // the game's 13 message sets (romfs/Mals: USen EUen USfr EUfr EUde USes EUes EUit EUnl JPja KRko CNzh TWzh); "en" alone meant en-GB
@@ -1032,7 +1033,14 @@ private:
             import_mii(mii_slots_[i].first, mii_slots_[i].second);
             break;
         case Screen::kControls:
-            if (i == 1) edit_file(g_pads_ini);
+            if (i == 1) {
+                if (!is_file(g_pads_ini)) {                  // the game writes it at its first start: before that Notepad could not find it (issue #33)
+                    std::error_code e;
+                    fs::create_directories(g_pads_ini.parent_path(), e);
+                    if (FILE* f = _wfopen(g_pads_ini.wstring().c_str(), L"wb")) { fputs(g_default_ini, f); fclose(f); }
+                }
+                edit_file(g_pads_ini);
+            }
             else if (i == 2) back();
             break;
         case Screen::kInstall:
@@ -1627,7 +1635,8 @@ private:
 
     void draw_toast() {
         const float W = layout_.w, H = layout_.h, px = H * 0.027f;      // top right: the status lines own the bottom left
-        const std::string text = shaders_ > 0 ? std::to_string(shaders_) + " shaders ready" : "Shaders compile the first time you play";
+        // no count: pairs.txt counts the pairs drawn so far, the install compiles the single shaders, and players read one as a share of the other (issue #7)
+        const std::string text = shaders_ > 0 ? "Shaders ready" : "Shaders compile the first time you play";
         const float tw = font_.width(r_, text, px);
         const float bh = H * 0.068f, bw = tw + H * 0.11f, bx = W - bw - H * 0.03f, by = H * 0.03f;
         paint_.round_rect(bx, by, bw, bh, H * 0.008f, {kGold.r, kGold.g, kGold.b, 0.75f});
