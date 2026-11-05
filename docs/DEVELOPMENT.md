@@ -200,6 +200,12 @@ picks this up:
   `100:d/2` nine times, `200:Z 200:r/2 200:Z 500 200:Z 300`. Illuminate on and up: `100:Z 200 100:d/2 200:r/70 200`. Out and saved:
   `200:X 200 200:! 500 200:! 600`. `TOMO_SAVE_TEST=<poll>` needs the hand up on the island (`150:l/2 150:r/2` steps), no menu open.
 - **Save:** the save manager's request flag: `tomo.c` `save_now_step`. Its autosave counts at +0x948.
+- **Clock snapshots in the save:** the game compares the `nn::time::ClockSnapshot` in its save with a new one at every start (`State::CheckPenalty`;
+  1.0.4 0x71008713a8). No span between them means the penalty: `BootCheckPenalty_00`, shops stuck for a day. A save from a console or an emulator has
+  the SDK's layout and another clock source, ours has `tomo.c`'s own: `time_CalculateSpanBetween` answers 0 there (before 1.0.2 it answered "none") and the
+  accessors read such a snapshot at the SDK's offsets. A save already penalized has it at the time manager's +0xb50.
+- **The Palette House pen:** its object keeps the position at +8 and `pen_place_hook` (`tomo.c`) puts the mouse's there, just before the game hands it to the
+  pointer. Test: `TOMO_MOUSE_TEST` with `,H` (the left button held); the recipe to the canvas is in "A lit face" above, then `200:X` closes the Illuminate panel.
 - **Code mods:** `runtime/tomo_mod.h`, [MODDING.md](MODDING.md).
 - **The install runs no pip and no PowerShell:** both failed on players' PCs. `launcher.cpp` downloads the wheels itself
   (`kWheels`, checked by SHA-256) and unpacks them with tar; `--shortcut` makes the shortcuts by COM.
