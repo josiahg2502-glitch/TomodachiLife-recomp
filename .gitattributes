@@ -4,3 +4,4 @@
 *.gif binary
 *.webp binary
 *.ttf binary
+scripts/*.ps1 export-ignore

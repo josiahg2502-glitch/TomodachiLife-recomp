@@ -119,7 +119,8 @@ Diagnostics: `TOMO_SAMPLE=1` (1 ms function sampler of every guest thread and th
 thread / wait report after 3 s without a present), `TOMO_GPUTIME=<ms>` (every draw and dispatch finished and timed; with
 `TOMO_GPUTIME_EVERY=<n>` only every n-th; the last 256 commands are kept in `gputime_last.txt` through a file mapping
 that survives a GPU reset), `scripts/ps_run.ps1` (runs the game from PowerShell with the real exit code: under the bash
-`timeout` wrapper a driver reset showed as exit 127 and a truncated log), `TOMO_EVLOG=1` (events waited on for over 2 s and who signals them), `TOMO_TASKLOG=1` (scene task states),
+`timeout` wrapper a driver reset showed as exit 127 and a truncated log; the `.ps1` files are in a git clone only, `.gitattributes`
+keeps them out of the release packages and the updater's download: Defender has flagged them, issue #31), `TOMO_EVLOG=1` (events waited on for over 2 s and who signals them), `TOMO_TASKLOG=1` (scene task states),
 `TOMO_HEAPLOG=1|<heap name>`, `TOMO_ALIASLOG=1`, `TOMO_TEXFREE=<bits>` (1 / 2 / 4: keep base textures / views /
 resident handles instead of freeing them), `SSBU_GLDEBUG=1`, `SSBU_PEEK=<addr,...>` in the crash report,
 `tools/debug/*.py` (disassemble main or sdk by address / name, callers, relocation of a slot, cross-references, host
