@@ -1,9 +1,9 @@
-/* Tomodachi-Life-PC-Setup.exe: the one download. Its resources hold the release's files (PAYLOAD: a zip of the repository
+/* Tomodachi-Life-PC-Setup.exe: the one download. Its resources hold the release's files (FILES: a zip of the repository
  * at the release's tag with build\work\TomodachiLauncher.exe, SDL3.dll and, at the top, Tomodachi Life.exe and Tomodachi Life
  * Launcher.exe added: launcher\start.c); it unpacks them into the folder the
  * player confirms (C:\Games\TomodachiLife by default), puts a "Tomodachi Life" shortcut on the desktop and starts the
  * launcher there, whose INSTALL screen does the rest (the installer's Python, the player's game files, the build).
- * Nothing else is needed: Windows 10 1803 or later unpacks the zip with its own tar.exe.
+ * Nothing else is needed: it unpacks the zip itself (stb's inflate, third_party/stb).
  *   --target <folder>  install there without asking; --quiet: no window at all, no launcher started (tests)
  * Built by scripts/make_setup.py (clang; the zip, a manifest and an icon are written into the resources afterwards). */
 #define WIN32_LEAN_AND_MEAN
@@ -16,8 +16,17 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <commctrl.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <wchar.h>
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG                /* (for its inflate: no image is read here) */
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#include "stb_image.h"
 
 static const wchar_t kTitle[] = L"Tomodachi Life PC";
 static const wchar_t kDefault[] = L"C:\\Games\\TomodachiLife";
@@ -86,48 +95,58 @@ static int ask(const wchar_t *target) {
     return r == IDYES ? 1 : r == IDNO ? 2 : 0;
 }
 
-static int run_wait(wchar_t *cmd, const wchar_t *dir, DWORD *code) {
-    STARTUPINFOW si = {sizeof si};
-    PROCESS_INFORMATION pi;
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, dir, &si, &pi)) return 0;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return 1;
-}
+static uint32_t rd2(const uint8_t *p) { return p[0] | p[1] << 8; }
+static uint32_t rd4(const uint8_t *p) { return rd2(p) | rd2(p + 2) << 16; }
 
-/* the PAYLOAD resource into a zip in target, unpacked by Windows' tar.exe (the zip's top folder dropped). tar.exe takes its path arguments
- * through the code page, and a folder name outside it failed: it gets no path, only target as its working directory. */
+/* The FILES resource, a zip, into target (the zip's top folder dropped). This used to write the zip to the disk and run Windows' tar.exe
+ * in a hidden window on it: antivirus programs read a setup that starts hidden programs as a dropper (issues #21, #26, #31). */
 static int unpack(const wchar_t *target, wchar_t *err, size_t errn) {
-    HRSRC r = FindResourceW(NULL, L"PAYLOAD", MAKEINTRESOURCEW(10) /* RT_RCDATA */);
+    HRSRC r = FindResourceW(NULL, L"FILES", MAKEINTRESOURCEW(10) /* RT_RCDATA */);
     HGLOBAL g = r ? LoadResource(NULL, r) : NULL;
-    const void *data = g ? LockResource(g) : NULL;
+    const uint8_t *z = g ? LockResource(g) : NULL;
     const DWORD size = r ? SizeofResource(NULL, r) : 0;
-    if (!data || !size) { swprintf(err, errn, L"This setup holds no files (it was not built completely)."); return 0; }
-    wchar_t name[64], zip[MAX_PATH + 64], tar[MAX_PATH], cmd[2 * MAX_PATH];
+    DWORD end = size >= 22 ? size - 22 : 0;
+    while (z && end > 0 && rd4(z + end) != 0x06054b50) end--;      /* the end of the central directory */
+    if (!z || size < 22 || rd4(z + end) != 0x06054b50) { swprintf(err, errn, L"This setup holds no files (it was not built completely)."); return 0; }
     const int made = SHCreateDirectoryExW(NULL, target, NULL);
     if (made != ERROR_SUCCESS && made != ERROR_ALREADY_EXISTS && made != ERROR_FILE_EXISTS) {
         swprintf(err, errn, L"Could not make the folder %s (error %d). Choose another one.", target, made);
         return 0;
     }
-    swprintf(name, 64, L"TomodachiLifeSetup_%lu.zip", GetCurrentProcessId());
-    swprintf(zip, MAX_PATH + 64, L"%s\\%s", target, name);
-    HANDLE f = CreateFileW(zip, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
-    DWORD wrote = 0;
-    const BOOL ok = f != INVALID_HANDLE_VALUE && WriteFile(f, data, size, &wrote, NULL) && wrote == size;
-    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
-    if (!ok) { swprintf(err, errn, L"Could not write %s (is the folder writable and the drive not full?).", zip); DeleteFileW(zip); return 0; }
-    GetSystemDirectoryW(tar, MAX_PATH);
-    wcscat(tar, L"\\tar.exe");
-    swprintf(cmd, 2 * MAX_PATH, L"\"%s\" -xf %s --strip-components=1", tar, name);
-    DWORD code = 1;
-    const int ran = run_wait(cmd, target, &code);
-    DeleteFileW(zip);
-    if (!ran) { swprintf(err, errn, L"Windows' tar.exe could not be started: this needs Windows 10 (1803 or later) or Windows 11."); return 0; }
-    if (code) { swprintf(err, errn, L"Unpacking into %s failed (tar.exe exit %lu): is the folder writable and the drive not full?", target, code); return 0; }
+    const uint8_t *e = z + rd4(z + end + 16);
+    for (uint32_t i = rd2(z + end + 10); i > 0; i--, e += 46 + rd2(e + 28) + rd2(e + 30) + rd2(e + 32)) {
+        const char *name = (const char *)e + 46;
+        const int nlen = rd2(e + 28);
+        const char *rel = memchr(name, '/', nlen);
+        if (rd4(e) != 0x02014b50) { swprintf(err, errn, L"This setup's files are damaged. Please download it again."); return 0; }
+        if (!rel || rel + 1 == name + nlen) continue;              /* the top folder */
+        rel++;
+        wchar_t w[MAX_PATH], path[2 * MAX_PATH], dir[2 * MAX_PATH];
+        const int k = MultiByteToWideChar(CP_UTF8, 0, rel, (int)(name + nlen - rel), w, MAX_PATH - 1);
+        w[k] = 0;
+        for (wchar_t *c = w; *c; c++) if (*c == L'/') *c = L'\\';
+        swprintf(path, 2 * MAX_PATH, L"%s\\%s", target, w);
+        const int is_dir = w[k - 1] == L'\\';
+        wcscpy(dir, path);
+        if (is_dir) dir[wcslen(dir) - 1] = 0; else *wcsrchr(dir, L'\\') = 0;
+        SHCreateDirectoryExW(NULL, dir, NULL);
+        if (is_dir) continue;
+        const uint32_t method = rd2(e + 10), csize = rd4(e + 20), usize = rd4(e + 24);
+        const uint8_t *local = z + rd4(e + 42), *comp = local + 30 + rd2(local + 26) + rd2(local + 28);
+        char *buf = malloc(usize ? usize : 1);
+        const int ok = buf && (method == 0 ? (memcpy(buf, comp, usize), 1) : method == 8 && (!usize || stbi_zlib_decode_noheader_buffer(buf, (int)usize, (const char *)comp, (int)csize) == (int)usize));
+        HANDLE f = ok ? CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+        DWORD wrote = 0;
+        const BOOL done = f != INVALID_HANDLE_VALUE && WriteFile(f, buf, usize, &wrote, NULL) && wrote == usize;
+        if (f != INVALID_HANDLE_VALUE) {                           /* the time in the zip, as tar kept it: the build goes by file times */
+            FILETIME loc, utc;
+            if (DosDateTimeToFileTime((WORD)rd2(e + 14), (WORD)rd2(e + 12), &loc) && LocalFileTimeToFileTime(&loc, &utc)) SetFileTime(f, NULL, NULL, &utc);
+            CloseHandle(f);
+        }
+        free(buf);
+        if (!ok) { swprintf(err, errn, L"This setup's files are damaged (%s). Please download it again.", w); return 0; }
+        if (!done) { swprintf(err, errn, L"Could not write %s: is the game or the launcher still open, is the folder writable and the drive not full?", path); return 0; }
+    }
     return 1;
 }
 

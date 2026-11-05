@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build "dist/Tomodachi-Life-PC-Setup.exe", the one download for players (and dist/Tomodachi-Life-PC.zip, the same files as a
 zip): launcher/setup.c compiled with clang, and in its
-resources the release's files (PAYLOAD: `git archive` of <ref> plus build/work/TomodachiLauncher.exe and SDL3.dll from the
+resources the release's files (FILES: `git archive` of <ref> plus build/work/TomodachiLauncher.exe and SDL3.dll from the
 runtime package that <ref>'s scripts/install.py pins, and at the top "Tomodachi Life.exe" / "Tomodachi Life Launcher.exe",
 launcher/start.c compiled here), a manifest (common controls 6 for its dialog, no elevation, DPI
-aware) and an icon (a smiling face drawn here: no game art is shipped).
+aware), an icon (a smiling face drawn here: no game art is shipped) and version information.
 
     python scripts/make_setup.py [--ref v1.0.0] [--clang <clang.exe>] [--out dist]
 
@@ -84,8 +84,29 @@ def icon():
     return f.getvalue()
 
 
-def stamp(exe, zipdata, ico, manifest=MANIFEST):
-    """the icon, and the manifest and the PAYLOAD when given, into exe's resources"""
+def version_info(ver, desc):
+    """VS_VERSIONINFO as resource bytes: Windows' file properties show what this program is"""
+    def block(key, value=b'', vtype=1, vlen=None, children=b''):
+        k = key.encode('utf-16-le') + b'\0\0'
+        head = k + b'\0' * (-(6 + len(k)) % 4)
+        body = value + b'\0' * (-len(value) % 4)
+        return struct.pack('<HHH', 6 + len(head) + len(body) + len(children), len(value) if vlen is None else vlen, vtype) + head + body + children
+    nums = (([int(x) for x in re.findall(r'\d+', ver)] + [0, 0, 0, 0])[:4])
+    ms, ls = nums[0] << 16 | nums[1], nums[2] << 16 | nums[3]
+    fixed = struct.pack('<13I', 0xFEEF04BD, 0x00010000, ms, ls, ms, ls, 0x3F, 0, 0x00040004, 1, 0, 0, 0)
+    strings = b''
+    for key, val in (('CompanyName', 'TomodachiLife-recomp project'), ('FileDescription', desc), ('FileVersion', ver), ('LegalCopyright', 'Open source, see LICENSE'),
+                     ('ProductName', 'Tomodachi Life PC'), ('ProductVersion', ver)):
+        v = val.encode('utf-16-le') + b'\0\0'
+        s = block(key, v, 1, len(val) + 1)
+        strings += s + b'\0' * (-len(s) % 4)
+    sfi = block('StringFileInfo', vtype=1, children=block('040904b0', vtype=1, children=strings))
+    vfi = block('VarFileInfo', vtype=1, children=block('Translation', struct.pack('<HH', 0x0409, 1200), 0))
+    return block('VS_VERSION_INFO', fixed, 0, children=sfi + b'\0' * (-len(sfi) % 4) + vfi)
+
+
+def stamp(exe, zipdata, ico, manifest=MANIFEST, version=None):
+    """the icon, version information, and the manifest and the FILES when given, into exe's resources"""
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
     k32.BeginUpdateResourceW.restype = wintypes.HANDLE
     k32.BeginUpdateResourceW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL]
@@ -101,8 +122,10 @@ def stamp(exe, zipdata, ico, manifest=MANIFEST):
     for i, e in enumerate(entries):
         ok = ok and bool(k32.UpdateResourceW(h, 3, i + 1, 0, ico[e[7]:e[7] + e[6]], e[6]))               # RT_ICON
     ok = ok and bool(k32.UpdateResourceW(h, 14, 1, 0, group, len(group)))                                # RT_GROUP_ICON
+    if version:
+        ok = ok and bool(k32.UpdateResourceW(h, 16, 1, 0x0409, version, len(version)))                    # RT_VERSION
     if zipdata is not None:
-        name = ctypes.create_unicode_buffer('PAYLOAD')
+        name = ctypes.create_unicode_buffer('FILES')
         ok = ok and bool(k32.UpdateResourceW(h, 10, ctypes.addressof(name), 0, zipdata, len(zipdata)))     # RT_RCDATA
     ok = bool(h) and bool(k32.EndUpdateResourceW(h, not ok)) and ok
     if not ok:
@@ -117,22 +140,23 @@ def main():
     a = ap.parse_args()
     ico = icon()
     exe = os.path.join(a.out, NAME)
+    ver = git('show', a.ref + ':version.txt').decode().strip()
     with tempfile.TemporaryDirectory() as tmp:
         top = {}
         for name, defs in TOP_EXES:                       # the game and the launcher at the top of the folder (launcher/start.c)
             built = os.path.join(tmp, 'start.exe')
             subprocess.run([a.clang, '-O2', '-w'] + defs + [os.path.join(REPO, 'launcher', 'start.c'), '-o', built, '-luser32',
                             '-Wl,/SUBSYSTEM:WINDOWS', '-Wl,/ENTRY:wWinMainCRTStartup'], check=True)
-            stamp(built, None, ico, manifest=None)
+            stamp(built, None, ico, manifest=None, version=version_info(ver, name[:-4]))
             with open(built, 'rb') as f:
                 top[name] = f.read()
         zipdata, pkg = payload(a.ref, a.out, top)
         with open(os.path.join(a.out, 'Tomodachi-Life-PC.zip'), 'wb') as f:      # the same files as a zip (the release's other download)
             f.write(zipdata)
         built = os.path.join(tmp, 'setup.exe')
-        subprocess.run([a.clang, '-O2', '-w', os.path.join(REPO, 'launcher', 'setup.c'), '-o', built, '-luser32', '-lshell32', '-lole32',
+        subprocess.run([a.clang, '-O2', '-w', '-I' + os.path.join(REPO, 'third_party', 'stb'), os.path.join(REPO, 'launcher', 'setup.c'), '-o', built, '-luser32', '-lshell32', '-lole32',
                         '-lcomctl32', '-luuid', '-Wl,/SUBSYSTEM:WINDOWS', '-Wl,/ENTRY:wWinMainCRTStartup'], check=True)
-        stamp(built, zipdata, ico)
+        stamp(built, zipdata, ico, version=version_info(ver, 'Tomodachi Life PC Setup'))
         shutil.copyfile(built, exe)                       # (the temporary folder may be on another drive)
     commit = git('rev-parse', '--short=10', a.ref + '^{commit}').decode().strip()
     print('%s  (%.1f MB): %s at %s, launcher from %s' % (exe, os.path.getsize(exe) / 1048576, a.ref, commit, pkg))
