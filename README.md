@@ -22,6 +22,8 @@ of the game, dumped from your own Switch, with your own console keys. Not affili
 ## What you need
 
 - Windows 10 or 11, 64-bit; about 15 GB free on the drive you install to; 8 GB of RAM or more (16 GB recommended).
+- Windows' page file left on (automatic is best), with room to grow on its drive: the game asks Windows for about 13 GB, though it uses
+  far less of it. Without that room it can crash with error `0x00000004`.
 - A GPU with Vulkan 1.3 or OpenGL 4.5. The game picks by itself: OpenGL on NVIDIA cards, Vulkan on AMD and Intel (PC Settings,
   **Renderer**, changes it). Developed and tested on NVIDIA (RTX 3060, both renderers); AMD and Intel are less tested.
 - Your game files, dumped from your Switch:

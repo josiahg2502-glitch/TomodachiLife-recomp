@@ -35,6 +35,9 @@ DUMP_NEED_GB = 7.0
 GB_PER_JOB = 1.75
 RAM_WARN_GB = 16
 RAM_FAIL_GB = 8
+# Commit charge at the island, measured on both renderers (8 residents, 2026-11-04): 12.9 GB, of which only 3-4 GB in use (the game's
+# heap alone is 4.5 GB, touched only where used). RAM + page file have to hold it all: a commit that fails ends in a crash, exit code 4.
+COMMIT_NEED_GB = 14
 
 STORE_VP9 = 'ms-windows-store://pdp/?ProductId=9N4D0MSMP0PT'
 STORE_WEB = 'ms-windows-store://pdp/?ProductId=9N5TDP8VCMHS'
@@ -81,7 +84,8 @@ def check_cpu():
     return _r('warn', 'Processor', 'works, but it is an old model (no AVX2); the game may run slowly. Found: %s' % (', '.join(feats) or 'basic features only'))
 
 
-def _ram_gb():
+def _memory_gb():
+    """RAM, and what Windows can commit now: RAM + the page file as it stands (an automatic page file can still grow)."""
     class MS(ctypes.Structure):
         _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong), ('ullTotalPhys', ctypes.c_ulonglong),
                     ('ullAvailPhys', ctypes.c_ulonglong), ('ullTotalPageFile', ctypes.c_ulonglong),
@@ -90,8 +94,12 @@ def _ram_gb():
     m = MS()
     m.dwLength = ctypes.sizeof(MS)
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
-        return None
-    return m.ullTotalPhys / 2.0 ** 30
+        return None, None
+    return m.ullTotalPhys / 2.0 ** 30, m.ullTotalPageFile / 2.0 ** 30
+
+
+def _ram_gb():
+    return _memory_gb()[0]
 
 
 def suggested_jobs(ram_gb):
@@ -116,6 +124,19 @@ def check_ram():
     if gb < RAM_WARN_GB:
         return _r('warn', 'Memory', '%.1f GB of RAM: enough, but the build will be slow and tight; close other programs (%s)' % (gb, hint))
     return _r('ok', 'Memory', '%.1f GB of RAM (%s)' % (gb, hint))
+
+
+def check_page_file():
+    try:
+        gb = _memory_gb()[1]
+    except Exception:
+        gb = None
+    if gb is None:
+        return _r('ok', 'Page file', 'could not be read')
+    if gb >= COMMIT_NEED_GB:
+        return _r('ok', 'Page file', 'RAM and page file hold %.0f GB; the game can ask for about %d' % (gb, COMMIT_NEED_GB))
+    return _r('warn', 'Page file', 'RAM and page file hold %.1f GB now, and the game asks for about %d (it uses far less of it). Keep Windows\' page file automatic, with %.0f GB '
+              'free on the system drive, or the game can crash with error 0x00000004' % (gb, COMMIT_NEED_GB, COMMIT_NEED_GB - gb))
 
 
 def _existing_parent(p):
@@ -231,7 +252,7 @@ def check_paths(build_dir):
 
 def checks(build_dir, need_msvc=False, dump_dir=None, temp_gb=0.0):
     out = []
-    for fn in (check_windows, check_cpu, check_ram, lambda: check_disk(build_dir, dump_dir, temp_gb), check_vulkan, check_codecs,
+    for fn in (check_windows, check_cpu, check_ram, check_page_file, lambda: check_disk(build_dir, dump_dir, temp_gb), check_vulkan, check_codecs,
                lambda: check_msvc(need_msvc), lambda: check_paths(build_dir)):
         try:
             out.append(fn())

@@ -765,6 +765,16 @@ void module_coverage_report(FILE *out);      /* nnro.c: script module functions 
 void (*g_exit_report_hook)(FILE *);          /* a test's own last line (nnsdk2.c eh_main_test) */
 void (*g_plugin_report_hook)(void);          /* skyline.c: how often the plugins' hooks ran */
 
+/* A crash report's state of memory. A host allocation that failed reaches the game as a null pointer, and the game commits about
+ * 13 GB: a small page file can run out with RAM to spare. The launcher tells the player when it reads "out of memory". */
+static void crash_memory_note(FILE *f) {
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof ms;
+    if (GlobalMemoryStatusEx(&ms))
+        fprintf(f, "  memory: RAM %llu of %llu MB free, commit %llu of %llu MB free%s\n", (unsigned long long)(ms.ullAvailPhys >> 20), (unsigned long long)(ms.ullTotalPhys >> 20),
+                (unsigned long long)(ms.ullAvailPageFile >> 20), (unsigned long long)(ms.ullTotalPageFile >> 20), ms.ullAvailPageFile < 512ull << 20 ? " (out of memory)" : "");
+}
+
 void report_and_exit(int code) {
     if (g_exit_report_hook) g_exit_report_hook(stdout);
     if (g_plugin_report_hook) g_plugin_report_hook();
@@ -980,6 +990,7 @@ static void crash_file_report(EXCEPTION_POINTERS *ep) {
     if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
         fprintf(f, "  %s address 0x%llx\n", er->ExceptionInformation[0] == 1 ? "writing" : "reading", (unsigned long long)er->ExceptionInformation[1]);
     fprintf(f, "thread %lu (%s), on logical processor %lu\n", tid, tn ? tn : "not a guest thread, or the main thread", GetCurrentProcessorNumber());
+    crash_memory_note(f);
     fprintf(f, "host registers: rax %016llx rbx %016llx rcx %016llx rdx %016llx\n                rsi %016llx rdi %016llx rbp %016llx rsp %016llx\n"
                "                r8  %016llx r9  %016llx r10 %016llx r11 %016llx\n                r12 %016llx r13 %016llx r14 %016llx r15 %016llx\n",
             cx->Rax, cx->Rbx, cx->Rcx, cx->Rdx, cx->Rsi, cx->Rdi, cx->Rbp, cx->Rsp, cx->R8, cx->R9, cx->R10, cx->R11, cx->R12, cx->R13, cx->R14, cx->R15);
@@ -1063,6 +1074,7 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
         { extern volatile const char *g_hitch_rt; extern volatile uint64_t g_hitch_rt_arg; const char *nvn_front_cur_op(void); void nvn_front_crash_notes(FILE *);
           printf("  render thread: in %s (%llu), last command %s\n", g_hitch_rt ? (const char *)g_hitch_rt : "-", (unsigned long long)g_hitch_rt_arg, nvn_front_cur_op());
           nvn_front_crash_notes(stdout); fflush(stdout); }
+        crash_memory_note(stdout);
         fflush(stdout);                             /* a log file keeps this even if the rest of the report faults */
     }
     if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
@@ -1210,6 +1222,7 @@ static void crash_file_report(int sig, siginfo_t *si, ucontext_t *u) {
     fprintf(f, "=== %04d-%02d-%02d %02d:%02d:%02d  HOST SIGNAL %d (%s) at %p (%s)\n", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
             sig, strsignal(sig), (void *)UC_PC(u), sym);
     if (sig == SIGSEGV || sig == SIGBUS) fprintf(f, "  %s address %p\n", UC_WRITE(u) ? "writing" : "reading", si->si_addr);
+    crash_memory_note(f);
     fprintf(f, "thread %lu (%s), on logical processor %lu\n", (unsigned long)tid, tn ? tn : "not a guest thread, or the main thread", (unsigned long)GetCurrentProcessorNumber());
     uc_print_registers(f, u);
     MEMORY_BASIC_INFORMATION mbi;       /* a stack overflow leaves rsp on a guard page: reading it would fault again */
@@ -1249,6 +1262,7 @@ static void crash_signal(int sig, siginfo_t *si, void *uc) {
     ucontext_t *u = uc;
     uintptr_t rip = UC_PC(u), rsp = UC_SP(u), bad = (uintptr_t)si->si_addr;
     printf("\nHOST SIGNAL %d (%s) at address %p\n", sig, sig == SIGSEGV ? "segmentation fault" : sig == SIGBUS ? "bus error" : sig == SIGILL ? "illegal instruction" : sig == SIGFPE ? "arithmetic" : "?", si->si_addr);
+    crash_memory_note(stdout);
     {   char sym[400];
         plat_symbolize(rip, sym, sizeof sym);
         printf("  host instruction %p in %s; host stack pointer %p, thread %lu\n", (void *)rip, sym, (void *)rsp, (unsigned long)GetCurrentThreadId());

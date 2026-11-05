@@ -1431,7 +1431,7 @@ private:
             fclose(f);
         }
         const auto has = [&](const char* s) { return text.find(s) != std::string::npos; };
-        if (has("could not be committed") || has("cannot map ") || has("cannot allocate"))
+        if (has("could not be committed") || has("cannot map ") || has("cannot allocate") || has("(out of memory)"))
             return "Not enough memory: close other programs or enlarge Windows' page file.";
         if (code == 4) {
             std::string mod;
