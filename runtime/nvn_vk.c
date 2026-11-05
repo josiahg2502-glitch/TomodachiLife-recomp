@@ -452,9 +452,9 @@ int nvn_vk_init(void *hwnd) {
     if (best < 0) { printf("nvn_vk: no usable Vulkan 1.3 device%s\n", forced >= 0 ? " (SSBU_VK_DEVICE names one that is not usable)" : ""); fflush(stdout); if (forced >= 0) ExitProcess(5); vk_unavailable(); }
     V.gpu = gpus[best]; V.family = best_family;
     vkGetPhysicalDeviceProperties(V.gpu, &V.props);
-    if (V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {       /* (a Linux PC without its card's driver gets Mesa's llvmpipe: a new scene takes it many minutes, which looks like a freeze) */
-        static const char msg[] = "No graphics card with a Vulkan 1.3 driver was found, so the processor is drawing the game. It will run at a few frames per second "
-                                  "and stop for many minutes whenever a new scene appears.\n\nInstall your graphics card's Vulkan driver, then start the game again.";
+    if (V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {       /* (a Linux PC without its card's driver gets Mesa's llvmpipe: LLVM can take over an hour on one of the game's shaders, which looks like a freeze) */
+        static const char msg[] = "No graphics card with a Vulkan 1.3 driver was found, so the processor is drawing the game. That is too slow to play: a few frames per second "
+                                  "at best, and it can stop for an hour or more when a new scene appears.\n\nInstall your graphics card's Vulkan driver, then start the game again.";
         const char *off = getenv("SSBU_ERROR_DIALOG");
         printf("nvn_vk: %s\n", msg);
         if (!(off && off[0] == '0') && !getenv("SSBU_SEQ") && !getenv("SSBU_PLAY") && !getenv("SSBU_PRESS") && !getenv("SSBU_SCRIPT") && !getenv("TOMO_PREPARE_ONLY"))

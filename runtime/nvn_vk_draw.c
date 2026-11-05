@@ -3142,9 +3142,12 @@ static int buf_ref(uint64_t addr, uint64_t size, uint64_t align, BufRef *b) {
 }
 static void compute_pipe_make(VStage *v);
 static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uint32_t gy, uint32_t gz);
+/* SSBU_VK_NODRAW=1 (tests): no draw or dispatch reaches the driver, so the game's logic runs at speed on a software driver, whose LLVM takes over an hour on some shaders. */
+static int vk_nodraw(void) { static int v = -1; if (v < 0) v = getenv("SSBU_VK_NODRAW") != NULL; return v; }
 static void compute_dispatch(uint32_t gx, uint32_t gy, uint32_t gz) {
     Prog *p = R.prog[5];
     static int nlog;
+    if (vk_nodraw()) return;
     R.dispatches++;
     if (!p) { if (nlog++ < 10) printf("nvn_vk: DispatchCompute with no compute program bound\n"); return; }
     Stage *st = &p->st[5];
@@ -3346,7 +3349,7 @@ static uint32_t g_fd_gen;
 static VStage *g_fd_vs, *g_fd_fs;
 static uint8_t g_fd_list[sizeof g_dtex];
 static int draw_prepare(unsigned prim) {
-    if (g_vk_exiting) return 0;
+    if (g_vk_exiting || vk_nodraw()) return 0;
     if (g_fastdraw < 0) g_fastdraw = getenv("SSBU_VK_FASTDRAW") ? atoi(getenv("SSBU_VK_FASTDRAW")) : 1;
     const int fast = g_fastdraw == 1 || (g_fastdraw == 2 && !((nvn_front_frame_next() / 300) & 1));
     if (!g_dprof) g_dprof = getenv("SSBU_VK_DRAWPROF") && atoi(getenv("SSBU_VK_DRAWPROF")) ? 1 : -1;

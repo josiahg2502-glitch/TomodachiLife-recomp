@@ -203,5 +203,9 @@ picks this up:
   call in a shared file has to be added there, and only a build shows it: run Linux's link (`setup.py --target linux --only link`)
   and Android's `build_libs.py --host-only` before a release. A failed `build_libs.py` leaves the old `libmain.so`, which
   `build_apk.py` packs without a word, so stop at its exit code.
+- **Linux without a GPU (WSL + lavapipe):** it draws the title and the loading screens, but past them llvmpipe's LLVM spends an hour
+  or more on single shaders (`perf`: all of it in libLLVM, on lavapipe's own thread; real drivers do not compile this way). Without
+  input the game stays in the title's attract mode, which is not the real flow. `SSBU_VK_NODRAW=1` keeps every draw and dispatch from
+  the driver: the real game then runs on Linux at speed, up to the island, the menus and saves. It says nothing about pictures.
 - **Known gaps of the port against its own bar:** the PC Settings page opens by key, not from inside the game's own Settings
   screen; arm64 and real AMD / Intel / Steam Deck hardware were not available for testing.
