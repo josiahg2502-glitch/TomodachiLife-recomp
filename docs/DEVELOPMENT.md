@@ -163,11 +163,15 @@ picks this up:
 - **Open: the three-frame flicker (issues #29, #34).** On a player's RTX 5080 laptop (driver 617.42, OpenGL) the soft shadow under each
   Mii has exactly three levels, one per frame of a three-frame cycle, and glow goes off in one frame of three. It never showed on an RTX 3060
   (driver 621.01) on either renderer, at midday, close up, with 8 and 70 residents. No discards in that scene; the frozen-scene "wrong" counter is 0 there too.
+  After 1.0.2 the lazy clear stopped depending on our frame count (`cond_equal`), which removed one way the PC's timing could wipe a target; whether that was
+  this flicker is not known until the reporters try it. F12 now works on Vulkan too (pictures, and one `draw:` line a draw).
 - **Open: the busiest views (issue #7).** 7,300 draws a frame take the replay and the driver's thread about 15 ms each, and the view changing
   makes hundreds of new framebuffers. Freezes of 0.4-0.75 s came with 20-58 thousand page faults while the render thread waited in the driver.
-- **Open: compute programs with BAR.** 16 of the programs that run when the paint editor opens (`UpscaleMgr`, about 140,000 dispatches) use the
-  barrier instruction, which `mx_translate.c` does not translate, so they are skipped (`machine code not translated: instruction BAR`). The editor
-  still works; what they should add to its pictures is not known.
+- **Compute programs with BAR stay skipped, on purpose.** 16 of the programs that run when the paint editor opens (`UpscaleMgr`, about 140,000 dispatches)
+  use the barrier instruction, and one of them ATOMS too, which `mx_translate.c` does not translate, so they are skipped (`machine code not translated:
+  instruction BAR`). Skipped, the strokes are saved clean. Tried with both translated (`memoryBarrierShared(); barrier();`, `atomicAdd` / `atomicMax` on `smem`):
+  the saved face tore into broken rows on Vulkan and on OpenGL, where one program of 72,832 bytes is refused as well (`too many instructions`). Translate
+  them only together with finding what tears; compare `*.ugctex.zs` of a painted Mii, with real strokes.
 - **The face paint editor (issue #36).** The game paints the canvas on the CPU and stores it with `nvnTextureWriteTexels`, then saves `*.canvas.zs` from
   that texture's memory, so WriteTexels has to reach guest memory too (`tex_write_memory`, memory the CPU reads only). On Done it encodes the BC1 face on
   the CPU into a texture a GPU copy may have written when Edit Mii opened: `cb_landed` lets a compressed texture take CPU writes again once that copy has
@@ -209,6 +213,9 @@ picks this up:
   `TOMO_AUDIO_WAV=<file>` records the mix.
 - **One frame in three:** the game rotates its transient targets through three sets, strictly (each conditional-clear slot is armed
   in frames of one residue mod 3; `TOMO_CONDLOG`). A fault in one set shows as one frame in three, whatever the frame rate.
+- **Lazy clears:** a target's 32-byte slot is armed with 1 by the game; the conditional clear runs, then a report goes into the slot, and the target is
+  not cleared again until the slot is armed again. On the island 8 lasting targets (a chain 240x136..30x17, 244x164, 128x128, 1920x1080 format 0xa and one
+  1920x1080 R11G11B10F) are armed only once; `nvn_gl.c` used to clear them every frame. Test: `TOMO_CONDLOG=<from>:<count>`, the `condexec:` lines name the target.
 - **A lit face for glow tests (issue #29, on a copy of a save):** Illuminate paint, in `SSBU_SEQ` keys. A Mii's Edit screen from the
   island: `300:C 200:d/2 200:Z 300 200:r/2 200:r/2 200:r/2 200:Z`. The paint panel: `200:u/2 200:l/2 200:Z 400`, `100:l/2` five times,
   `100:d/2` nine times, `200:Z 200:r/2 200:Z 500 200:Z 300`. Illuminate on and up: `100:Z 200 100:d/2 200:r/70 200`. Out and saved:

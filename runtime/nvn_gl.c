@@ -4949,20 +4949,18 @@ static int drawlog_now(void) {
 }
 static GLuint g_dbg_query;
 static struct { GLuint q; int active; uint64_t acc; } g_counter[17];
-/* TIMESTAMP_TOP reports of this frame, by address (OP_RENDER_ENABLE: a target cleared once a frame). Until 2026-11-01 a
- * 256-entry table on address bits 5..12: slots 8 KB apart (the game keeps two such slot arrays) took each other's entry, a
- * re-test of the lost one cleared its target a second time after the Mii was drawn into it, and the whole Mii was missing
- * for that frame (the user's Mii News and Mii creator; 4 such pairs in the two frames of their F12 draw log). Now open
- * addressing on the whole address; an entry of an older frame counts as empty. */
-#define TSREP_N 4096
-static struct { uint64_t addr; long long frame; } g_tsrep[TSREP_N];
-static int tsrep(uint64_t addr, long long frame, int insert) {      /* 1: reported this frame (insert: now it is) */
-    unsigned k = (unsigned)(((addr >> 4) * 0x9E3779B97F4A7C15ULL) >> 52);
-    for (int n = 0; n < TSREP_N; n++, k = (k + 1) & (TSREP_N - 1)) {
-        if (g_tsrep[k].frame != frame) { if (insert) { g_tsrep[k].addr = addr; g_tsrep[k].frame = frame; } return insert; }
-        if (g_tsrep[k].addr == addr) return 1;
-    }
-    return 0;
+/* SetRenderEnableConditional: are the two counters of the 32-byte slot equal? Tomodachi Life clears a render target lazily:
+ * conditional (not equal) on the target's slot, the clear, then a TIMESTAMP_TOP report into the slot, whose counter word reads
+ * as equal to the empty second record on the console. The game arms the slot with {1, .. | 0, 0}: every third frame for the
+ * targets it rotates (TOMO_CONDLOG), once for lasting ones, which keep their contents from then on. Our report writes the
+ * timestamp as the counter too (OP_COUNTER_REPORT), so a report against an empty record counts as equal here. Until 2026-11-05
+ * "reported" meant "in this frame by our count": every lasting target was cleared once a frame, and a target bound again
+ * after a present landed between its two binds lost what was drawn into it, which depends on the PC's timing. TOMO_CLEAR_ONCE=0: every
+ * conditional clear runs. */
+static int cond_equal(uint64_t a) {
+    static int once = -1; if (once < 0) once = !getenv("TOMO_CLEAR_ONCE") || atoi(getenv("TOMO_CLEAR_ONCE"));
+    uint64_t c0 = rd64(a), c1 = rd64(a + 16);
+    return c0 == c1 || (once && c0 != 1 && !c1);
 }
 static void drawlog_begin(void) { if (dl_light_now() || !drawlog_now() || g_counter[1].active) return; if (!g_dbg_query) glGenQueries(1, &g_dbg_query); glBeginQuery(0x8914, g_dbg_query); }      /* (the light log: no query, its result waits for the GPU) */
 static void drawlog_end(void) {
@@ -6961,22 +6959,15 @@ static void exec(const Cmd *m, int depth) {
         if (!a[1]) S.render_off = !(a[0] & 1);
         else {
             cbuf_flush_if(a[2], 32);
-            int eq = a[2] && rd64(a[2]) == rd64(a[2] + 16);
-            /* Tomodachi Life clears a render target lazily: SetRenderEnableConditional(not equal) on the target's 32-byte slot, the
-             * clear, then a TIMESTAMP_TOP report into the slot. The slot starts {1, 0 | 0, 0} and nothing else writes it, so the
-             * console's skip of a second clear in a frame is not visible in the memory here; a slot reported in this frame
-             * counts as equal: a target bound again in the frame keeps its contents. Mii creation binds its depth again for
-             * the colour pass after the depth pre-pass and tests it for equality: cleared there, no Mii was drawn (2026-10-24).
-             * TOMO_CLEAR_ONCE=0: every conditional clear runs. */
-            static int once = -1; if (once < 0) once = !getenv("TOMO_CLEAR_ONCE") || atoi(getenv("TOMO_CLEAR_ONCE"));
-            int mem_eq = eq;
-            if (!eq && once && a[2] && tsrep(a[2], (long long)g_st.frames + 1, 0)) eq = 1;
+            int eq = a[2] && cond_equal(a[2]);      /* (a target bound again keeps its contents: Mii creation binds its depth again for the colour pass after the depth pre-pass, 2026-10-24) */
+            int mem_eq = a[2] && rd64(a[2]) == rd64(a[2] + 16);
             S.render_off = a[1] == 1 ? !eq : eq;
             {   static long long from = -2; static int left;      /* TEST ONLY: TOMO_CONDLOG=<from frame>:<count> */
                 if (from == -2) { const char *e = getenv("TOMO_CONDLOG"); from = -1; if (e) { from = atoll(e); left = strchr(e, ':') ? atoi(strchr(e, ':') + 1) : 400; } }
                 if (from >= 0 && (long long)g_st.frames + 1 >= from && left > 0) { left--;
-                    printf("condexec: frame %lld draw %d mode %d at %llx: %llx | %llx mem_eq %d forced %d -> %s%c", (long long)g_st.frames + 1, g_frame_draw_index, (int)a[1] - 1, (unsigned long long)a[2],
-                           (unsigned long long)rd64(a[2]), (unsigned long long)rd64(a[2] + 16), mem_eq, eq && !mem_eq, S.render_off ? "OFF" : "on", 10); } }
+                    printf("condexec: frame %lld draw %d mode %d at %llx: %llx | %llx mem_eq %d forced %d -> %s target %dx%d fmt 0x%x mem %p depth %dx%d fmt 0x%x%c", (long long)g_st.frames + 1, g_frame_draw_index, (int)a[1] - 1, (unsigned long long)a[2],
+                           (unsigned long long)rd64(a[2]), (unsigned long long)rd64(a[2] + 16), mem_eq, eq && !mem_eq, S.render_off ? "OFF" : "on", S.color0 ? S.color0->b.width : 0, S.color0 ? S.color0->b.height : 0, S.color0 ? S.color0->b.format : 0, S.color0 ? (void *)S.color0->mem : NULL,
+                           S.depth_tex ? S.depth_tex->b.width : 0, S.depth_tex ? S.depth_tex->b.height : 0, S.depth_tex ? S.depth_tex->b.format : 0, 10); } }
         }
         if (drawlog_now()) printf("render enable: %s mode %d counters %llu %llu -> %s\n", a[1] ? "conditional" : "switch", (int)a[1] - 1,
                                   a[1] && a[2] ? (unsigned long long)rd64(a[2]) : 0ull, a[1] && a[2] ? (unsigned long long)rd64(a[2] + 16) : 0ull, S.render_off ? "OFF" : "on");
@@ -6987,7 +6978,7 @@ static void exec(const Cmd *m, int depth) {
         int type = (int)a[0];
         /* type 16 (TIMESTAMP_TOP): a timestamp in the counter field too. Tomodachi Life reports it twice and draws its island
          * objects (palm trees, shrubs) under SetRenderEnableConditional(not equal) of the pair: two zeros culled them all. */
-        if (type == 16) { d[0] = d[1]; if (a[1]) tsrep(a[1], (long long)g_st.frames + 1, 1); }
+        if (type == 16) d[0] = d[1];
         if (type > 0 && type < 16 && counter_target(type)) { counter_stop(type); d[0] = g_counter[type].acc; counter_start(type); }
         if (a[1]) { cbuf_flush_if(a[1], 16); memcpy(P(a[1]), d, 16); ww_note(a[1], 16); }
         if (drawlog_now()) printf("counter report: type %d value %llu at %llx (draw %d)\n", type, (unsigned long long)d[0], (unsigned long long)a[1], g_frame_draw_index);
@@ -7778,7 +7769,6 @@ static int swap_midbatch_ok(void) { return g_dx.state != 1 || g_dx.checks >= 3; 
  * so a flicker seen on a player's PC can be looked at frame by frame. TOMO_FLICKER_SAMPLE_AT=<frame>: the same in a test. */
 static volatile LONG g_flk_req;
 static volatile LONG g_rtdump_step;               /* TEST: SSBU_RTDUMP_STEP=<step>: the render targets dumped at that input step's frame */
-int nvn_front_flicker_take(void) { return (int)InterlockedExchange(&g_flk_req, 0); }      /* (Vulkan: vk_present2) */
 static volatile LONG64 g_drawshot_at = -1;        /* (declared above) TEST: SSBU_DRAWSHOT_STEP=<step>: the draws of the frame after that step's, as SSBU_DRAWSHOT */
 static int step_listed(const char *name, int step) {      /* TEST: <name>=<step>[,<step>...] */
     const char *e = getenv(name);
@@ -7788,6 +7778,7 @@ static int step_listed(const char *name, int step) {      /* TEST: <name>=<step>
     return strstr(l, k) != NULL;
 }
 void nvn_front_flicker_sample(void) { InterlockedExchange(&g_flk_req, 1); }
+int nvn_front_flicker_take(void) { return (int)InterlockedExchange(&g_flk_req, 0); }      /* (Vulkan: vk_present2) */
 static void job_present(void *arg) {
     if (g_rbp_n) rb_land(0);
     g_dec_spent = 0;
@@ -10338,15 +10329,13 @@ int nvn_front_rt_cpu_format(int f) { return rt_cpu_format(f); }
  * (OP_COUNTER_REPORT, OP_RENDER_ENABLE above). The statistics counters (types 1..15) read 0: no Vulkan queries yet. */
 void nvn_front_counter_report(int type, uint64_t addr) {
     uint64_t d[2] = {0, gpu_ts()};
-    if (type == 16) { d[0] = d[1]; if (addr) tsrep(addr, nvn_front_frame_next(), 1); }
+    if (type == 16) d[0] = d[1];
     else if (type > 0 && type < 16) { static int said[16]; if (!said[type]++) printf("nvn_vk: counter type %d reported: written as 0 (no Vulkan query yet)\n", type); }
     if (addr) memcpy(P(addr), d, 16);
 }
 void nvn_front_report_value(uint32_t value, uint64_t addr) { if (addr) { uint64_t d[2] = {value, gpu_ts()}; memcpy(P(addr), d, 16); } }
 int nvn_front_render_off(int mode1, uint64_t addr) {          /* mode1: the conditional mode + 1, addr: two 16-byte counters */
-    static int once = -1; if (once < 0) once = !getenv("TOMO_CLEAR_ONCE") || atoi(getenv("TOMO_CLEAR_ONCE"));
-    int eq = addr && rd64(addr) == rd64(addr + 16);
-    if (!eq && once && addr && tsrep(addr, nvn_front_frame_next(), 0)) eq = 1;
+    int eq = addr && cond_equal(addr);
     return mode1 == 1 ? !eq : eq;
 }
 /* V1 session 5: compute outputs of the two back ends compared OFFLINE (tests/vk5_ccmp.py). SSBU_COMPUTE_CMP=<folder>: every
@@ -10391,7 +10380,6 @@ void nvn_front_ccmp_dispatch(const Range *ubo, const Range *ssbo, uint32_t writt
 void nvn_front_ccmp_landed(void) {
     for (int i = 0; i < g_ccmp_npend; i++) {
         char path[400];
-    g_gpu_ts_base = now_ns(); g_gpu_ts_k = 0;      /* (gpu_ts: a slow replay is not a slow GPU, or the game lowers its render size) */
         snprintf(path, sizeof path, "%s/%016llx_%d.bin", g_ccmp_dir, (unsigned long long)g_ccmp_pend[i].h, g_ccmp_pend[i].n);
         FILE *fp = fopen(path, "wb");
         if (fp) { fwrite(P(g_ccmp_pend[i].addr), 1, (size_t)g_ccmp_pend[i].size, fp); fclose(fp); }
@@ -10403,6 +10391,7 @@ long long nvn_front_frame_end(long long draws, long long skipped, long long clea
     pf_frame_mark(frame);
     g_joblog_cur = frame;
     g_st.frames = frame;
+    g_gpu_ts_base = now_ns(); g_gpu_ts_k = 0;      /* (gpu_ts: a slow replay is not a slow GPU, or the game lowers its render size) */
     if (frame <= 3 || frame % 600 == 0 || draws != 0 && g_logn < 40 && (g_logn++, 1))
         printf("nvn_vk: frame %lld: %lld draws (%lld skipped), %lld clears | totals: %lld lists, %lld textures, %lld uploads (%lld MB)\n", (long long)frame, draws, skipped, clears,
                (long long)g_st.lists, (long long)g_st.tex_created, (long long)g_st.tex_uploads, (long long)(g_st.tex_bytes >> 20));
