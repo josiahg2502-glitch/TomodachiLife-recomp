@@ -4263,7 +4263,7 @@ static void exec(const Cmd *m, int depth) {
 }
 static void replay(uint64_t handle, int depth) {
     size_t len = 0;
-    uint8_t *data = nvn_front_list(handle, &len);
+    uint8_t *data = nvn_front_list_rt(handle, &len);
     if (!data) { static int n; n++; if (n <= 10 || !(n & (n - 1))) { int r1_ra_phase(void); printf("nvn_vk: command handle %llx is unknown or expired (%d so far; depth %d, run-ahead phase at the replay %d)\n", (unsigned long long)handle, n, depth, r1_ra_phase()); } return; }
     for (size_t off = 0; off + sizeof(Cmd) <= len;) {
         const Cmd *m = (const Cmd *)(data + off);

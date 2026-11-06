@@ -144,6 +144,7 @@ void nvn_vk_program_set(void *prog);        /* Vulkan, GUEST thread, from nvnPro
 /* ---------------------------------------------------------------- front-end services for the Vulkan back end (end of nvn_gl.c) */
 int nvn_front_fmt(int nvn_format, Fmt *f);                                  /* fmt_get */
 uint8_t *nvn_front_list(uint64_t handle, size_t *len);                      /* list_lookup */
+uint8_t *nvn_front_list_rt(uint64_t handle, size_t *len);                   /* list_lookup_rt: the render thread's replay */
 void nvn_front_batch_begin(void);                                           /* a new submitted batch: texture memory is looked at again once */
 void nvn_front_batch_snap(SubmitJob *j, int begin);                          /* the batch's write-watch scan and submission copies (1 before the replay, 0 after) */
 const uint8_t *nvn_front_snap_copy(uint64_t addr, uint64_t size);           /* the submission's copy of a range to upload instead of guest memory, or NULL */

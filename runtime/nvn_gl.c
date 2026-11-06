@@ -1945,7 +1945,12 @@ static GLuint fbo_get(const FboKey *k) {
         else glFramebufferTexture(GL_FRAMEBUFFER_, att, k->depth, 0);
     }
     glDrawBuffers(8, bufs);
-    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER_);
+    /* the check waits for NVIDIA's driver thread to catch up, and a big island makes thousands while it loads and 1-3 a frame when
+     * the view changes (the player's freezes in "framebuffer (found or made)", issue #7). Only the first ones, TOMO_FBO_CHECK=1: all.
+     * A later bad one shows as GL error 0x506 in the batch's check. */
+    GLenum st = GL_FRAMEBUFFER_COMPLETE_;
+    {   static int all = -1; if (all < 0) all = getenv("TOMO_FBO_CHECK") != NULL;
+        if (all || g_st.fbo_made < 64) st = glCheckFramebufferStatus(GL_FRAMEBUFFER_); }
     g_st.fbo_made++;
     if (st != GL_FRAMEBUFFER_COMPLETE_) {
         g_st.fbo_bad++; g_fbo_bad_last = 1;
@@ -4216,6 +4221,18 @@ static uint8_t *list_lookup(uint64_t h, size_t *len) {
     ReleaseSRWLockShared(&g_list_lock);
     return data;
 }
+/* The render thread's lookups: ~10,000 a frame on a big island, each under the lock the game's threads record with (6.5 % of the
+ * render thread). Only this thread frees lists (list_collect, at the present), so an answer holds until then; the first lookup
+ * of a frame still marks the list as used. */
+static struct { uint64_t h; uint8_t *data; size_t len; uint32_t gen; } g_lmemo[8192];
+static uint32_t g_lmemo_gen = 1;
+static uint8_t *list_lookup_rt(uint64_t h, size_t *len) {
+    unsigned k = (unsigned)((h * 0x9E3779B97F4A7C15ULL) >> 51);
+    if (g_lmemo[k].h == h && g_lmemo[k].gen == g_lmemo_gen) { *len = g_lmemo[k].len; return g_lmemo[k].data; }
+    uint8_t *data = list_lookup(h, len);
+    if (data) { g_lmemo[k].h = h; g_lmemo[k].data = data; g_lmemo[k].len = *len; g_lmemo[k].gen = g_lmemo_gen; }
+    return data;
+}
 /* A command handle stays valid as long as the command memory it was recorded into: the game gives that memory to a command
  * buffer again (AddCommandMemory) or finalizes its pool only when it no longer calls the handle. Tomodachi Life records the
  * display lists of its models (gsys ShapeDL) once and calls them whenever the model is drawn: dropping lists after two
@@ -4256,6 +4273,7 @@ static void list_collect(void) {
     static int pos;                                       /* where the last call stopped */
     if (cap < 0) g_listlog_dbg = getenv("TOMO_LISTLOG") != NULL;
     if (cap < 0) cap = (getenv("TOMO_LIST_CAP_MB") ? _atoi64(getenv("TOMO_LIST_CAP_MB")) : 1024) << 20;
+    g_lmemo_gen++;
     AcquireSRWLockExclusive(&g_list_lock);
     int over = g_list_bytes > cap, n = g_list_count / 8 > 4096 ? g_list_count / 8 : 4096;
     if (n > g_list_count) n = g_list_count;
@@ -7070,7 +7088,7 @@ static int swap_midbatch_ok(void);
 #endif
 static void replay(uint64_t handle, int depth) {
     size_t len = 0;
-    uint8_t *data = list_lookup(handle, &len);
+    uint8_t *data = list_lookup_rt(handle, &len);
     static int nlog;
     if (!data) { g_st.stale++; logf_limited(&nlog, 10, "nvn_gl: command handle %llx is unknown or expired\n", (unsigned long long)handle); return; }
     for (size_t off = 0; off + sizeof(Cmd) <= len;) {
@@ -7443,18 +7461,27 @@ static int prescan_seen(TexPool *tp, uint64_t h) {
     }
     return 0;
 }
-static void prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
+/* Handles of lists with nothing below them for this walk (most display lists of models): a handle names one recording for good.
+ * Walking them again at every batch was most of the walk's 6 % of the render thread on a big island. Render thread only. */
+static uint64_t g_ps_skip[65536];
+static int prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
+    unsigned sk = (unsigned)((handle * 0x9E3779B97F4A7C15ULL) >> 48);
+    if (g_ps_skip[sk] == handle) return 0;
     size_t len = 0;
-    uint8_t *data = list_lookup(handle, &len);
+    uint8_t *data = list_lookup_rt(handle, &len);
+    int any = 0;
     for (size_t off = 0; data && off + sizeof(Cmd) <= len && *n < 4096;) {
         const Cmd *m = (const Cmd *)(data + off);
         const uint8_t *blob = BLOB(m), *hs = NULL;
         int count = 0;
         if (m->size < sizeof(Cmd)) break;
-        if (m->op == OP_TEXPOOL) *tp = P(m->a[0]);
-        else if (m->op == OP_TEXTURES) { count = (int)m->a[2]; hs = blob; }
-        else if (m->op == OP_DEFERRED && m->a[5] == OP_TEXTURES && m->a[3]) { count = (int)m->a[2]; hs = P(m->a[3]); }
-        else if (m->op == OP_CALL && depth < 8) for (int i = 0; i < (int)m->a[0]; i++) { uint64_t h; memcpy(&h, blob + i * 8, 8); prescan_list(h, depth + 1, tp, n); }
+        if (m->op == OP_TEXPOOL) { *tp = P(m->a[0]); any = 1; }
+        else if (m->op == OP_TEXTURES) { count = (int)m->a[2]; hs = blob; any = 1; }
+        else if (m->op == OP_DEFERRED && m->a[5] == OP_TEXTURES && m->a[3]) { count = (int)m->a[2]; hs = P(m->a[3]); any = 1; }
+        else if (m->op == OP_CALL) {
+            if (depth < 8) for (int i = 0; i < (int)m->a[0]; i++) { uint64_t h; memcpy(&h, blob + i * 8, 8); any |= prescan_list(h, depth + 1, tp, n); }
+            else any = 1;
+        }
         for (int i = 0; i < count && i < 32; i++) {
             uint64_t h;
             Tex *t; View v; SamplerParams sp;
@@ -7465,6 +7492,8 @@ static void prescan_list(uint64_t handle, int depth, TexPool **tp, int *n) {
         }
         off += m->size;
     }
+    if (data && !any && *n < 4096) g_ps_skip[sk] = handle;
+    return any;
 }
 static void job_submit(void *arg) {
     SubmitJob *j = arg;
@@ -10177,6 +10206,7 @@ const RBackend rb_gl = {"gl", job_submit, job_submit_async, job_present, job_pre
  * the statics above; nothing here calls OpenGL. Render thread only, except where the callee has its own lock. */
 int nvn_front_fmt(int nvn_format, Fmt *f) { return fmt_get(nvn_format, f); }
 uint8_t *nvn_front_list(uint64_t handle, size_t *len) { return list_lookup(handle, len); }
+uint8_t *nvn_front_list_rt(uint64_t handle, size_t *len) { return list_lookup_rt(handle, len); }
 /* Track V session 4, step-aligned comparison of the two renderers: with SSBU_SHOT_STEPS=1 the scripted input (nnhid.c)
  * asks for a screenshot when a key step of SSBU_SEQ begins; the next presented frame is saved as step_<n>.bmp in
  * SSBU_SHOT_DIR by whichever back end runs. Counted in input polls, so both renderers save the same game frame. */

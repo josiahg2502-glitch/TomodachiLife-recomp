@@ -167,6 +167,9 @@ picks this up:
   this flicker is not known until the reporters try it. F12 now works on Vulkan too (pictures, and one `draw:` line a draw).
 - **Open: the busiest views (issue #7).** 7,300 draws a frame take the replay and the driver's thread about 15 ms each, and the view changing
   makes hundreds of new framebuffers. Freezes of 0.4-0.75 s came with 20-58 thousand page faults while the render thread waited in the driver.
+  It reproduces here: `build/saves/full70` at noon after `Q` (5,000-5,600 draws) runs 20-22 ms a frame with the GPU at 40 %, half resolution is no faster, and the
+  render thread is 89 % of one core, spread thin: driver calls ~40 %, `arena_put` 14 %, the write-watch wait 7-9 %. Barriers are not it: 330 down to 112 a frame
+  saved 0.7 ms. Compare only inside one run (a switch per 300 frames): runs of the same scene differed by 5 ms.
 - **Compute programs with BAR stay skipped, on purpose.** 16 of the programs that run when the paint editor opens (`UpscaleMgr`, about 140,000 dispatches)
   use the barrier instruction, and one of them ATOMS too, which `mx_translate.c` does not translate, so they are skipped (`machine code not translated:
   instruction BAR`). Skipped, the strokes are saved clean. Tried with both translated (`memoryBarrierShared(); barrier();`, `atomicAdd` / `atomicMax` on `smem`):
