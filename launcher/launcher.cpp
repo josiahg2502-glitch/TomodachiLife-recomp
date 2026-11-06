@@ -168,7 +168,8 @@ int run(const std::wstring& cmd, const fs::path& dir = g_repo) {      // a progr
 }
 
 // Windows 10 1803 and later have tar.exe, which reads zips. It takes its path arguments through the code page, and a folder name
-// outside it failed: it gets no path, only dir as its working directory.
+// outside it failed: it gets no path, only dir as its working directory. -m: no file dates, which some folders refuse: tar then
+// exits 1 with every file unpacked, and no install could start there (issue #44).
 bool unzip(const fs::path& zip, const fs::path& dir) {
     wchar_t sys[MAX_PATH];
     GetSystemDirectoryW(sys, MAX_PATH);
@@ -176,9 +177,10 @@ bool unzip(const fs::path& zip, const fs::path& dir) {
     const fs::path here = dir / "tomodachi_unpack.zip";
     fs::copy_file(zip, here, fs::copy_options::overwrite_existing, e);
     if (e) { say("Could not copy " + zip.filename().u8string() + " into " + dir.u8string() + ": " + e.message()); return false; }
-    const int code = run(quote(fs::path(sys) / "tar.exe") + L" -xf tomodachi_unpack.zip", dir);
+    const int code = run(quote(fs::path(sys) / "tar.exe") + L" -m -xf tomodachi_unpack.zip", dir);
     fs::remove(here, e);
-    if (code) say("Unpacking " + zip.filename().u8string() + " failed (tar.exe exit " + std::to_string(code) + "): this needs Windows 10 (1803 or later) or 11.");
+    if (code == -1) say("tar.exe did not start, so " + zip.filename().u8string() + " cannot be unpacked: this needs Windows 10 (1803 or later) or 11.");
+    else if (code) say("Unpacking " + zip.filename().u8string() + " failed (tar.exe exit " + std::to_string(code) + "). tar.exe's own message is in launcher_install.log in the logs folder.");
     return code == 0;
 }
 
