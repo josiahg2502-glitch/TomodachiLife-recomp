@@ -264,8 +264,10 @@ static VkBuffer vbuf_new(uint64_t size, VkFlags usage, VMem *mem) {
 
 /* ---------------------------------------------------------------- command buffers in flight */
 #define NSLOT 8
-typedef struct { VkCommandBuffer cmd; VkFence fence; VkDescriptorPool pool[16]; int npool, ipool, pending; uint64_t serial; LONG64 ts_frame; } Slot;
+#define NPOOL 256                                  /* per command buffer. pass_begin hands the buffer to the GPU after 16, so only one pass can go beyond that */
+typedef struct { VkCommandBuffer cmd; VkFence fence; VkDescriptorPool pool[NPOOL]; int npool, ipool, pending; uint32_t pool_bytes; uint64_t serial; LONG64 ts_frame; } Slot;
 typedef struct VTex VTex;
+static LONG64 g_pool_peak, g_pool_splits;
 static struct {
     Slot slot[NSLOT]; int cur, recording; uint64_t serial, done;      /* serial: number of the last submission; done: every submission up to here has finished */
     VkCommandBuffer cmd;
@@ -399,7 +401,7 @@ static void cmd_begin(void) {
     Slot *s = &R.slot[R.cur];
     slot_wait(s);
     for (int i = 0; i < s->npool; i++) VKC(vkResetDescriptorPool(V.device, s->pool[i], 0));
-    s->ipool = 0;
+    s->ipool = 0; s->pool_bytes = 0;
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VKC(vkResetCommandBuffer(s->cmd, 0));
@@ -1973,6 +1975,8 @@ static int pass_begin(void) {
     if (R.in_pass) return 1;
     if (g_split < 0) { const char *e = getenv("SSBU_VK_SPLIT"); g_split = e ? atoi(e) : VK_SPLIT_DEFAULT; }
     if (g_split > 0 && R.recording && g_cmd_draws >= g_split) { cmd_submit(NULL, NULL); g_splits++; }      /* round 16: the GPU starts on what is recorded so far (a pass has just ended: nothing is cut in two) */
+    /* issue #45: drivers that charge a pool for every descriptor of a layout (Mesa: 61 KB per texture set of the stage libraries' layout) filled 16 pools in one frame. A slot keeps its pools, so this bounds what they hold */
+    if (R.recording && R.slot[R.cur].ipool >= 16) { cmd_submit(NULL, NULL); g_pool_splits++; }
     cmd_begin();
     R.pass_rs = 0;
     memset(ca, 0, sizeof ca); memset(&da, 0, sizeof da);
@@ -2048,8 +2052,14 @@ static int pass_begin(void) {
 static VkDescriptorSet set_alloc(VkDescriptorSetLayout layout) {
     Slot *s = &R.slot[R.cur];
     VkDescriptorSet set;
+    /* TEST ONLY, SSBU_VK_TEST bit 2048: pools fill up by the bytes Mesa's RADV charges for the stage libraries' two layouts (bit 4096: pools a quarter of that size). NVIDIA's driver does not stop at a pool's sizes, so this is how the limit shows there (issue #45) */
+    static int strict = -1;
+    if (strict < 0) strict = getenv("SSBU_VK_TEST") ? atoi(getenv("SSBU_VK_TEST")) & 6144 : 0;
+    const uint32_t need = !strict ? 0u : layout == g_udl[0] ? 66u * 16u : layout == g_udl[1] ? 640u * 96u : 0u;
     for (;;) {
         if (s->ipool < s->npool) {
+            if (s->ipool + 1 > g_pool_peak) g_pool_peak = s->ipool + 1;
+            if (strict) { if (s->pool_bytes + need > (strict & 4096 ? 950272u : 3801088u)) { s->pool_bytes = 0; s->ipool++; continue; } s->pool_bytes += need; }
             VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             ai.descriptorPool = s->pool[s->ipool]; ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
             VkResult r = vkAllocateDescriptorSets(V.device, &ai, &set);
@@ -2058,7 +2068,7 @@ static VkDescriptorSet set_alloc(VkDescriptorSetLayout layout) {
             s->ipool++;
             continue;
         }
-        if (s->npool == 16) vkd_fail("more than 16 descriptor pools in one command buffer");
+        if (s->npool == NPOOL) vkd_fail("more than %d descriptor pools in one command buffer", NPOOL);
         VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768}};
         VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         pi.maxSets = 8192; pi.poolSizeCount = 2; pi.pPoolSizes = ps;

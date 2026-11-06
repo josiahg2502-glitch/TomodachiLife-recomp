@@ -185,8 +185,12 @@ picks this up:
 - **Renderer choice:** `gfx_options.renderer` (`auto` | `always_vulkan` | `opengl`), `nvn_renderer_is_vk`. `--renderer` prints
   the choice; `SSBU_GPU_VENDOR=other` simulates a non-NVIDIA card. AMD's OpenGL driver crashes or runs at 1 fps on this game.
 - **Vulkan on other GPUs** can be simulated on an NVIDIA card: `SSBU_VK_TEST` bits 8 (no D24), 512 (no vertex input dynamic
-  state), 1024 (no extended dynamic state 3, so no pipeline libraries); `SSBU_VK_PUSH=0`, `SSBU_VK_NO_BC=1`, `SSBU_VK_VALIDATE=1`.
+  state), 1024 (no extended dynamic state 3, so no pipeline libraries), 2048 (pools charged as Mesa's RADV charges them), 4096 (with 2048:
+  pools a quarter of that size); `SSBU_VK_PUSH=0`, `SSBU_VK_NO_BC=1`, `SSBU_VK_VALIDATE=1`.
   Run them on a copy of `build/cache/vk`: records of one state are replayed by the next run.
+- **Descriptor pools (issue #45):** NVIDIA's driver does not stop at a pool's sizes; Mesa charges every descriptor a layout declares. The stage libraries' one layout
+  declares 640 samplers, 61 KB a set on RADV, whatever a draw uses, so a busy frame fills about 14 pools there (70 residents). A real Deck ran out of the 16 once allowed.
+  Moving the TEX.B arrays to a set of their own would save most of it, but changes every shader's bindings.
 - **The frame:** the game remakes ~22 render targets every frame (a frame graph: new texture objects over the same memory),
   submits one big command list and presents. `vpool_*` in `nvn_vk_draw.c` reuses their images. The game cannot start the next
   frame before the replay of this one has finished, so the replay's length is the frame time.
