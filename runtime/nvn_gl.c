@@ -7778,6 +7778,7 @@ static int swap_midbatch_ok(void) { return g_dx.state != 1 || g_dx.checks >= 3; 
  * so a flicker seen on a player's PC can be looked at frame by frame. TOMO_FLICKER_SAMPLE_AT=<frame>: the same in a test. */
 static volatile LONG g_flk_req;
 static volatile LONG g_rtdump_step;               /* TEST: SSBU_RTDUMP_STEP=<step>: the render targets dumped at that input step's frame */
+int nvn_front_flicker_take(void) { return (int)InterlockedExchange(&g_flk_req, 0); }      /* (Vulkan: vk_present2) */
 static volatile LONG64 g_drawshot_at = -1;        /* (declared above) TEST: SSBU_DRAWSHOT_STEP=<step>: the draws of the frame after that step's, as SSBU_DRAWSHOT */
 static int step_listed(const char *name, int step) {      /* TEST: <name>=<step>[,<step>...] */
     const char *e = getenv(name);

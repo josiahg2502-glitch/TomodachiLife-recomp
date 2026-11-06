@@ -3348,8 +3348,21 @@ static VkCommandBuffer g_fd_cmd;                   /* the command buffer g_fd_se
 static uint32_t g_fd_gen;
 static VStage *g_fd_vs, *g_fd_fs;
 static uint8_t g_fd_list[sizeof g_dtex];
+/* F12 (vk_present2): one line a draw: its target, programs and the fragment stage's bound textures (memory addresses: what stays the same between frames) */
+static int g_flk_log;
+static void flk_log_draw(void) {
+    Tex *c0 = R.ncol ? R.col[0].tex : NULL, *d = R.depth.tex;
+    printf("draw: frame %lld target %p %dx%d format 0x%x depth %p vs #%d fs #%d textures:", (long long)nvn_front_frame_next(), c0 ? (void *)c0->mem : NULL, c0 ? c0->b.width : 0, c0 ? c0->b.height : 0, c0 ? (int)c0->b.format : 0,
+           d ? (void *)d->mem : NULL, R.prog[0] ? R.prog[0]->serial : -1, R.prog[1] ? R.prog[1]->serial : -1);
+    for (int u = 0; u < 32; u++) if (R.nvn_tex[1][u]) {
+        Tex *t = NULL; View v; SamplerParams sp;
+        printf(" %d:%p", u, (nvn_front_handle(R.tpool, R.spool, R.nvn_tex[1][u], &t, &v, &sp) & 1) && t ? (void *)t->mem : NULL);
+    }
+    printf("%c", 10);
+}
 static int draw_prepare(unsigned prim) {
     if (g_vk_exiting || vk_nodraw()) return 0;
+    if (g_flk_log) flk_log_draw();
     if (g_fastdraw < 0) g_fastdraw = getenv("SSBU_VK_FASTDRAW") ? atoi(getenv("SSBU_VK_FASTDRAW")) : 1;
     const int fast = g_fastdraw == 1 || (g_fastdraw == 2 && !((nvn_front_frame_next() / 300) & 1));
     if (!g_dprof) g_dprof = getenv("SSBU_VK_DRAWPROF") && atoi(getenv("SSBU_VK_DRAWPROF")) ? 1 : -1;
@@ -4737,6 +4750,22 @@ static void vk_present2(void *arg, int progress) {
                 save_bmp_vk(path, vt);
                 if (--left) { extern volatile LONG g_drawtag_next; InterlockedExchange(&g_drawtag_next, (LONG)((frame + 1) % 100000) + 100000); }
             }
+        }
+    }
+    {   /* F12 (display.c), a flicker sample as on OpenGL (job_present): the next 8 presented pictures go to flicker/f<frame>.bmp beside the
+         * exe, then the draws of the two frames after them to the session log (flk_log_draw). TOMO_FLICKER_SAMPLE_AT=<frame>: the same in a test. */
+        static int left; static long long at = -2;
+        int nvn_front_flicker_take(void);
+        if (at == -2) at = getenv("TOMO_FLICKER_SAMPLE_AT") ? atoll(getenv("TOMO_FLICKER_SAMPLE_AT")) : -1;
+        if (g_flk_log && !--g_flk_log) { printf("flicker sample: draw log done%c", 10); fflush(stdout); setvbuf(stdout, NULL, _IONBF, 0); }
+        if ((nvn_front_flicker_take() || frame == at) && !left && !g_flk_log) {
+            left = 8;
+            CreateDirectoryA("flicker", NULL);
+            printf("flicker sample: pictures of frames %lld..%lld in the folder flicker, then the draw log of frames %lld and %lld below%c", (long long)frame, (long long)frame + 7, (long long)frame + 8, (long long)frame + 9, 10);
+        }
+        if (left > 0 && vt) {
+            char path[64]; snprintf(path, sizeof path, "flicker/f%lld.bmp", (long long)frame); save_bmp_vk(path, vt);
+            if (!--left) { fflush(stdout); setvbuf(stdout, NULL, _IOFBF, 1 << 20); g_flk_log = 2; }      /* (~1000 writes a draw otherwise: stdout is unbuffered, boot.c) */
         }
     }
     {   /* session 9, SSBU_SHOT_BATTLE=<n>: one picture at the n-th battle frame (dispatches and more than 120 draws), i.e. at the
