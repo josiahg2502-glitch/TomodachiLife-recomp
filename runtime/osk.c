@@ -408,6 +408,7 @@ static void dump_bmp(const char *path) {
     fclose(f);
 }
 static DWORD WINAPI feeder(LPVOID p);
+int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);
 static DWORD WINAPI osk_test_thread(LPVOID arg) {
     const char *e = arg;
     long long at = _atoi64(e);

@@ -67,5 +67,5 @@ non-Steam game (Steam > Add a game > Add a non-Steam game > Tomodachi Life).
   graphics card has no Vulkan 1.3 driver, so Mesa's software one (llvmpipe) took over. `using device` in `last_run.log` names the
   device. Install the card's driver: the package `mesa-vulkan-drivers` or `vulkan-radeon` / `vulkan-intel`, or NVIDIA's own driver.
 
-So far this build has been tested under WSL2 on a PC, without a real GPU, not yet on a real Linux graphics driver or a Steam Deck.
+A player has installed and started it on a real Steam Deck (issues #39, #42); apart from that it has been tested under WSL2 on a PC, without a real GPU.
 Reports are very welcome: attach `last_run.log`, and `tomodachi_native_crash.txt` from `build-linux/work` if the game closed by itself.

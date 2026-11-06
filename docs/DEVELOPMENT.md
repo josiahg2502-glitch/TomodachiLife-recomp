@@ -216,6 +216,13 @@ picks this up:
   `TOMO_AUDIO_WAV=<file>` records the mix.
 - **One frame in three:** the game rotates its transient targets through three sets, strictly (each conditional-clear slot is armed
   in frames of one residue mod 3; `TOMO_CONDLOG`). A fault in one set shows as one frame in three, whatever the frame rate.
+- **The on-screen keyboard outside Windows:** `osk.c` draws through a small layer: GDI on Windows, in software elsewhere (`OSK_SOFT`), its text from the game's fonts through
+  `nnfontll_glyph`. Test: `#define OSK_SOFT 1` as the first line of `osk.c` on Windows, `TOMO_IK_TEST=<text>` and the Mii name page: from the island `150:C 100 100:d/2 100:Z 200 100 100:Z 300 100:Z 800`
+  (pictures `step_900..903`). Keys and text come from `menu.cpp` `menu_sdl_watch`.
+- **Colour targets sampled while bound (Vulkan):** Intel samples a copy (`colour_copy_on`, `SSBU_VK_COLORCOPY=1 / 0`), issue #41; AMD a copy of depth (`depth_copy_on`). Tested only by forcing it on an RTX 3060: right pictures, no real change in frame time.
+- **The exes are the same bytes on every PC** (`make_release.py` stamps them once): the logo reaches the shortcuts and the game window through `tomodachi.ico` and `opensmash.ico`, never by writing
+  into an exe, so that a Microsoft false-positive submission can clear a release's files for everyone (issues #31, #40).
+- **A translator change and the Vulkan cache:** `build/cache/vk/stage` is keyed by machine code and `MX_VK_VERSION`. Bump it when shipped translator output changes, and test such changes with `SSBU_VK_CACHE=<a scratch folder>`.
 - **Lazy clears:** a target's 32-byte slot is armed with 1 by the game; the conditional clear runs, then a report goes into the slot, and the target is
   not cleared again until the slot is armed again. On the island 8 lasting targets (a chain 240x136..30x17, 244x164, 128x128, 1920x1080 format 0xa and one
   1920x1080 R11G11B10F) are armed only once; `nvn_gl.c` used to clear them every frame. Test: `TOMO_CONDLOG=<from>:<count>`, the `condexec:` lines name the target.
