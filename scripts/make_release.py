@@ -329,6 +329,13 @@ def main():
     for f in PACKAGE_FILES:
         if not os.path.exists(os.path.join(work, f)):
             sys.exit('%s was not produced' % f)
+    # what Windows' file properties show, and the project's own icon: here once, so that every player's exes are the same bytes
+    # (Defender flagged the launcher, which had neither: #40). Nothing writes into them on the player's PC.
+    sys.path.insert(0, os.path.join(REPO, 'scripts'))
+    import make_setup
+    ver, ico = open(os.path.join(REPO, 'version.txt'), encoding='utf-8').read().strip(), make_setup.icon()
+    make_setup.stamp(os.path.join(work, 'TomodachiLauncher.exe'), None, ico, manifest=make_setup.MANIFEST.replace(b'Setup', b'Launcher').split(b'  <application')[0] + b'</assembly>\n', version=make_setup.version_info(ver, 'Tomodachi Life PC Launcher'))
+    make_setup.stamp(os.path.join(work, EXE), None, ico, manifest=None, version=make_setup.version_info(ver, 'Tomodachi Life PC'))
 
     # 4. the package folder
     pkg = os.path.join(build, 'package')

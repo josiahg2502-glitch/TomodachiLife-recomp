@@ -868,11 +868,10 @@ def step_link(cx):
         if not os.path.exists(os.path.join(cx.work, f)):
             raise Fail('%s was not produced' % f)
     launcher_game(cx)
-    if os.path.exists(os.path.join(cx.work, 'title-logo.png')):    # exes copied again (a new package): the logo's icon back in
+    if os.path.exists(os.path.join(cx.work, 'title-logo.png')):    # the logo for the shortcuts and the game window (the exes stay as they came)
         import launcher_art
         try:
             launcher_art.make_icon(cx.work)
-            launcher_art.stamp_icon(cx.work)
         except ImportError:                                         # no Pillow: no icon
             pass
     opus = copy_opus(cx)

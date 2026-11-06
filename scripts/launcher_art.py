@@ -1,9 +1,9 @@
 """The launcher's logo, from the player's own game files: Title_WW_LogoS of romfs/Layout/Common_Title_00 (a zstd SARC
 holding timg/__Combined.bntx), decoded by tools/extract/bntx_png.c into build/work/title-logo.png. Game art: it stays in
 build/ and is never committed.
-The logo is also the exes' icon: build/work/tomodachi.ico, written into TomodachiLauncher.exe and tomodachi_native.exe
-and the two exes at the top of the folder (Explorer, shortcuts, taskbar) on this PC only, and copied to opensmash.ico, the file runtime/display.c loads for the
-game window's icon. The runtime package's exes carry no icon, so no game art.
+The logo is also the icon of the shortcuts (build/work/tomodachi.ico, scripts/shortcuts.py) and of the game window (copied to opensmash.ico, the file
+runtime/display.c loads). It is not written into the exes: an exe changed on each PC can never build a reputation with Defender, nor be cleared for everyone by
+a false-positive submission (issues #31, #40). The package's exes carry the project's own icon (scripts/make_release.py), so no game art.
 
     python scripts/launcher_art.py [game folder [build folder]]      (default build/dump: exefs/ and romfs/)
 
@@ -31,8 +31,6 @@ LOGO = 'Title_WW_LogoS^w'
 FONT_ARCHIVE = os.path.join('romfs', 'Font', 'Font.Nin_NX_NVN.bfarc.zs')
 UI_FONTS = {'scft/ninP_SeuratCapie-EB_003.bfotf': 'seurat_eb.otf', 'scft/ninP_SeuratCapie-B_003.bfotf': 'seurat_b.otf',
             'scft/NinDev-TCExt.bfttf': 'keys.ttf'}
-ICON_EXES = ('TomodachiLauncher.exe', 'tomodachi_native.exe')
-ROOT_EXES = ('Tomodachi Life.exe', 'Tomodachi Life Launcher.exe')      # at the top of the folder (launcher/start.c, from the setup)
 
 
 def sarc_file(blob, want):
@@ -74,38 +72,6 @@ def make_icon(work):
     ico = os.path.join(work, 'tomodachi.ico')
     sq.save(ico, format='ICO', sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
     shutil.copyfile(ico, os.path.join(work, 'opensmash.ico'))
-
-
-def stamp_icon(work):
-    """work/tomodachi.ico as the icon resource of ICON_EXES; -> the exes that could not be changed (missing, or running)."""
-    import ctypes
-    from ctypes import wintypes
-    with open(os.path.join(work, 'tomodachi.ico'), 'rb') as f:
-        ico = f.read()
-    n = struct.unpack_from('<H', ico, 4)[0]
-    entries = [struct.unpack_from('<BBBBHHII', ico, 6 + 16 * i) for i in range(n)]       # ..., size, offset
-    group = struct.pack('<HHH', 0, 1, n) + b''.join(struct.pack('<BBBBHHIH', *e[:7], i + 1) for i, e in enumerate(entries))
-    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    k32.BeginUpdateResourceW.restype = wintypes.HANDLE
-    k32.BeginUpdateResourceW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL]
-    k32.UpdateResourceW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, wintypes.WORD, ctypes.c_char_p, wintypes.DWORD]
-    k32.EndUpdateResourceW.argtypes = [wintypes.HANDLE, wintypes.BOOL]
-    failed = []
-    roots = [p for p in (os.path.join(REPO, n) for n in ROOT_EXES) if os.path.exists(p)]      # (a source checkout has none)
-    for exe in [os.path.join(work, n) for n in ICON_EXES] + roots:
-        name = os.path.basename(exe)
-        h = k32.BeginUpdateResourceW(exe, False) if os.path.exists(exe) else None
-        ok = bool(h)
-        if h:
-            for i, e in enumerate(entries):
-                ok = ok and bool(k32.UpdateResourceW(h, 3, i + 1, 0, ico[e[7]:e[7] + e[6]], e[6]))      # RT_ICON
-            ok = ok and bool(k32.UpdateResourceW(h, 14, 1, 0, group, len(group)))                     # RT_GROUP_ICON
-            ok = bool(k32.EndUpdateResourceW(h, not ok)) and ok                                       # failed: discarded
-        if ok:
-            ctypes.windll.shell32.SHChangeNotify(0x2000, 0x0005, exe, None)     # SHCNE_UPDATEITEM: Explorer drops its cached icon
-        else:
-            failed.append(name)
-    return failed
 
 
 def ui_fonts(game):
@@ -156,11 +122,7 @@ def main():
     try:
         make_icon(WORK)
     except ImportError:
-        print('no Pillow (pip install Pillow): the exes keep no icon')
-        return
-    failed = stamp_icon(WORK)
-    if failed:
-        print('the icon could not be written into %s (close the game and the launcher, then run this again)' % ', '.join(failed))
+        print('no Pillow (pip install Pillow): the shortcuts and the game window keep no logo')
 
 
 if __name__ == '__main__':
