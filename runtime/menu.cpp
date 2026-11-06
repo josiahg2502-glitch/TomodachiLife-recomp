@@ -68,6 +68,8 @@ int nnaoc_owned(const int **list);                                   /* nnmisc.c
 long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
 int osk_active(void);                                                /* osk.c */
+int osk_up(void);
+int osk_key(UINT msg, WPARAM w);
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
@@ -229,18 +231,25 @@ static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
         int down = e->type == SDL_EVENT_KEY_DOWN;
         if (down && (e->key.scancode == SDL_SCANCODE_F1 || e->key.scancode == SDL_SCANCODE_AC_BACK)) { if (!e->key.repeat) menu_request_toggle(); return true; }      /* AC_BACK: Android's Back */
         if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
-        if (!g_open || osk_active()) return true;
         int vk = sdl_vk(e->key.scancode);
+        if (osk_up()) {                              /* the keyboard takes these as display.c's window procedure hands them on Windows */
+            if (down && vk == VK_BACK) osk_key(WM_CHAR, 8);
+            else if (down && vk == VK_RETURN) osk_key(WM_CHAR, 13);
+            else if (down && vk == VK_ESCAPE) osk_key(WM_CHAR, 27);
+            else if (down && (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_HOME || vk == VK_END || vk == VK_DELETE)) osk_key(WM_KEYDOWN, (WPARAM)vk);
+            return true;
+        }
+        if (!g_open) return true;
         if (vk) q_push(EV_KEY, vk, down);
         return true; }
     case SDL_EVENT_TEXT_INPUT: {                     /* UTF-8: one EV_CHAR per character (a code point, not UTF-16 as on Windows) */
-        if (!g_open || osk_active() || !e->text.text) return true;
+        if ((!g_open && !osk_up()) || !e->text.text) return true;
         const unsigned char *s = (const unsigned char *)e->text.text;
         while (*s) {
             unsigned c = *s++, more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
             if (more) c &= 0x3f >> more;
             for (; more && (*s & 0xc0) == 0x80; more--) c = c << 6 | (*s++ & 0x3f);
-            if (!more) q_push(EV_CHAR, (int)c, 0);
+            if (!more) { if (osk_up()) osk_key(WM_CHAR, (WPARAM)c); else q_push(EV_CHAR, (int)c, 0); }
         }
         return true; }
     case SDL_EVENT_MOUSE_MOTION:
@@ -270,7 +279,11 @@ extern "C" void menu_sdl_service(void) {
     float d = SDL_GetWindowPixelDensity(g_sdl_win);
     if (d > 0.0f) g_sdl_density = d;
     LONG want = g_text_want;
+#ifndef __ANDROID__
+    if (osk_up()) want = 1;                          /* typing into our keyboard; not on Android, where it would raise the system's over it */
+#endif
     if (want != g_text_on) {                         /* text input only while a text box is active (on a Steam Deck SDL may show Steam's keyboard) */
+        SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, osk_up() ? "0" : "auto");      /* (our keyboard is on the screen already: Steam's stays on STEAM + X) */
         if (want) SDL_StartTextInput(g_sdl_win); else SDL_StopTextInput(g_sdl_win);
         g_text_on = want;
     }

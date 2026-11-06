@@ -85,7 +85,7 @@ if [ "$SYSTEM" = 1 ]; then
         echo "  Python 3.10+ with venv; git; curl"
         exit 1
     fi
-    echo "  optional: zenity or kdialog (the game's on-screen keyboard, e.g. for naming a Mii, uses a dialog)"
+    echo "  optional: zenity or kdialog (text boxes of the PC Settings page for a controller player use a dialog)"
 fi
 
 fetch() {          # fetch <url> <file> <sha256>: downloaded, checked, or refused

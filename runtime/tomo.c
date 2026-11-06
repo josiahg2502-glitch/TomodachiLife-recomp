@@ -214,9 +214,8 @@ static void ik_appear(Ctx *c) {                           /* AppearArg: +0x1c th
     if (getenv("TOMO_IKLOG") && !g_ik_snap_owner) { g_ik_snap_owner = c->x[19]; memcpy(g_ik_snap, (void *)(uintptr_t)c->x[19], sizeof g_ik_snap); }
     g_ik.shown = 1; g_ik.shown_frames = 0; g_ik.text_sent = 0;
     InterlockedExchange(&g_ik.answer, 0);
-    g_ik.ours = ik_use_ours();
+    g_ik.ours = ik_use_ours() && osk_inline_open(g_ik.initial, g_ik.max_len);
     if (g_ik.ours) {
-        osk_inline_open(g_ik.initial, g_ik.max_len);
         g_ik.image_sent = 0; g_ik.sent_len = -1; g_ik.sent_cur = -1; g_ik.dirty = 1; g_ik.decided_at = 0;
         if (getenv("TOMO_IK_TEST")) CloseHandle(CreateThread(NULL, 0, ik_test_typist, (void *)getenv("TOMO_IK_TEST"), 0, NULL));
     } else g_ik.thread = CreateThread(NULL, 0, ik_prompt_thread, NULL, 0, NULL);

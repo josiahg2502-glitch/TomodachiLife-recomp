@@ -1,7 +1,7 @@
 /* The on-screen keyboard: nn::swkbd::ShowKeyboard answered by a keyboard of our own drawn in the game's window, used
  * with any controller (like the console's own) or with the PC keyboard, instead of a Windows dialog.
  *
- * The picture is drawn here with GDI into a 1920x1080 bitmap (any character the game's text can hold: accents, kana...);
+ * The picture is drawn here with GDI (in software where there is none) into a 1920x1080 bitmap (any character the game's text can hold: accents, kana...);
  * the Vulkan renderer copies that bitmap over the presented frame (nvn_vk_draw.c osk_draw) and, while the game presents
  * nothing (the calling thread waits here), presents its last frame again with it (nvn_front_osk_redraw).
  *
@@ -15,25 +15,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
+#include <stdlib.h>
+#include <math.h>
 
 #ifndef _WIN32
-/* Linux build: the keyboard is drawn with GDI, which Linux does not have. Every entry answers "not available here", so
- * nnapplet.c uses its other path (a desktop text dialog). */
-int osk_key(UINT msg, WPARAM w) { (void)msg; (void)w; return 0; }
-int osk_active(void) { return 0; }
-int osk_blocks_input(void) { return 0; }
-int osk_inline_open(const wchar_t *initial, int max_len) { (void)initial; (void)max_len; return 0; }      /* tomo.c keeps its text prompt */
-int osk_inline_step(wchar_t *text, int cap, int *len, int *cursor) { (void)text; (void)cap; (void)len; (void)cursor; return 0; }
-void osk_inline_close(void) {}
-int osk_inline_image(uint8_t *dst, int w, int h, int pitch) { (void)dst; (void)w; (void)h; (void)pitch; return 0; }
-int osk_take(uint32_t *dst, LONG *seen) { (void)dst; (void)seen; return 0; }
-void osk_size(int *w, int *h) { *w = 1920; *h = 1080; }
-void osk_test_start(void) {}
-int osk_message(const wchar_t *msg, int question) { (void)msg; (void)question; return -1; }
-int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out) {
-    (void)header; (void)guide; (void)initial; (void)max_len; (void)min_len; (void)password; (void)out; return -1;
-}
-#else
+#define OSK_SOFT 1                                 /* no GDI: the drawing layer below in software, the text by the game's own fonts (nnfontll.c) */
+#endif
 
 #define OSK_W 1920
 #define OSK_H 1080
@@ -51,7 +38,6 @@ static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 static uint32_t *g_px;                             /* the picture (BGRA, top-down), valid while g_on */
 static volatile LONG g_on, g_version;
 static HDC g_dc;
-static HBITMAP g_bmp;
 static HFONT g_f_head, g_f_text, g_f_key, g_f_small;
 
 /* keys from the window (display.c), consumed by the loop */
@@ -79,6 +65,7 @@ int osk_key(UINT msg, WPARAM w) {
 static int g_in_open;                              /* the inline keyboard (below) is up: not the full-screen picture */
 static ULONGLONG g_closed_at;
 int osk_active(void) { return g_on != 0 && !g_in_open; }
+int osk_up(void) { return g_on != 0; }             /* menu.cpp: SDL's text input while a keyboard is up */
 /* nnhid.c: the game gets no buttons or keys while a keyboard is up, nor for 250 ms after (the press that closed it) */
 int osk_blocks_input(void) { return g_on != 0 || (g_closed_at && GetTickCount64() - g_closed_at < 250); }
 int osk_take(uint32_t *dst, LONG *seen) {
@@ -100,7 +87,7 @@ static const wchar_t *const k_pages[3][ROWS] = {
     {L"!@#$%^&*()_", L"~`=+[]{}\\|;", L"àèéìòùçñüöä", L"«»¿¡€£¥°ßæø"},
 };
 /* the bottom row: shift, symbols, space (wide), delete, OK */
-enum { F_SHIFT, F_SYM, F_SPACE, F_DEL, F_OK, F_N };
+enum { F_SHIFT, F_SYM, F_SPACE, F_DEL, F_ENTER, F_N };
 static const int k_fspan[F_N] = {2, 2, 4, 2, 1};   /* in key widths: 11 in all */
 
 typedef struct {
@@ -112,6 +99,7 @@ typedef struct {
     const wchar_t *note;                           /* a line under the text (too short ...) */
 } Osk;
 
+#ifndef OSK_SOFT
 static COLORREF rgb(int r, int g, int b) { return RGB(r, g, b); }
 static void fill(int x, int y, int w, int h, COLORREF c) {
     HBRUSH br = CreateSolidBrush(c); RECT r = {x, y, x + w, y + h}; FillRect(g_dc, &r, br); DeleteObject(br);
@@ -127,6 +115,131 @@ static void text(HFONT f, COLORREF c, int x, int y, int w, int h, const wchar_t 
     SelectObject(g_dc, f); SetTextColor(g_dc, c); SetBkMode(g_dc, TRANSPARENT);
     DrawTextW(g_dc, s, n, &r, how | DT_NOPREFIX);
 }
+static int text_w(HFONT f, const wchar_t *s, int n) {
+    SIZE sz;
+    SelectObject(g_dc, f);
+    GetTextExtentPoint32W(g_dc, s, n, &sz);
+    return sz.cx;
+}
+#else
+/* The same calls without GDI (Linux, Android): pixels as a DIB holds them (B G R A in memory), COLORREF as RGB() makes it. */
+#ifndef RGB
+typedef DWORD COLORREF;
+#define RGB(r, g, b) ((COLORREF)((r) | (g) << 8 | (b) << 16))
+#define DT_LEFT 0
+#define DT_CENTER 1
+#define DT_RIGHT 2
+#define DT_VCENTER 4
+#define DT_WORDBREAK 0x10
+#define DT_SINGLELINE 0x20
+#define DT_END_ELLIPSIS 0x8000
+#endif
+#define GdiFlush() ((void)0)
+int nnfontll_glyph(const char *prefix, uint32_t code, int px, uint8_t **bits, int *w, int *h, int *lo_x, int *hi_y, float *adv);      /* nnfontll.c */
+typedef struct { uint32_t *px; int w, h; } Canvas;
+typedef struct { int px, heavy; } SoftFont;
+typedef struct { uint32_t code; int px, heavy, w, h, lo_x, hi_y; float adv; uint8_t *bits; } SoftGlyph;
+static SoftFont g_sf[32];
+static int g_sfn;
+static SoftGlyph g_gl[768];
+static int g_gln;
+static COLORREF rgb(int r, int g, int b) { return RGB(r, g, b); }
+static uint32_t dib(COLORREF c) { return (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff); }
+static HFONT soft_font(int px, int heavy) {
+    for (int i = 0; i < g_sfn; i++) if (g_sf[i].px == px && g_sf[i].heavy == heavy) return (HFONT)&g_sf[i];
+    if (g_sfn == 32) g_sfn = 0;
+    g_sf[g_sfn].px = px; g_sf[g_sfn].heavy = heavy;
+    return (HFONT)&g_sf[g_sfn++];
+}
+static const SoftGlyph *soft_glyph(const SoftFont *f, uint32_t code) {
+    for (int i = 0; i < g_gln; i++) if (g_gl[i].code == code && g_gl[i].px == f->px && g_gl[i].heavy == f->heavy) return &g_gl[i];
+    if (g_gln == (int)(sizeof g_gl / sizeof g_gl[0])) { for (int i = 0; i < g_gln; i++) free(g_gl[i].bits); g_gln = 0; }
+    SoftGlyph *g = &g_gl[g_gln];
+    memset(g, 0, sizeof *g);
+    g->code = code; g->px = f->px; g->heavy = f->heavy;
+    /* (a character no font has takes no room, once) */
+    nnfontll_glyph(f->heavy ? "nintendoP_RodinNTLG-UB" : "nintendoP_RodinNTLG-B", code, f->px, &g->bits, &g->w, &g->h, &g->lo_x, &g->hi_y, &g->adv);
+    g_gln++;
+    return g;
+}
+static void fill(int x, int y, int w, int h, COLORREF c) {
+    Canvas *v = (Canvas *)g_dc;
+    uint32_t d = dib(c);
+    int x1 = x + w > v->w ? v->w : x + w, y1 = y + h > v->h ? v->h : y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    for (; y < y1; y++) { uint32_t *o = v->px + (size_t)y * v->w; for (int i = x; i < x1; i++) o[i] = d; }
+}
+static void rbox(int x, int y, int w, int h, int rad, COLORREF fillc, COLORREF edge, int pen) {
+    Canvas *v = (Canvas *)g_dc;
+    uint32_t f = dib(fillc), e = dib(edge);
+    double r = rad / 2.0;                          /* RoundRect's are the corner's diameter */
+    if (r > w / 2.0) r = w / 2.0;
+    if (r > h / 2.0) r = h / 2.0;
+    for (int yy = y < 0 ? 0 : y; yy < y + h && yy < v->h; yy++) {
+        uint32_t *o = v->px + (size_t)yy * v->w;
+        double dy = yy + .5 - y, ey = dy < h - dy ? dy : h - dy;      /* to the nearer edge */
+        for (int xx = x < 0 ? 0 : x; xx < x + w && xx < v->w; xx++) {
+            double dx = xx + .5 - x, ex = dx < w - dx ? dx : w - dx, in;
+            if (ex < r && ey < r) {                /* a corner: how far inside its circle */
+                double a = r - ex, b = r - ey, d2 = a * a + b * b;
+                if (d2 > r * r) continue;
+                in = r - sqrt(d2);
+            } else in = ex < ey ? ex : ey;
+            o[xx] = in < pen ? e : f;
+        }
+    }
+}
+static int soft_len(const wchar_t *s, int n) { if (n >= 0) return n; int k = 0; while (s[k]) k++; return k; }
+static double soft_width(const SoftFont *f, const wchar_t *s, int n) {
+    double a = 0;
+    for (int i = 0; i < n; i++) a += soft_glyph(f, (uint32_t)s[i])->adv;
+    return a;
+}
+static void soft_line(const SoftFont *f, uint32_t col, double ox, int base, const wchar_t *s, int n, int cx0, int cx1) {
+    Canvas *v = (Canvas *)g_dc;
+    for (int i = 0; i < n; i++) {
+        const SoftGlyph *g = soft_glyph(f, (uint32_t)s[i]);
+        int gx = (int)floor(ox + .5) + g->lo_x, gy = base - g->hi_y - 1;
+        for (int y = 0; g->bits && y < g->h; y++) {
+            int oy = gy + y;
+            if (oy < 0 || oy >= v->h) continue;
+            uint32_t *o = v->px + (size_t)oy * v->w;
+            const uint8_t *cov = g->bits + (size_t)y * g->w;
+            for (int x = 0; x < g->w; x++) {
+                int ox2 = gx + x, a = cov[x];
+                if (!a || ox2 < cx0 || ox2 >= cx1 || ox2 < 0 || ox2 >= v->w) continue;
+                uint32_t d = o[ox2];
+                o[ox2] = (d & 0xff000000u) | ((((d >> 16 & 255) * (255 - a) + (col >> 16 & 255) * a) / 255) << 16) | ((((d >> 8 & 255) * (255 - a) + (col >> 8 & 255) * a) / 255) << 8) | (((d & 255) * (255 - a) + (col & 255) * a) / 255);
+            }
+        }
+        ox += g->adv;
+    }
+}
+static void text(HFONT hf, COLORREF c, int x, int y, int w, int h, const wchar_t *s, int n, UINT how) {
+    const SoftFont *f = (const SoftFont *)hf;
+    uint32_t col = dib(c);
+    int asc = (int)(f->px * .8 + .5), lh = (int)(f->px * 1.25 + .5);
+    n = soft_len(s, n);
+    if (how & DT_WORDBREAK) {                      /* greedy, by spaces */
+        int yy = y, i = 0;
+        while (i < n) {
+            int end = i, brk = -1;
+            double cur = 0;
+            while (end < n && s[end] != '\n') { cur += soft_glyph(f, (uint32_t)s[end])->adv; if (cur > w && brk > i) break; if (s[end] == ' ') brk = end; end++; }
+            if (end < n && s[end] != '\n' && brk > i) end = brk;
+            double lw = soft_width(f, s + i, end - i);
+            soft_line(f, col, how & DT_CENTER ? x + (w - lw) / 2 : x, yy + asc, s + i, end - i, x, x + w);
+            yy += lh;
+            i = end < n && (s[end] == ' ' || s[end] == '\n') ? end + 1 : end;
+        }
+        return;
+    }
+    double lw = soft_width(f, s, n), ox = how & DT_CENTER ? x + (w - lw) / 2 : how & DT_RIGHT ? x + w - lw : x;
+    soft_line(f, col, ox, how & DT_VCENTER ? y + (h - f->px) / 2 + asc : y + asc, s, n, x, x + w);
+}
+static int text_w(HFONT f, const wchar_t *s, int n) { return (int)(soft_width((const SoftFont *)f, s, soft_len(s, n)) + .5); }
+#endif
 
 static wchar_t key_char(const Osk *k, int row, int col) {
     int page = k->page == 2 ? 2 : (k->page == 1 || k->shift_once) ? 1 : 0;
@@ -146,16 +259,14 @@ static void render(const Osk *k) {
     if (!k->len && k->guide && k->guide[0]) text(g_f_text, grey, 190, 170, OSK_W - 380, 110, k->guide, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     else {
         /* the text, scrolled so that the cursor stays inside the field */
-        SelectObject(g_dc, g_f_text);
         int start = 0, fieldw = OSK_W - 380;
-        SIZE sz;
-        for (;;) { GetTextExtentPoint32W(g_dc, shown + start, k->cur - start, &sz); if (sz.cx <= fieldw - 20 || start >= k->cur) break; start++; }
+        while (text_w(g_f_text, shown + start, k->cur - start) > fieldw - 20 && start < k->cur) start++;
         text(g_f_text, dark, 190, 170, fieldw, 110, shown + start, k->len - start, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        GetTextExtentPoint32W(g_dc, shown + start, k->cur - start, &sz);
-        fill(190 + sz.cx + 1, 195, 4, 60, rgb(0, 150, 200));                   /* the cursor */
+        fill(190 + text_w(g_f_text, shown + start, k->cur - start) + 1, 195, 4, 60, rgb(0, 150, 200));      /* the cursor */
     }
     wchar_t count[64];
-    _snwprintf(count, 63, L"%d / %d", k->len, k->max_len); count[63] = 0;
+    {   char cn[64]; int i = snprintf(cn, sizeof cn, "%d / %d", k->len, k->max_len);
+        for (count[i] = 0; i-- > 0;) count[i] = (wchar_t)cn[i]; }
     text(g_f_small, grey, OSK_W - 520, 290, 360, 40, count, -1, DT_RIGHT | DT_SINGLELINE);
     if (k->note) text(g_f_small, rgb(255, 120, 110), 160, 290, OSK_W - 700, 40, k->note, -1, DT_LEFT | DT_SINGLELINE);
     /* the keys */
@@ -168,18 +279,26 @@ static void render(const Osk *k) {
             wchar_t ch[2] = {key_char(k, r, c), 0};
             text(g_f_key, on ? dark : white, x, y, kw, kh, ch, 1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+#ifdef OSK_SOFT
+    static const wchar_t *const fname[F_N] = {L"Shift", L"#+=", L"Space", L"Delete", L"OK"};      /* (the game's fonts have no such symbols) */
+#else
     static const wchar_t *const fname[F_N] = {L"⇧ Shift", L"#+=", L"Space", L"⌫", L"OK"};
+#endif
     int x = kx0, y = ky0 + ROWS * (kh + gap);
     for (int f = 0; f < F_N; f++) {
         int w = k_fspan[f] * kw, on = k->row == ROWS && k->col == f;
         int lit = (f == F_SHIFT && (k->page == 1 || k->shift_once)) || (f == F_SYM && k->page == 2);
-        COLORREF c = on ? keyf : f == F_OK ? rgb(0, 140, 170) : lit ? rgb(110, 110, 125) : keyc;
+        COLORREF c = on ? keyf : f == F_ENTER ? rgb(0, 140, 170) : lit ? rgb(110, 110, 125) : keyc;
         rbox(x + gap / 2, y, w - gap, kh, 18, c, on ? white : c, on ? 4 : 1);
         text(g_f_key, on ? dark : white, x, y, w, kh, f == F_SYM && k->page == 2 ? L"abc" : fname[f], -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         x += w;
     }
+#ifdef OSK_SOFT
+    text(g_f_small, grey, 160, OSK_H - 60, OSK_W - 320, 50, L"A type   B delete   Y space   X symbols   L / R cursor   ZL shift   + OK   - cancel", -1, DT_CENTER | DT_SINGLELINE);
+#else
     text(g_f_small, grey, 160, OSK_H - 60, OSK_W - 320, 50,
          L"Ⓐ type   Ⓑ delete   Ⓨ space   Ⓧ symbols   L / R cursor   ZL shift   + OK   − cancel", -1, DT_CENTER | DT_SINGLELINE);
+#endif
     GdiFlush();
 }
 
@@ -210,6 +329,7 @@ static int try_ok(Osk *k) {
     return 1;
 }
 
+#ifndef OSK_SOFT
 static int setup_gdi(void) {
     if (g_dc) return 1;
     BITMAPINFO bi;
@@ -221,13 +341,24 @@ static int setup_gdi(void) {
     HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
     if (!bmp || !bits) { if (dc) DeleteDC(dc); return 0; }
     SelectObject(dc, bmp);
-    g_dc = dc; g_bmp = bmp; g_px = bits;
+    g_dc = dc; g_px = bits;
     g_f_head = CreateFontW(-56, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_f_text = CreateFontW(-60, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_f_key = CreateFontW(-52, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
     g_f_small = CreateFontW(-34, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
     return 1;
 }
+#else
+static int setup_gdi(void) {
+    static Canvas cv;
+    if (g_dc) return 1;
+    cv.w = OSK_W; cv.h = OSK_H; cv.px = calloc((size_t)OSK_W * OSK_H, 4);
+    if (!cv.px) return 0;
+    g_px = cv.px; g_dc = (HDC)&cv;
+    g_f_head = soft_font(56, 1); g_f_text = soft_font(60, 0); g_f_key = soft_font(52, 1); g_f_small = soft_font(34, 0);
+    return 1;
+}
+#endif
 
 static void move(Osk *k, int dx, int dy) {
     if (dy) {
@@ -256,7 +387,7 @@ static void press(Osk *k, int *done, int *result) {
     case F_SYM: k->page = k->page == 2 ? 0 : 2; k->shift_once = 0; break;
     case F_SPACE: ins(k, L' '); break;
     case F_DEL: del_back(k); break;
-    case F_OK: if (try_ok(k)) { *done = 1; *result = 1; } break;
+    case F_ENTER: if (try_ok(k)) { *done = 1; *result = 1; } break;
     }
 }
 
@@ -266,11 +397,13 @@ static void press(Osk *k, int *done, int *result) {
 static void dump_bmp(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return;
-    BITMAPFILEHEADER fh; BITMAPINFOHEADER ih;
-    memset(&fh, 0, sizeof fh); memset(&ih, 0, sizeof ih);
-    fh.bfType = 0x4d42; fh.bfOffBits = sizeof fh + sizeof ih; fh.bfSize = fh.bfOffBits + OSK_W * OSK_H * 4;
-    ih.biSize = sizeof ih; ih.biWidth = OSK_W; ih.biHeight = -OSK_H; ih.biPlanes = 1; ih.biBitCount = 32; ih.biCompression = BI_RGB;
-    fwrite(&fh, sizeof fh, 1, f); fwrite(&ih, sizeof ih, 1, f);
+    uint8_t head[54] = {'B', 'M'};
+    uint32_t size = 54 + (uint32_t)OSK_W * OSK_H * 4, v = 54;
+    memcpy(head + 2, &size, 4); memcpy(head + 10, &v, 4);
+    v = 40; memcpy(head + 14, &v, 4);
+    { int32_t w = OSK_W, h = -OSK_H; memcpy(head + 18, &w, 4); memcpy(head + 22, &h, 4); }
+    head[26] = 1; head[28] = 32;
+    fwrite(head, 54, 1, f);
     EnterCriticalSection(&g_lock); fwrite(g_px, 4, (size_t)OSK_W * OSK_H, f); LeaveCriticalSection(&g_lock);
     fclose(f);
 }
@@ -450,6 +583,9 @@ static int g_in_drawn = -1, g_in_ver;
 static HDC g_idc;
 static uint32_t *g_ipx;
 static int g_iw, g_ih;
+#ifdef OSK_SOFT
+static HFONT font_px(int px, int heavy) { return soft_font(px, heavy); }
+#else
 static WCHAR g_face[2][LF_FACESIZE];               /* [0] regular text, [1] the keys: the game's Rodin B / UB, else Segoe UI */
 static int g_face_w[2];
 static struct { int px, heavy; HFONT f; } g_fc[16];
@@ -468,6 +604,7 @@ static HFONT font_px(int px, int heavy) {
     g_fc[slot].f = CreateFontW(-px, 0, 0, 0, g_face_w[heavy], 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, g_face[heavy]);
     return g_fc[slot].f;
 }
+#endif
 #define IK_KEY RGB(1, 254, 1)                      /* the transparent part of the picture (no drawing produces it) */
 /* The keyboard panel at the bottom of a w x h picture (design units: 1920 x 1080, s = w / 1920), into g_idc. */
 static void draw_inline(const Osk *k, int w, int h) {
@@ -477,20 +614,17 @@ static void draw_inline(const Osk *k, int w, int h) {
     const COLORREF panel = RGB(255, 243, 207), rim = RGB(255, 194, 14), keyc = RGB(255, 255, 255), keyrim = RGB(240, 222, 170),
                    ink = RGB(28, 40, 72), focus = RGB(255, 122, 0), focusrim = RGB(230, 95, 0), fkey = RGB(255, 226, 120),
                    lit = RGB(255, 200, 40), okc = RGB(255, 122, 0), soft = RGB(70, 80, 110), white = RGB(255, 255, 255);
-    HDC dc = g_idc;
-    { HBRUSH br = CreateSolidBrush(IK_KEY); RECT r = {0, 0, w, h}; FillRect(dc, &r, br); DeleteObject(br); }
     HDC keep = g_dc;
-    g_dc = dc;                                     /* rbox / text draw into g_dc */
+    g_dc = g_idc;                                  /* rbox / text draw into g_dc */
+    fill(0, 0, w, h, IK_KEY);
     rbox(U(60), h - U(592), U(1800), U(568), U(60), panel, rim, U(6) > 1 ? U(6) : 1);
     /* the help line: a button and what it does */
     static const struct { const wchar_t *b, *what; } hint[] = {{L"A", L"Type"}, {L"B", L"Delete"}, {L"Y", L"Space"}, {L"X", L"Symbols"}, {L"+", L"OK"}, {L"\x2212", L"Cancel"}};
     int hx = U(1820), hy = h - U(566), hs = U(40);
     for (int i = (int)(sizeof hint / sizeof hint[0]) - 1; i >= 0; i--) {
-        SIZE sz;
-        SelectObject(dc, font_px(U(30), 0));
-        GetTextExtentPoint32W(dc, hint[i].what, (int)wcslen(hint[i].what), &sz);
-        hx -= sz.cx;
-        text(font_px(U(30), 0), soft, hx, hy, sz.cx + U(4), hs, hint[i].what, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        int tw = text_w(font_px(U(30), 0), hint[i].what, (int)wcslen(hint[i].what));
+        hx -= tw;
+        text(font_px(U(30), 0), soft, hx, hy, tw + U(4), hs, hint[i].what, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         hx -= U(8) + hs;
         rbox(hx, hy, hs, hs, hs, ink, ink, 1);
         text(font_px(U(26), 1), white, hx, hy, hs, hs, hint[i].b, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -513,9 +647,9 @@ static void draw_inline(const Osk *k, int w, int h) {
     for (int f = 0; f < F_N; f++) {
         int x = kx0 + (int)(col * kw), x2 = kx0 + (int)((col + k_fspan[f]) * kw), on = k->row == ROWS && k->col == f;
         int lt = (f == F_SHIFT && (k->page == 1 || k->shift_once)) || (f == F_SYM && k->page == 2);
-        COLORREF c = on ? focus : f == F_OK ? okc : lt ? lit : fkey;
-        rbox(x + gap / 2, y, x2 - x - gap, kh, U(24), c, on ? focusrim : f == F_OK ? focusrim : keyrim, on ? U(4) : U(2) > 1 ? U(2) : 1);
-        text(font_px(U(40), 1), on || f == F_OK ? white : ink, x, y, x2 - x, kh, f == F_SYM && k->page == 2 ? L"abc" : fname[f], -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        COLORREF c = on ? focus : f == F_ENTER ? okc : lt ? lit : fkey;
+        rbox(x + gap / 2, y, x2 - x - gap, kh, U(24), c, on ? focusrim : f == F_ENTER ? focusrim : keyrim, on ? U(4) : U(2) > 1 ? U(2) : 1);
+        text(font_px(U(40), 1), on || f == F_ENTER ? white : ink, x, y, x2 - x, kh, f == F_SYM && k->page == 2 ? L"abc" : fname[f], -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         col += k_fspan[f];
     }
     GdiFlush();
@@ -585,6 +719,13 @@ int osk_inline_image(uint8_t *dst, int w, int h, int pitch) {
     if (!g_in_open || w <= 0 || h <= 0 || (g_in_drawn == g_in_ver && g_iw == w && g_ih == h)) return 0;
     int W = w * 2, H = h * 2;
     if (!g_idc || g_iw != w || g_ih != h) {
+#ifdef OSK_SOFT
+        static Canvas cv;
+        uint32_t *bits = realloc(cv.px, (size_t)W * H * 4);
+        if (!bits) return 0;
+        cv.px = bits; cv.w = W; cv.h = H;
+        g_idc = (HDC)&cv;
+#else
         BITMAPINFO bi;
         memset(&bi, 0, sizeof bi);
         bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;
@@ -594,6 +735,7 @@ int osk_inline_image(uint8_t *dst, int w, int h, int pitch) {
         HBITMAP bmp = CreateDIBSection(g_idc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
         if (!bmp || !bits) return 0;
         DeleteObject(SelectObject(g_idc, bmp));
+#endif
         g_ipx = bits; g_iw = w; g_ih = h;
     }
     draw_inline(&g_in, W, H);
@@ -611,4 +753,3 @@ int osk_inline_image(uint8_t *dst, int w, int h, int pitch) {
     g_in_drawn = g_in_ver;
     return 1;
 }
-#endif

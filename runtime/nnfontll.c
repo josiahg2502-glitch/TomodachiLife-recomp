@@ -1399,6 +1399,31 @@ int nnfontll_gdi_face(const char *prefix, WCHAR *face, int *weight) {
     return ok;
 }
 
+/* osk.c where there is no GDI: a glyph at px pixels of a font the game loaded whose name starts with `prefix`, else of any font
+ * that has the character: coverage (malloc, 0 for an empty one), its size and place as Gray holds them, the advance in pixels.
+ * 0 when no font has it. */
+int nnfontll_glyph(const char *prefix, uint32_t code, int px, uint8_t **bits, int *w, int *h, int *lo_x, int *hi_y, float *adv) {
+    FontData *pick = NULL;
+    size_t n = strlen(prefix);
+    EnterCriticalSection(&g_lock);
+    for (int i = 0; i < g_fontdata_count && !pick; i++) if (!strncmp(g_fontdata[i].name, prefix, n) && map_char(&g_fontdata[i], code)) pick = &g_fontdata[i];
+    for (int i = 0; i < g_fontdata_count && !pick; i++) if (map_char(&g_fontdata[i], code)) pick = &g_fontdata[i];
+    LeaveCriticalSection(&g_lock);
+    if (!pick) return 0;
+    uint32_t glyph = map_char(pick, code);
+    int32_t m[4] = {px << 16, 0, 0, px << 16};
+    Path path;
+    Gray g;
+    memset(&path, 0, sizeof path);
+    glyph_path(pick, glyph, m, &path);
+    rasterise(&path, &g);
+    free(path.p);
+    free(path.end);
+    *bits = g.bits; *w = g.w; *h = g.h; *lo_x = g.lo_x; *hi_y = g.hi_y;
+    *adv = (float)advance_units(pick, glyph) * (float)px / (float)pick->upem;
+    return 1;
+}
+
 void register_fontll_imports(void) {
     InitializeCriticalSection(&g_lock);
 #ifdef _WIN32
