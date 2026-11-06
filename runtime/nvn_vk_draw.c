@@ -2188,7 +2188,22 @@ static int depth_copy_on(void) {
     }
     return on;
 }
-static VTex *depth_shadow(VTex *vt) {                  /* the copy of depth target vt, up to date for this binding; the pass is ended */
+/* 2026-11-05, Intel Iris Xe (issue #41): speckles along a Mii's hair. The Mii passes sample the colour target they draw into (blue: a
+ * mask they discard on), and in GENERAL layout what that reads is the driver's business; NVIDIA's gives the right values. With
+ * colour_copy_on() (Intel by default; SSBU_VK_COLORCOPY=1 / 0 forces it) such a draw at level 0 samples a copy, as OpenGL's
+ * feedback_guard does: before each draw into one target (the refraction pass reads texels it writes), for several targets
+ * once until another draw or a clear may have changed them (these draws write blue back unchanged). Mip chains (level n from
+ * the ones below) read other texels: left as they are. */
+static int g_ccopy = -1, g_cc_used;
+static int colour_copy_on(void) {
+    if (g_ccopy < 0) {
+        const char *e = getenv("SSBU_VK_COLORCOPY");
+        g_ccopy = e && e[0] ? atoi(e) != 0 : V.props.vendorID == 0x8086;
+        printf("nvn_vk: colour targets sampled while bound: %s (%s)\n", g_ccopy ? "a copy is sampled" : "sampled in place (GENERAL layout)", e && e[0] ? "SSBU_VK_COLORCOPY" : g_ccopy ? "Intel: the default there" : "the default");
+    }
+    return g_ccopy;
+}
+static VTex *depth_shadow(VTex *vt) {                  /* the copy of target vt (depth, or colour: colour_copy_on), up to date for this binding; the pass is ended */
     VTex *sh = vt->shadow;
     if (!sh) {
         VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -2198,6 +2213,7 @@ static VTex *depth_shadow(VTex *vt) {                  /* the copy of depth targ
         ci.imageType = VK_IMAGE_TYPE_2D; ci.format = vt->fmt; ci.extent.width = (uint32_t)vt->w; ci.extent.height = (uint32_t)vt->h; ci.extent.depth = 1;
         ci.mipLevels = (uint32_t)vt->levels; ci.arrayLayers = (uint32_t)vt->layers; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT) ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;      /* (views of another format, as vt's) */
         VkResult r = vkCreateImage(V.device, &ci, NULL, &sh->img);
         if (r != VK_SUCCESS) vkd_fail("vkCreateImage (depth copy %dx%d format %d): %s", vt->w, vt->h, (int)vt->fmt, vk_result_name(r));
         vkGetImageMemoryRequirements(V.device, sh->img, &rq);
@@ -2212,8 +2228,8 @@ static VTex *depth_shadow(VTex *vt) {                  /* the copy of depth targ
         vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         vt_layout(sh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         for (int l = 0; l < vt->levels && n < 30; l++)
-            for (int a = 0; a < 2; a++) {
-                VkFlags bit = a ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+            for (int a = 0; a < 3; a++) {
+                VkFlags bit = a == 2 ? VK_IMAGE_ASPECT_COLOR_BIT : a ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
                 if (!(vt->aspect & bit)) continue;
                 memset(&rg[n], 0, sizeof rg[n]);
                 rg[n].srcSubresource.aspectMask = rg[n].dstSubresource.aspectMask = bit;
@@ -2230,6 +2246,7 @@ static VTex *depth_shadow(VTex *vt) {                  /* the copy of depth targ
     return sh;
 }
 /* The image view and sampler of one declared sampler of stage s. May end the pass (upload, layout change). */
+static int bound_at_level0(const Tex *t) { for (int k = 0; k < R.ncol; k++) if (R.col[k].tex == t && !target_level(&R.col[k])) return 1; return 0; }
 static uint32_t g_bx[6][MX_BX];                     /* TEX.B on Vulkan: the candidate handles of the draw, per stage (0xffffffff = none) */
 static uint32_t g_bx_force;                         /* resolve_sampler of a TEX.B array slot: the candidate's handle */
 static void resolve_sampler(int s, VStage *v, int i);
@@ -2355,6 +2372,11 @@ static void resolve_sampler(int s, VStage *v, int i) {
                  ((dim == DIM_CUBE || dim == DIM_CUBEA) && (have == DIM_2DA) && e.nlay >= 6 && vt->w == vt->h);
         if (ok && vt->samples == 1 && attached && R.depth.tex == t && vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT && !vt->is3d && have_targets_live() && depth_copy_on()) {
             VTex *sh = depth_shadow(vt);              /* (AMD render bugs) the copy, not the bound image */
+            g_dtex[g_ndtex].view = vt_view(sh, &e, dim, 0); g_dtex[g_ndtex].layout = sh->layout; if (di) di->dummy = 0;
+        } else if (ok && vt->samples == 1 && attached && vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !vt->is3d && have_targets_live() && colour_copy_on() && bound_at_level0(t)) {
+            if (R.ncol == 1) vt->shadow_ok = 0;
+            VTex *sh = depth_shadow(vt);
+            g_cc_used = 1;
             g_dtex[g_ndtex].view = vt_view(sh, &e, dim, 0); g_dtex[g_ndtex].layout = sh->layout; if (di) di->dummy = 0;
         } else if (ok && vt->samples == 1) {
             if (attached && have_targets_live()) { if (!vt->feedback) { vt->feedback = 1; R.feedback++; pass_end();
@@ -3418,6 +3440,10 @@ static int draw_prepare(unsigned prim) {
     bx_scan(0, vs); if (fs) bx_scan(1, fs);
     resolve_stage(0, vs);
     if (fs) resolve_stage(1, fs);
+    if (g_ccopy > 0) {                             /* (colour_copy_on) this draw may write what the next one reads */
+        if (!g_cc_used) for (int k = 0; k < R.ncol; k++) if (R.col[k].tex && R.col[k].tex->vk) ((VTex *)R.col[k].tex->vk)->shadow_ok = 0;
+        g_cc_used = 0;
+    }
     DPROF(1);
     /* 2. buffers: every range the draw reads, into the ring (may wrap the ring = submit) */
     static BufRef bufs[80];
@@ -4059,7 +4085,7 @@ static void exec(const Cmd *m, int depth) {
                 R.col[0].view.set, R.col[0].view.format, R.col[0].view.lvl0, R.col[0].view.nlvl, R.col[0].view.lay0, R.col[0].view.nlay, nc[0].view.set, nc[0].view.format, nc[0].view.lvl0, nc[0].view.nlvl, nc[0].view.lay0, nc[0].view.nlay); }
         }
         pass_end();
-        for (int i = 0; i < R.ncol; i++) if (R.col[i].tex && R.col[i].tex->vk) ((VTex *)R.col[i].tex->vk)->feedback = 0;
+        for (int i = 0; i < R.ncol; i++) if (R.col[i].tex && R.col[i].tex->vk) { ((VTex *)R.col[i].tex->vk)->feedback = 0; ((VTex *)R.col[i].tex->vk)->shadow_ok = 0; }
         if (R.depth.tex && R.depth.tex->vk) { ((VTex *)R.depth.tex->vk)->feedback = 0; ((VTex *)R.depth.tex->vk)->shadow_ok = 0; }
         memcpy(R.col, nc, sizeof R.col); R.depth = nd;
         R.ncol = nn; R.have_targets = nn > 0 || nd.tex != NULL;
@@ -4133,6 +4159,7 @@ static void exec(const Cmd *m, int depth) {
     case OP_CLEARCOLOR: {
         unsigned i = (unsigned)a[0] & 7, mask = (unsigned)a[2] & 15;
         if (!R.have_targets || R.render_off || (int)i >= R.ncol || !R.col[i].tex) break;
+        if (R.col[i].tex->vk) ((VTex *)R.col[i].tex->vk)->shadow_ok = 0;
         if (!pass_begin()) break;
         if (mask != 15) {                          /* a partial channel mask only matters for channels the format has */
             Fmt f; int comps = 4, nf = R.col[i].tex->b.format;
