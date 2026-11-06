@@ -5,7 +5,7 @@ own code is translated to C and compiled for your PC: no emulator runs underneat
 
 Also for **Linux and Steam Deck** ([docs/LINUX.md](docs/LINUX.md)) and **Android handhelds** ([docs/ANDROID.md](docs/ANDROID.md)).
 
-**Version 1.0.2.** You can play it from start to finish as far as we know; see [Known issues](#known-issues) for what is
+**Version 1.0.3.** You can play it from start to finish as far as we know; see [Known issues](#known-issues) for what is
 still open.
 
 **Nothing of the game is in this repository or in the release downloads.** You build it on your own PC from your own copy
@@ -140,6 +140,7 @@ ONLINE** = *Same network* for PCs at home, or *Host* (your game shows a room cod
   #34). It does not happen on our test PC yet: an F12 sample (below) from a PC where it does would help most.
 - Face paints made before 1.0.2 did not save their canvas: the face looks right, but the editor opens with an empty or older canvas, and
   pressing Done there replaces the face with it (Quit keeps the face). Paints made from 1.0.2 on save it (issue #36).
+- The face paint upscaler does not run: paints save and show correctly without it, and on a console they may look a little smoother.
 - Now and then a Mii's line shows without its voice (seen once in Mii News); the session log now records every line and
   voice, so please send `build\logs\play_*.log` with the time it happened.
 - Once, a freeze in the controller input was seen and not reproduced since. If the game stops responding, close it and

@@ -155,7 +155,7 @@ python compile_main.py ..\..\build\gen_eh ..\..\build\obj 12
 
 The keys must cover key generation 0x0f or newer, since this game is newer than the keys in some emulator folders.
 
-## State at 1.0.2
+## State at 1.0.3
 
 Windows (OpenGL on NVIDIA, Vulkan on other cards), Linux and Android (Vulkan). What was learned in the last round, for whoever
 picks this up:
