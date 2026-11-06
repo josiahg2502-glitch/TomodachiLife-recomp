@@ -10391,6 +10391,7 @@ void nvn_front_ccmp_dispatch(const Range *ubo, const Range *ssbo, uint32_t writt
 void nvn_front_ccmp_landed(void) {
     for (int i = 0; i < g_ccmp_npend; i++) {
         char path[400];
+    g_gpu_ts_base = now_ns(); g_gpu_ts_k = 0;      /* (gpu_ts: a slow replay is not a slow GPU, or the game lowers its render size) */
         snprintf(path, sizeof path, "%s/%016llx_%d.bin", g_ccmp_dir, (unsigned long long)g_ccmp_pend[i].h, g_ccmp_pend[i].n);
         FILE *fp = fopen(path, "wb");
         if (fp) { fwrite(P(g_ccmp_pend[i].addr), 1, (size_t)g_ccmp_pend[i].size, fp); fclose(fp); }
