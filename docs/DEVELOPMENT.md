@@ -174,7 +174,9 @@ picks this up:
   use the barrier instruction, and one of them ATOMS too, which `mx_translate.c` does not translate, so they are skipped (`machine code not translated:
   instruction BAR`). Skipped, the strokes are saved clean. Tried with both translated (`memoryBarrierShared(); barrier();`, `atomicAdd` / `atomicMax` on `smem`):
   the saved face tore into broken rows on Vulkan and on OpenGL, where one program of 72,832 bytes is refused as well (`too many instructions`). Translate
-  them only together with finding what tears; compare `*.ugctex.zs` of a painted Mii, with real strokes.
+  them only together with finding what tears; compare `*.ugctex.zs` of a painted Mii, with real strokes. Because they are skipped the upscaler's check always failed, and the game
+  retries it up to 1,000 times when the canvas opens: a 20-second freeze here, over a minute on a slower PC (issue #43). `upscale_try_hook` (`tomo.c`) fails the first try at once; the game's
+  way without the upscaler then goes on, with the same saved files. To work on the upscaler itself, take that hook out first.
 - **The face paint editor (issue #36).** The game paints the canvas on the CPU and stores it with `nvnTextureWriteTexels`, then saves `*.canvas.zs` from
   that texture's memory, so WriteTexels has to reach guest memory too (`tex_write_memory`, memory the CPU reads only). On Done it encodes the BC1 face on
   the CPU into a texture a GPU copy may have written when Edit Mii opened: `cb_landed` lets a compressed texture take CPU writes again once that copy has

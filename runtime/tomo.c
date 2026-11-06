@@ -1445,7 +1445,7 @@ int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportF
 static int tomo_hook(uint64_t a, void (*repl)(Ctx *, void *), ImportFn *orig) {
     static const uint64_t v262144[][2] = {{0x71008ce838ull, 0x7100897d48ull}, {0x71006ec3c0ull, 0x71006ce020ull},
         {0x710022dce0ull, 0x7100241170ull}, {0x71005e1ffcull, 0x71005824b8ull}, {0x71001e68c0ull, 0x7100232360ull},
-        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}, {0x7101bc8588ull, 0x7101b6ee28ull}};
+        {0x710028b2b8ull, 0x710027f474ull}, {0x710044d090ull, 0x710044c118ull}, {0x710026dca0ull, 0x710026eef0ull}, {0x7101bc8588ull, 0x7101b6ee28ull}, {0x7100ab7090ull, 0x7100a5ea20ull}};
     uint64_t at = 0;
     if (g_main.text_size == 0x25ce6a0) at = a;
     else if (g_main.text_size == 0x256d250)
@@ -1999,8 +1999,16 @@ static void rate_pick_hook(Ctx *c, void *user) {
     if (j != t) wr64(fw + 0x118, (uint64_t)t);
 }
 void tomo_pick_stats(double *avg, double *mx, double *raw) { *avg = g_pick_n ? g_pick_sum / g_pick_n : 0; *mx = g_pick_max; *raw = g_pick_n ? g_pick_raw / g_pick_n : 0; g_pick_sum = g_pick_max = g_pick_raw = 0; g_pick_n = 0; }
+/* The face paint upscaler's one try [0x7100ab7090, 1.0.4 0x7100a5ea20: 0 done, 1 its result failed the check]. The game opens the canvas with a
+ * try, and while it fails tries again, up to 1,000 times [0x7101b7e3d8 in 1.0.4], each with a queue finish after ~70 dispatches, and then goes on without
+ * the upscaler. 16 of its compute programs stay untranslated (docs/DEVELOPMENT.md: run, they tore the strokes), so here every try failed: 20 seconds
+ * and more of a frozen window each time, a minute on a slower PC (issue #43). Now the first try fails at once; the game's way without the upscaler
+ * is what players have always had. */
+static ImportFn g_upscale_try;
+static void upscale_try_hook(Ctx *c, void *user) { (void)user; RET(1); }
 static void rate_install(void) {
     if (!tomo_hook(0x710028b2b8ull, rate_pick_hook, &g_rate_pick)) printf("display: the frame-rate pick hook is not installed (the game judges its frame time with the refresh wait in it)%c", 10);
+    if (!tomo_hook(0x7100ab7090ull, upscale_try_hook, &g_upscale_try)) printf("tomo: the face paint upscaler hook is not installed (opening the canvas takes a long time)%c", 10);
 }
 static void pointer_install(void) {
     if (getenv("TOMO_MOUSE") && getenv("TOMO_MOUSE")[0] == '0') return;
